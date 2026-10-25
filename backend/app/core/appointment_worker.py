@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from ..models import database as db
 from ..protocol.client import XiaoCanClient, XiaoCanRPCError, is_waf_blocked, get_waf_cooldown_seconds
