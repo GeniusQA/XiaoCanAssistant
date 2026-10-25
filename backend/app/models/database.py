@@ -1,0 +1,1763 @@
+# -*- coding: utf-8 -*-
+"""
+SQLite 数据库初始化与轻量 ORM 封装
+单文件零运维，自动建表
+"""
+import sqlite3
+import datetime
+import json
+import os
+import time
+import uuid
+from typing import List, Dict, Any, Optional
+
+DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+os.makedirs(DB_DIR, exist_ok=True)
+DB_PATH = os.path.join(DB_DIR, "xiaocan.db")
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 15000")
+    return conn
+
+
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+
+    # 企业级 SQLite 高并发调优：WAL 无锁并发读写、15s 防锁死超时、NORMAL 刷盘与 8MB 页缓存
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA synchronous = NORMAL")
+    c.execute("PRAGMA busy_timeout = 15000")
+    c.execute("PRAGMA cache_size = -8000")
+
+    # 1. 账号表 (无车位上限，永久激活)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS accounts (
+        key TEXT PRIMARY KEY,
+        silk_id TEXT,
+        nickname TEXT,
+        avatar TEXT,
+        token TEXT,
+        vip_level INTEGER DEFAULT 5,
+        city_code INTEGER DEFAULT 420100,
+        city_name TEXT DEFAULT '武汉',
+        longitude TEXT DEFAULT '114.305393',
+        latitude TEXT DEFAULT '30.593099',
+        expires_at TEXT DEFAULT '2099-12-31',
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at TEXT
+    )
+    """)
+
+    # 动态检查 accounts 补充官方原生字段 (严格对齐小蚕官方用户模型，不臆造自定义字段)
+    acc_cols = [r[1] for r in c.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "user_id" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN user_id TEXT DEFAULT ''")
+    if "is_plus" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN is_plus INTEGER DEFAULT 0")
+    if "phone" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN phone TEXT DEFAULT ''")
+    if "real_name" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN real_name TEXT DEFAULT ''")
+    if "vip_score" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN vip_score INTEGER DEFAULT 0")
+    if "vip_expired_at" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN vip_expired_at INTEGER DEFAULT 0")
+    if "silk" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN silk INTEGER DEFAULT 0")
+    if "withdrawing" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN withdrawing INTEGER DEFAULT 0")
+    if "withdraw_total" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN withdraw_total INTEGER DEFAULT 0")
+    if "completed_number" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN completed_number INTEGER DEFAULT 0")
+    if "yb_point" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN yb_point INTEGER DEFAULT 0")
+    if "unreceived_points" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN unreceived_points INTEGER DEFAULT 0")
+    if "notify_mode" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN notify_mode TEXT DEFAULT 'global'")
+    if "notify_config" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN notify_config TEXT DEFAULT '{}'")
+    if "client_mode" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN client_mode TEXT DEFAULT 'app'")
+    if "platform" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN platform TEXT DEFAULT 'xiaocan'")
+    if "saved_at" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN saved_at INTEGER DEFAULT 0")
+    if "last_claimed_at" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN last_claimed_at INTEGER DEFAULT 0")
+    if "last_claimed_count" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN last_claimed_count INTEGER DEFAULT 0")
+    if "last_claimed_details" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN last_claimed_details TEXT DEFAULT '[]'")
+    if "history_pool" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN history_pool TEXT DEFAULT '[]'")
+    if "meituan_token" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_token TEXT DEFAULT ''")
+    if "meituan_nickname" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_nickname TEXT DEFAULT ''")
+    if "meituan_saved_at" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_saved_at INTEGER DEFAULT 0")
+    if "meituan_last_claimed_at" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_last_claimed_at INTEGER DEFAULT 0")
+    if "meituan_last_claimed_count" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_last_claimed_count INTEGER DEFAULT 0")
+    if "meituan_last_claimed_details" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_last_claimed_details TEXT DEFAULT '[]'")
+    if "meituan_history_pool" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_history_pool TEXT DEFAULT '[]'")
+    if "meituan_is_active" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN meituan_is_active INTEGER DEFAULT 0")
+
+    # 2. 自动化任务开关与调度表
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS task_configs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_key TEXT,
+        task_id TEXT,
+        enabled INTEGER DEFAULT 0,
+        cron_time TEXT,
+        params TEXT,
+        UNIQUE(account_key, task_id)
+    )
+    """)
+
+    # 3. 店铺预约与抢单队列
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS store_appointments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_key TEXT,
+        store_id TEXT,
+        store_name TEXT,
+        promotion_id TEXT,
+        status TEXT DEFAULT 'pending',
+        early_ms INTEGER DEFAULT 500,
+        rebate_card_id TEXT,
+        redpack_mode INTEGER DEFAULT 0,
+        outcome TEXT,
+        created_at TEXT
+    )
+    """)
+
+    # 4. 运行日志表
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS job_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT,
+        account_key TEXT,
+        task_id TEXT,
+        status TEXT,
+        output TEXT,
+        created_at TEXT
+    )
+    """)
+
+    # 5. 系统与通知配置表
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """)
+
+    # 6. 霸王餐订单表
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_key TEXT,
+        order_sn TEXT UNIQUE,
+        platform_order_id TEXT,
+        store_id TEXT,
+        store_name TEXT,
+        platform TEXT DEFAULT 'meituan',
+        order_money REAL DEFAULT 0,
+        rebate_money REAL DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        condition TEXT DEFAULT '无需评价',
+        receipt_img TEXT,
+        reject_reason TEXT,
+        expire_time TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        promotion_order_id INTEGER DEFAULT 0,
+        platform_total_price REAL DEFAULT 0,
+        remark TEXT DEFAULT ''
+    )
+    """)
+
+    # 7. 美团官方账号表 (多账号独立管理，支持扫码登录与历史池)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS meituan_accounts (
+        key TEXT PRIMARY KEY,
+        nickname TEXT DEFAULT '美团用户',
+        avatar TEXT DEFAULT '',
+        token TEXT,
+        saved_at INTEGER DEFAULT 0,
+        last_claimed_at INTEGER DEFAULT 0,
+        last_claimed_count INTEGER DEFAULT 0,
+        last_claimed_details TEXT DEFAULT '[]',
+        is_active INTEGER DEFAULT 1,
+        history_pool TEXT DEFAULT '[]',
+        created_at TEXT,
+        updated_at TEXT
+    )
+    """)
+
+    # 动态检查补充 orders 字段
+    cols = [r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
+    if "promotion_order_id" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN promotion_order_id INTEGER DEFAULT 0")
+    if "order_time" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN order_time INTEGER DEFAULT 0")
+    if "store_icon" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN store_icon TEXT DEFAULT ''")
+    if "redpack_reward_num" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN redpack_reward_num REAL DEFAULT 0")
+    if "timeout_time" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN timeout_time INTEGER DEFAULT 0")
+    if "original_user_rebate" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN original_user_rebate REAL DEFAULT 0")
+    if "order_type" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN order_type INTEGER DEFAULT 0")
+    if "rebate_ratio" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN rebate_ratio REAL DEFAULT 0")
+    if "platform_total_price" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN platform_total_price REAL DEFAULT 0")
+    if "remark" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''")
+
+    # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
+    try:
+        c.execute("""
+            UPDATE orders
+            SET store_icon = (
+                SELECT o2.store_icon FROM orders o2
+                WHERE (o2.store_id = orders.store_id OR o2.store_name = orders.store_name)
+                  AND o2.store_icon IS NOT NULL
+                  AND o2.store_icon != ''
+                LIMIT 1
+            )
+            WHERE (store_icon IS NULL OR store_icon = '')
+        """)
+    except Exception:
+        pass
+
+    # 动态检查补充 store_appointments 调度与监控字段
+    apt_cols = [r[1] for r in c.execute("PRAGMA table_info(store_appointments)").fetchall()]
+    if "task_type" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN task_type TEXT DEFAULT 'countdown'")
+    if "start_time" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN start_time TEXT")
+    if "until_time" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN until_time TEXT")
+    if "notified_31m" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN notified_31m INTEGER DEFAULT 0")
+    if "notified_1m" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN notified_1m INTEGER DEFAULT 0")
+    if "check_interval" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN check_interval INTEGER DEFAULT 5")
+    if "platform" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN platform TEXT DEFAULT 'meituan'")
+    if "order_money" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN order_money REAL DEFAULT 0")
+    if "rebate_price" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN rebate_price REAL DEFAULT 0")
+    if "rebate_desc" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN rebate_desc TEXT")
+    if "rebate_type" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN rebate_type TEXT DEFAULT 'fixed'")
+    if "last_checked_at" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN last_checked_at TEXT")
+    if "log_id" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN log_id INTEGER DEFAULT 0")
+    if "store_icon" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN store_icon TEXT DEFAULT ''")
+    if "use_advance_card" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN use_advance_card INTEGER DEFAULT 0")
+    if "redpack_id" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN redpack_id TEXT DEFAULT ''")
+    if "redpack_name" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN redpack_name TEXT DEFAULT ''")
+    if "keyword" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN keyword TEXT DEFAULT ''")
+    if "match_mode" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN match_mode TEXT DEFAULT 'contains'")
+    if "min_rebate_price" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN min_rebate_price REAL DEFAULT 0")
+    if "min_rebate_rate" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN min_rebate_rate REAL DEFAULT 0")
+    if "rebate_mode_filter" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN rebate_mode_filter TEXT DEFAULT 'all'")
+    if "auto_stop_on_success" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN auto_stop_on_success INTEGER DEFAULT 1")
+    if "max_order_money" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN max_order_money REAL DEFAULT 0")
+
+    # 自动自愈 store_appointments 中缺失 store_icon 的记录 (从 orders 表或同店名同ID回填)
+    try:
+        c.execute("""
+            UPDATE store_appointments
+            SET store_icon = (
+                SELECT o.store_icon FROM orders o
+                WHERE (o.store_id = store_appointments.store_id OR o.store_name = store_appointments.store_name)
+                  AND o.store_icon IS NOT NULL
+                  AND o.store_icon != ''
+                LIMIT 1
+            )
+            WHERE (store_icon IS NULL OR store_icon = '')
+        """)
+    except Exception:
+        pass
+
+    # 历史 daily 综合任务平滑迁移：自动迁移至独立原子的 yb_sign 与 yb_task，彻底消除重复调用
+    try:
+        daily_enabled_keys = [
+            r[0] for r in c.execute("SELECT account_key FROM task_configs WHERE task_id = 'daily' AND enabled = 1").fetchall()
+        ]
+        for a_key in daily_enabled_keys:
+            c.execute("""
+                INSERT INTO task_configs (account_key, task_id, enabled, cron_time, params)
+                VALUES (?, 'yb_sign', 1, '08:10', '{}')
+                ON CONFLICT(account_key, task_id) DO UPDATE SET enabled = 1
+            """, (a_key,))
+            c.execute("""
+                INSERT INTO task_configs (account_key, task_id, enabled, cron_time, params)
+                VALUES (?, 'yb_task', 1, '08:05', '{}')
+                ON CONFLICT(account_key, task_id) DO UPDATE SET enabled = 1
+            """, (a_key,))
+        c.execute("UPDATE task_configs SET enabled = 0 WHERE task_id = 'daily'")
+    except Exception:
+        pass
+
+    try:
+        c.execute("""
+            DELETE FROM orders WHERE id NOT IN (
+                SELECT id FROM (
+                    SELECT id, promotion_order_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY promotion_order_id 
+                               ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC
+                           ) as rn
+                    FROM orders
+                    WHERE promotion_order_id > 0
+                ) WHERE rn = 1
+            ) AND promotion_order_id > 0 AND promotion_order_id IN (
+                SELECT promotion_order_id FROM orders WHERE promotion_order_id > 0 GROUP BY promotion_order_id HAVING COUNT(*) > 1
+            )
+        """)
+    except Exception:
+        pass
+
+    # 自动自愈：系统启动时，将历史异常退出或重启遗留的处于 running 状态的孤儿任务置为 aborted
+    try:
+        now_time = time.strftime('%H:%M:%S')
+        running_logs = c.execute("SELECT id, output FROM job_logs WHERE status = 'running'").fetchall()
+        for r in running_logs:
+            lid = r[0]
+            out = r[1] or ""
+            tail_msg = f"\n[{now_time}] 服务重启自愈: 系统服务已重启，历史执行中任务已自动置为中断终止。"
+            c.execute("UPDATE job_logs SET status = 'aborted', output = ? WHERE id = ?", (out.rstrip() + tail_msg, lid))
+    except Exception:
+        pass
+
+    # 账号平台标识自愈：确保所有小蚕账号 (key LIKE 'acc_%') 的 platform 始终为 'xiaocan'，严禁被篡改
+    c.execute("UPDATE accounts SET platform = 'xiaocan' WHERE key LIKE 'acc_%'")
+
+    # 仅将独立美团账号 (key LIKE 'mt_%') 同步至 accounts 表（若不存在），绝不覆盖小蚕账号
+    try:
+        mt_rows = c.execute("SELECT * FROM meituan_accounts WHERE key LIKE 'mt_%'").fetchall()
+        for r in mt_rows:
+            m = dict(r)
+            m_key = m["key"]
+            chk = c.execute("SELECT key FROM accounts WHERE key = ?", (m_key,)).fetchone()
+            if not chk:
+                c.execute("""
+                    INSERT INTO accounts (key, nickname, avatar, token, platform, is_active, saved_at, last_claimed_at, last_claimed_count, last_claimed_details, history_pool, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'meituan', ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    m_key,
+                    m.get("nickname") or "美团用户",
+                    m.get("avatar") or "",
+                    m.get("token") or "",
+                    int(m.get("is_active", 1)),
+                    int(m.get("saved_at", 0)),
+                    int(m.get("last_claimed_at", 0)),
+                    int(m.get("last_claimed_count", 0)),
+                    m.get("last_claimed_details") or "[]",
+                    m.get("history_pool") or "[]",
+                    m.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S"),
+                    m.get("updated_at") or time.strftime("%Y-%m-%d %H:%M:%S")
+                ))
+    except Exception:
+        pass
+
+    conn.commit()
+    conn.close()
+
+
+# 初始化建表
+init_db()
+
+
+# ---------------- 数据库便捷操作接口 ---------------- #
+
+def _format_account_row(d: Dict[str, Any]) -> Dict[str, Any]:
+    """统一解析账号字段中的 JSON 数据与默认平台标识"""
+    if isinstance(d.get("last_claimed_details"), str):
+        try:
+            d["last_claimed_details"] = json.loads(d["last_claimed_details"])
+        except Exception:
+            d["last_claimed_details"] = []
+    elif not d.get("last_claimed_details"):
+        d["last_claimed_details"] = []
+    if isinstance(d.get("history_pool"), str):
+        try:
+            d["history_pool"] = json.loads(d["history_pool"])
+        except Exception:
+            d["history_pool"] = []
+    elif not d.get("history_pool"):
+        d["history_pool"] = []
+    if isinstance(d.get("meituan_last_claimed_details"), str):
+        try:
+            d["meituan_last_claimed_details"] = json.loads(d["meituan_last_claimed_details"])
+        except Exception:
+            d["meituan_last_claimed_details"] = []
+    elif not d.get("meituan_last_claimed_details"):
+        d["meituan_last_claimed_details"] = []
+    if isinstance(d.get("meituan_history_pool"), str):
+        try:
+            d["meituan_history_pool"] = json.loads(d["meituan_history_pool"])
+        except Exception:
+            d["meituan_history_pool"] = []
+    elif not d.get("meituan_history_pool"):
+        d["meituan_history_pool"] = []
+    if not d.get("platform"):
+        d["platform"] = "xiaocan"
+    return d
+
+
+def get_all_accounts() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM accounts WHERE platform != 'meituan' ORDER BY created_at DESC").fetchall()
+        return [_format_account_row(dict(r)) for r in rows]
+
+
+def get_account_by_key(key: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM accounts WHERE key = ?", (key,)).fetchone()
+        return _format_account_row(dict(row)) if row else None
+
+
+get_account = get_account_by_key
+
+
+def find_account(
+    key: Optional[str] = None,
+    silk_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    token: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    # 根据 key, user_id, silk_id 或 token 查找已存在的小蚕账号，避免重复入库
+    with get_conn() as conn:
+        if key and str(key).strip():
+            row = conn.execute("SELECT * FROM accounts WHERE key = ?", (str(key).strip(),)).fetchone()
+            if row:
+                return dict(row)
+        if user_id and str(user_id).strip():
+            row = conn.execute("SELECT * FROM accounts WHERE user_id = ?", (str(user_id).strip(),)).fetchone()
+            if row:
+                return dict(row)
+        if silk_id and str(silk_id).strip():
+            row = conn.execute("SELECT * FROM accounts WHERE silk_id = ?", (str(silk_id).strip(),)).fetchone()
+            if row:
+                return dict(row)
+        if token and str(token).strip():
+            row = conn.execute("SELECT * FROM accounts WHERE token = ?", (str(token).strip(),)).fetchone()
+            if row:
+                return dict(row)
+            # 尝试从传入的 token 解码 UserId 并查重
+            try:
+                from ..core.jwt_utils import decode_jwt_payload, extract_user_id_from_payload
+                _, p, _ = decode_jwt_payload(str(token).strip())
+                jwt_uid = extract_user_id_from_payload(p)
+                if jwt_uid:
+                    row = conn.execute("SELECT * FROM accounts WHERE user_id = ?", (jwt_uid,)).fetchone()
+                    if row:
+                        return dict(row)
+            except Exception:
+                pass
+    return None
+
+
+def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
+    """保存或更新小蚕账号，具备完善的查重合并与用户配置保护能力"""
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 尝试自动从 JWT 提取真实的 UserId、Silk ID、有效期
+    token = (data.get("token") or "").strip()
+    user_id = str(data.get("user_id") or "").strip()
+    silk_id = str(data.get("silk_id") or "").strip()
+    exp_time = data.get("expires_at")
+
+    if token:
+        try:
+            from ..core.jwt_utils import decode_jwt_payload, extract_user_id_from_payload, extract_silk_id_from_payload
+            is_valid, payload, _ = decode_jwt_payload(token)
+            if is_valid and payload:
+                if not user_id:
+                    user_id = extract_user_id_from_payload(payload)
+                if not silk_id:
+                    silk_id = extract_silk_id_from_payload(payload)
+                exp = payload.get("exp")
+                if exp and not exp_time:
+                    exp_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(exp)))
+        except Exception:
+            pass
+
+    # 查找已有账号以实现无缝去重更新 (通过 key / user_id / silk_id / token 全方位查重)
+    existing = find_account(
+        key=data.get("key"),
+        silk_id=silk_id,
+        user_id=user_id,
+        token=token
+    )
+
+    # 确定唯一稳定的 key：优先沿用已有 key，否则以 user_id 或 silk_id 命名保证幂等
+    if existing:
+        key = existing["key"]
+    elif data.get("key"):
+        key = data["key"]
+    elif user_id:
+        key = f"acc_{user_id}"
+    elif silk_id:
+        key = f"acc_{silk_id}"
+    else:
+        key = f"acc_{uuid.uuid4().hex[:8]}"
+
+    # 昵称保护：如果新昵称为默认占位符而已有真实昵称，优先保留已有昵称
+    nickname = data.get("nickname") or (existing.get("nickname") if existing else "小蚕用户")
+    if (not nickname or nickname.startswith("小蚕用户") or nickname == "小蚕微信用户") and existing and existing.get("nickname") and not existing["nickname"].startswith("小蚕用户"):
+        nickname = existing["nickname"]
+
+    # 头像保护
+    avatar = data.get("avatar") or (existing.get("avatar") if existing else "")
+
+    # 会员等级与 PLUS 标识（严格对齐小蚕官方 vip_level_info 结构）
+    vip_level = data.get("vip_level") or (existing.get("vip_level") if existing else 1)
+    is_plus = int(data.get("is_plus", existing.get("is_plus", 0) if existing else 0))
+    vip_score = data.get("vip_score") or (existing.get("vip_score") if existing else 0)
+    vip_expired_at = data.get("vip_expired_at") or (existing.get("vip_expired_at") if existing else 0)
+    phone = data.get("phone") or (existing.get("phone") if existing else "")
+    real_name = data.get("real_name") or (existing.get("real_name") if existing else "")
+
+    # 城市与定位保护 (优先保留用户已设置的城市与经纬度，避免被默认值覆盖)
+    city_code = data.get("city_code") or (existing.get("city_code") if existing else 420100)
+    city_name = data.get("city_name") or (existing.get("city_name") if existing else "武汉")
+    longitude = data.get("longitude") or (existing.get("longitude") if existing else "114.305393")
+    latitude = data.get("latitude") or (existing.get("latitude") if existing else "30.593099")
+
+    # 真实官方资产字段保护
+    silk = int(data.get("silk", existing.get("silk", 0) if existing else 0))
+    withdrawing = int(data.get("withdrawing", existing.get("withdrawing", 0) if existing else 0))
+    withdraw_total = int(data.get("withdraw_total", existing.get("withdraw_total", 0) if existing else 0))
+    completed_number = int(data.get("completed_number", existing.get("completed_number", 0) if existing else 0))
+    yb_point = int(data.get("yb_point", existing.get("yb_point", 0) if existing else 0))
+    unreceived_points = int(data.get("unreceived_points", existing.get("unreceived_points", 0) if existing else 0))
+
+    # Silk ID 补全保护：若已有存在 silk_id，新包缺失时予以保留
+    final_silk_id = silk_id or (existing.get("silk_id") if existing else "")
+    final_user_id = user_id or (existing.get("user_id") if existing else "")
+    final_token = token or (existing.get("token") if existing else "")
+    final_expires_at = exp_time or (existing.get("expires_at") if existing else "2099-12-31")
+    client_mode = data.get("client_mode") or (existing.get("client_mode") if existing else "app")
+    created_at = existing.get("created_at") if existing else data.get("created_at", now)
+
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO accounts (key, user_id, silk_id, nickname, avatar, token, vip_level, is_plus, phone, real_name, vip_score, vip_expired_at, silk, withdrawing, withdraw_total, completed_number, yb_point, unreceived_points, city_code, city_name, longitude, latitude, expires_at, client_mode, is_active, created_at, updated_at)
+        VALUES (:key, :user_id, :silk_id, :nickname, :avatar, :token, :vip_level, :is_plus, :phone, :real_name, :vip_score, :vip_expired_at, :silk, :withdrawing, :withdraw_total, :completed_number, :yb_point, :unreceived_points, :city_code, :city_name, :longitude, :latitude, :expires_at, :client_mode, :is_active, :created_at, :updated_at)
+        ON CONFLICT(key) DO UPDATE SET
+            user_id=excluded.user_id,
+            silk_id=CASE WHEN excluded.silk_id != '' THEN excluded.silk_id ELSE accounts.silk_id END,
+            nickname=excluded.nickname,
+            avatar=excluded.avatar,
+            token=excluded.token,
+            vip_level=excluded.vip_level,
+            is_plus=excluded.is_plus,
+            phone=excluded.phone,
+            real_name=excluded.real_name,
+            vip_score=excluded.vip_score,
+            vip_expired_at=excluded.vip_expired_at,
+            silk=excluded.silk,
+            withdrawing=excluded.withdrawing,
+            withdraw_total=excluded.withdraw_total,
+            completed_number=excluded.completed_number,
+            yb_point=excluded.yb_point,
+            unreceived_points=excluded.unreceived_points,
+            city_code=excluded.city_code,
+            city_name=excluded.city_name,
+            longitude=excluded.longitude,
+            latitude=excluded.latitude,
+            expires_at=excluded.expires_at,
+            client_mode=COALESCE(excluded.client_mode, accounts.client_mode),
+            is_active=1,
+            updated_at=excluded.updated_at
+        """, {
+            "key": key,
+            "user_id": final_user_id,
+            "silk_id": final_silk_id,
+            "nickname": nickname,
+            "avatar": avatar,
+            "token": final_token,
+            "vip_level": vip_level,
+            "is_plus": is_plus,
+            "phone": phone,
+            "real_name": real_name,
+            "vip_score": vip_score,
+            "vip_expired_at": vip_expired_at,
+            "silk": silk,
+            "withdrawing": withdrawing,
+            "withdraw_total": withdraw_total,
+            "completed_number": completed_number,
+            "yb_point": yb_point,
+            "unreceived_points": unreceived_points,
+            "city_code": city_code,
+            "city_name": city_name,
+            "longitude": longitude,
+            "latitude": latitude,
+            "expires_at": final_expires_at,
+            "client_mode": client_mode,
+            "is_active": 1,
+            "created_at": created_at,
+            "updated_at": now
+        })
+        # 如果本次写入有 user_id，同时清理其他可能同属于同一个 user_id 的旧 key 重复行！
+        if final_user_id:
+            conn.execute("DELETE FROM accounts WHERE user_id = ? AND key != ?", (final_user_id, key))
+        conn.commit()
+
+    saved = get_account_by_key(key)
+    if saved:
+        saved["is_updated"] = bool(existing)
+    return saved
+
+
+def update_account_profile(key: str, profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """更新账号资料字段 (严格对齐官方字段)"""
+    allowed_fields = [
+        "silk_id", "nickname", "avatar", "vip_level", "is_plus",
+        "phone", "real_name", "vip_score", "vip_expired_at",
+        "silk", "withdrawing", "withdraw_total", "completed_number",
+        "yb_point", "unreceived_points",
+        "city_code", "city_name", "expires_at", "longitude", "latitude",
+        "notify_mode", "notify_config", "client_mode",
+        "meituan_token", "meituan_nickname", "meituan_saved_at",
+        "meituan_last_claimed_at", "meituan_last_claimed_count",
+        "meituan_last_claimed_details", "meituan_history_pool", "meituan_is_active"
+    ]
+    updates = []
+    params = {"key": key, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    for field in allowed_fields:
+        if field in profile:
+            updates.append(f"{field} = :{field}")
+            params[field] = profile[field]
+    if not updates:
+        return get_account_by_key(key)
+
+    sql = f"UPDATE accounts SET {', '.join(updates)}, updated_at = :updated_at WHERE key = :key"
+    with get_conn() as conn:
+        conn.execute(sql, params)
+        conn.commit()
+    return get_account_by_key(key)
+
+
+def get_account_notify_config(key: str) -> Dict[str, Any]:
+    """获取指定账号的通知模式及配置"""
+    acc = get_account_by_key(key)
+    if not acc:
+        return {"notify_mode": "global", "notify_config": {}}
+    mode = acc.get("notify_mode") or "global"
+    raw_cfg = acc.get("notify_config") or "{}"
+    cfg = {}
+    if isinstance(raw_cfg, str) and raw_cfg.strip():
+        try:
+            cfg = json.loads(raw_cfg)
+        except Exception:
+            cfg = {}
+    elif isinstance(raw_cfg, dict):
+        cfg = raw_cfg
+    return {"notify_mode": mode, "notify_config": cfg}
+
+
+def set_account_notify_config(key: str, mode: str, config: Dict[str, Any]) -> bool:
+    """更新指定账号的通知模式及配置"""
+    cfg_str = json.dumps(config, ensure_ascii=False) if isinstance(config, dict) else str(config or "{}")
+    res = update_account_profile(key, {
+        "notify_mode": mode or "global",
+        "notify_config": cfg_str
+    })
+    return res is not None
+
+
+
+def delete_account(key: str) -> bool:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM accounts WHERE key = ?", (key,))
+        conn.execute("DELETE FROM meituan_accounts WHERE key = ?", (key,))
+        conn.execute("DELETE FROM task_configs WHERE account_key = ?", (key,))
+        conn.commit()
+        return True
+
+
+def get_task_configs(account_key: str) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM task_configs WHERE account_key = ?", (account_key,)).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("params"), str):
+                try:
+                    d["params"] = json.loads(d["params"])
+                except Exception:
+                    d["params"] = {}
+            elif not d.get("params"):
+                d["params"] = {}
+            result.append(d)
+        return result
+
+
+def save_task_config(account_key: str, task_id: str, enabled: bool, cron_time: Optional[str] = None, params: Optional[Dict[str, Any]] = None):
+    with get_conn() as conn:
+        params_str = json.dumps(params) if params is not None else None
+        conn.execute("""
+        INSERT INTO task_configs (account_key, task_id, enabled, cron_time, params)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(account_key, task_id) DO UPDATE SET
+            enabled=excluded.enabled,
+            cron_time=COALESCE(excluded.cron_time, task_configs.cron_time),
+            params=COALESCE(excluded.params, task_configs.params)
+        """, (account_key, task_id, 1 if enabled else 0, cron_time, params_str))
+        conn.commit()
+
+
+def add_job_log(job_id: str, account_key: str, task_id: str, status: str, output: str) -> int:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute("""
+        INSERT INTO job_logs (job_id, account_key, task_id, status, output, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (job_id, account_key, task_id, status, output, now))
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_job_log(log_id: int, status: Optional[str] = None, output: Optional[str] = None) -> bool:
+    """动态更新某条日志的状态与详细步骤输出"""
+    if not log_id:
+        return False
+    updates = []
+    vals = []
+    if status is not None:
+        updates.append("status = ?")
+        vals.append(status)
+    if output is not None:
+        updates.append("output = ?")
+        vals.append(output)
+    if not updates:
+        return False
+    vals.append(log_id)
+    with get_conn() as conn:
+        conn.execute(f"UPDATE job_logs SET {', '.join(updates)} WHERE id = ?", vals)
+        conn.commit()
+        return True
+
+
+def auto_clean_stale_running_jobs():
+    """运行时自愈：对于 running 状态超过 10 分钟未更新的普通短任务判定为超时僵尸任务，自动置为 aborted；但必须豁免合法长周期的预约与监听任务"""
+    try:
+        with get_conn() as conn:
+            cur_ts = int(time.time())
+            stale_threshold = 600  # 10 分钟
+            # 1. 扫描处于 running 状态的任务，左连接 store_appointments 查验实际预约状态
+            rows = conn.execute("""
+            SELECT j.id, j.created_at, j.output, j.task_id, sa.status as apt_status
+            FROM job_logs j
+            LEFT JOIN store_appointments sa ON sa.log_id = j.id
+            WHERE j.status = 'running'
+            """).fetchall()
+            for r in rows:
+                task_id = r["task_id"]
+                apt_status = r["apt_status"]
+                # 豁免：若属于定时预约或名额监听等长周期任务，且对应预约依然处于活跃等待中，绝对严禁误杀
+                if task_id in ("store_appoint", "store_monitor", "name_monitor", "keyword", "keyword_monitor"):
+                    if apt_status in ("pending", "scheduled", "primed", "monitoring", "running") or apt_status is None:
+                        continue
+
+                c_at = r["created_at"]
+                try:
+                    c_ts = int(time.mktime(time.strptime(c_at, "%Y-%m-%d %H:%M:%S")))
+                    if cur_ts - c_ts > stale_threshold:
+                        old_out = r["output"] or ""
+                        now_str = time.strftime('%H:%M:%S')
+                        new_out = old_out.rstrip() + f"\n[{now_str}] 执行超时自愈: 任务运行已超过 10 分钟未响应，已被系统自动置为中断终止。"
+                        conn.execute("UPDATE job_logs SET status = 'aborted', output = ? WHERE id = ?", (new_out, r["id"]))
+                except Exception:
+                    pass
+
+            # 2. 自愈纠正：若之前被误打为 aborted 但底层预约依然活跃的日志，自动恢复为 running 状态并清洗误判文本
+            mis_aborted = conn.execute("""
+            SELECT j.id, j.output
+            FROM job_logs j
+            JOIN store_appointments sa ON sa.log_id = j.id
+            WHERE j.status = 'aborted' AND sa.status IN ('pending', 'scheduled', 'primed', 'monitoring', 'running')
+            """).fetchall()
+            for m in mis_aborted:
+                m_out = m["output"] or ""
+                # 剔除误杀日志中的执行超时自愈行
+                clean_lines = [l for l in m_out.split("\n") if "执行超时自愈: 任务运行已超过 10 分钟未响应" not in l]
+                conn.execute("UPDATE job_logs SET status = 'running', output = ? WHERE id = ?", ("\n".join(clean_lines).strip(), m["id"]))
+
+            conn.commit()
+    except Exception:
+        pass
+
+
+def get_job_logs(account_key: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    auto_clean_stale_running_jobs()
+    with get_conn() as conn:
+        if account_key:
+            rows = conn.execute("SELECT * FROM job_logs WHERE account_key = ? ORDER BY id DESC LIMIT ?", (account_key, limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM job_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def clear_job_logs(account_key: Optional[str] = None):
+    with get_conn() as conn:
+        if account_key:
+            conn.execute("DELETE FROM job_logs WHERE account_key = ?", (account_key,))
+        else:
+            conn.execute("DELETE FROM job_logs")
+        conn.commit()
+
+
+def get_appointments(account_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        if account_key:
+            rows = conn.execute("SELECT * FROM store_appointments WHERE account_key = ? ORDER BY id DESC", (account_key,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM store_appointments ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_appointment_by_id(aid: int) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM store_appointments WHERE id = ?", (aid,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_active_appointments() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute("""
+        SELECT * FROM store_appointments 
+        WHERE status IN ('pending', 'scheduled', 'primed', 'monitoring')
+        ORDER BY id ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_appointment(data: Dict[str, Any]) -> int:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    status = data.get("status")
+    if not status:
+        status = "monitoring" if data.get("task_type") in ("monitor", "name_monitor", "keyword") else "scheduled"
+
+    store_icon = (data.get("store_icon") or data.get("icon") or "").strip()
+    with get_conn() as conn:
+        if not store_icon:
+            s_id = str(data.get("store_id", "")).strip()
+            s_name = (data.get("store_name") or "").strip()
+            row = conn.execute(
+                "SELECT store_icon FROM orders WHERE (store_id = ? OR store_name = ?) AND store_icon IS NOT NULL AND store_icon != '' LIMIT 1",
+                (s_id, s_name)
+            ).fetchone()
+            if row and row["store_icon"]:
+                store_icon = row["store_icon"]
+
+        cur = conn.execute("""
+        INSERT INTO store_appointments (
+            account_key, store_id, store_name, store_icon, promotion_id, status, 
+            early_ms, rebate_card_id, redpack_mode, outcome, created_at,
+            task_type, start_time, until_time, notified_31m, notified_1m,
+            check_interval, platform, order_money, rebate_price, rebate_desc, rebate_type, log_id,
+            use_advance_card, redpack_id, redpack_name,
+            keyword, match_mode, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data["account_key"],
+            str(data.get("store_id", "")),
+            data.get("store_name", "店铺活动"),
+            store_icon,
+            str(data["promotion_id"]),
+            status,
+            int(data.get("early_ms", 500)),
+            data.get("rebate_card_id", ""),
+            int(data.get("redpack_mode", 0)),
+            data.get("outcome", ""),
+            now,
+            data.get("task_type", "countdown"),
+            data.get("start_time", ""),
+            data.get("until_time", ""),
+            int(data.get("notified_31m", 0)),
+            int(data.get("notified_1m", 0)),
+            int(data.get("check_interval", 5)),
+            data.get("platform", "meituan"),
+            float(data.get("order_money", 0.0)),
+            float(data.get("rebate_price", 0.0)),
+            data.get("rebate_desc", ""),
+            data.get("rebate_type", "fixed"),
+            int(data.get("log_id") or 0),
+            int(data.get("use_advance_card") or 0),
+            str(data.get("redpack_id") or ""),
+            str(data.get("redpack_name") or ""),
+            str(data.get("keyword") or ""),
+            str(data.get("match_mode") or "contains"),
+            float(data.get("min_rebate_price") or 0.0),
+            float(data.get("min_rebate_rate") or 0.0),
+            str(data.get("rebate_mode_filter") or "all"),
+            int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1),
+            float(data.get("max_order_money") or 0.0)
+        ))
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_appointment(aid: int, fields: Dict[str, Any]) -> bool:
+    if not fields:
+        return False
+    keys = list(fields.keys())
+    set_clause = ", ".join([f"{k} = ?" for k in keys])
+    vals = [fields[k] for k in keys] + [aid]
+    with get_conn() as conn:
+        conn.execute(f"UPDATE store_appointments SET {set_clause} WHERE id = ?", vals)
+        conn.commit()
+        return True
+
+
+def delete_appointment(aid: int) -> bool:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM store_appointments WHERE id = ?", (aid,))
+        conn.commit()
+        return True
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+
+def set_setting(key: str, value: Any):
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (key, json.dumps(value)))
+        conn.commit()
+
+
+# ---------------- 霸王餐订单操作接口 ---------------- #
+
+def deduplicate_orders() -> int:
+    """
+    自动自愈历史重复订单记录：
+    若存在相同的 promotion_order_id > 0，保留已绑定单号或状态已流转的一条，删除未绑定单号的冗余 pending 幽灵记录。
+    """
+    cleaned = 0
+    try:
+        with get_conn() as conn:
+            dups = conn.execute("""
+                SELECT promotion_order_id FROM orders 
+                WHERE promotion_order_id > 0 
+                GROUP BY promotion_order_id HAVING COUNT(*) > 1
+            """).fetchall()
+            for d in dups:
+                pid = d["promotion_order_id"]
+                rows = conn.execute(
+                    "SELECT id, order_sn, platform_order_id, status FROM orders WHERE promotion_order_id = ? ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC",
+                    (pid,)
+                ).fetchall()
+                if len(rows) > 1:
+                    keep_id = rows[0]["id"]
+                    conn.execute("DELETE FROM orders WHERE promotion_order_id = ? AND id != ?", (pid, keep_id))
+                    cleaned += (len(rows) - 1)
+            conn.commit()
+    except Exception:
+        pass
+    return cleaned
+
+
+def auto_cancel_expired_orders(account_key: Optional[str] = None) -> int:
+    """
+    自动检测并批量更新所有已超时的待处理订单为已取消 (cancelled)。
+    判定规则：
+    1. status == 'pending' 且 (timeout_time > 0 且 timeout_time < 当前时间戳)
+    2. 或 status == 'pending' 且 (expire_time != '' 且 expire_time < 当前日期时间)
+    3. 或未设置 timeout_time / expire_time 但已超过 2 小时未同步且未绑定单号的待处理记录
+    """
+    deduplicate_orders()
+
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = int(time.time())
+    sql = """
+        UPDATE orders
+        SET status = 'cancelled', updated_at = :now_str
+        WHERE status = 'pending' AND (
+            (timeout_time > 0 AND timeout_time < :now_ts) OR
+            (expire_time != '' AND expire_time < :now_str) OR
+            ((timeout_time <= 0 OR timeout_time IS NULL) AND (expire_time = '' OR expire_time IS NULL) AND platform_order_id = '' AND order_time > 0 AND (:now_ts - order_time) > 7200)
+        )
+    """
+    params: Dict[str, Any] = {"now_str": now_str, "now_ts": now_ts}
+    if account_key:
+        sql += " AND account_key = :account_key"
+        params["account_key"] = account_key
+    try:
+        with get_conn() as conn:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+    except Exception:
+        return 0
+
+
+def get_orders(
+    account_key: Optional[str] = None,
+    status: Optional[str] = None,
+    platform: Optional[str] = None,
+    keyword: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    # 查询前先执行过期超时订单自动自愈与取消
+    auto_cancel_expired_orders(account_key=account_key)
+
+    sql = "SELECT * FROM orders WHERE 1=1"
+    params: Dict[str, Any] = {}
+    if account_key:
+        sql += " AND account_key = :account_key"
+        params["account_key"] = account_key
+    if status and status != "all":
+        sql += " AND status = :status"
+        params["status"] = status
+    if platform and platform != "all":
+        if platform in ("jingdong", "jd"):
+            sql += " AND platform IN ('jingdong', 'jd')"
+        elif platform in ("eleme", "taobao"):
+            sql += " AND platform IN ('eleme', 'taobao')"
+        else:
+            sql += " AND platform = :platform"
+            params["platform"] = platform
+    if keyword:
+        sql += " AND (store_name LIKE :kw OR order_sn LIKE :kw OR platform_order_id LIKE :kw)"
+        params["kw"] = f"%{keyword}%"
+    sql += " ORDER BY order_time DESC, created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    params["limit"] = limit
+    params["offset"] = offset
+
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_order_by_id(order_id: int) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    promo_id = int(data.get("promotion_order_id") or 0)
+    sn = str(data.get("order_sn") or "")
+    with get_conn() as conn:
+        existing = None
+        if promo_id > 0:
+            existing = conn.execute(
+                "SELECT id, order_sn, platform_order_id, status FROM orders WHERE promotion_order_id = ? ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC LIMIT 1",
+                (promo_id,)
+            ).fetchone()
+        if not existing and sn:
+            existing = conn.execute(
+                "SELECT id, order_sn, platform_order_id, status FROM orders WHERE order_sn = ? LIMIT 1",
+                (sn,)
+            ).fetchone()
+
+        if existing:
+            target_id = existing["id"]
+            # 优先采用更长/更规范的官方订单号 (如 202610131541802692184 优于 802692184)
+            chosen_sn = sn if (len(sn) >= len(existing["order_sn"]) or existing["order_sn"].isdigit()) else existing["order_sn"]
+            chosen_plat_id = (data.get("platform_order_id") or "").strip() or existing["platform_order_id"] or ""
+            new_status = data.get("status", "pending")
+            if existing["status"] != "pending" and new_status == "pending":
+                new_status = existing["status"]
+
+            conn.execute("""
+            UPDATE orders SET
+                order_sn = :order_sn,
+                promotion_order_id = :promotion_order_id,
+                platform_order_id = :platform_order_id,
+                store_id = :store_id,
+                store_name = :store_name,
+                store_icon = :store_icon,
+                platform = :platform,
+                order_money = :order_money,
+                rebate_money = :rebate_money,
+                original_user_rebate = :original_user_rebate,
+                redpack_reward_num = :redpack_reward_num,
+                timeout_time = :timeout_time,
+                status = :status,
+                condition = :condition,
+                receipt_img = :receipt_img,
+                reject_reason = :reject_reason,
+                expire_time = :expire_time,
+                order_time = :order_time,
+                order_type = :order_type,
+                rebate_ratio = :rebate_ratio,
+                platform_total_price = :platform_total_price,
+                remark = :remark,
+                updated_at = :updated_at
+            WHERE id = :id
+            """, {
+                "id": target_id,
+                "order_sn": chosen_sn,
+                "promotion_order_id": promo_id or int(data.get("promotion_order_id") or 0),
+                "platform_order_id": chosen_plat_id,
+                "store_id": str(data.get("store_id", "")),
+                "store_name": data.get("store_name", ""),
+                "store_icon": data.get("store_icon", ""),
+                "platform": data.get("platform", "meituan"),
+                "order_money": float(data.get("order_money", 0)),
+                "rebate_money": float(data.get("rebate_money", 0)),
+                "original_user_rebate": float(data.get("original_user_rebate", 0)),
+                "redpack_reward_num": float(data.get("redpack_reward_num", 0)),
+                "timeout_time": int(data.get("timeout_time") or 0),
+                "status": new_status,
+                "condition": data.get("condition", "无需评价"),
+                "receipt_img": data.get("receipt_img", ""),
+                "reject_reason": data.get("reject_reason", ""),
+                "expire_time": data.get("expire_time", ""),
+                "updated_at": now,
+                "order_time": int(data.get("order_time") or 0),
+                "order_type": int(data.get("order_type") or 0),
+                "rebate_ratio": float(data.get("rebate_ratio") or 0),
+                "platform_total_price": float(data.get("platform_total_price") or 0),
+                "remark": data.get("remark", "")
+            })
+            if promo_id > 0:
+                conn.execute(
+                    "DELETE FROM orders WHERE promotion_order_id = ? AND id != ?",
+                    (promo_id, target_id)
+                )
+            conn.commit()
+            return get_order_by_id(target_id)
+
+        cursor = conn.execute("""
+        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, order_type, rebate_ratio, platform_total_price, remark)
+        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :order_type, :rebate_ratio, :platform_total_price, :remark)
+        ON CONFLICT(order_sn) DO UPDATE SET
+            promotion_order_id = excluded.promotion_order_id,
+            platform_order_id = excluded.platform_order_id,
+            store_name = excluded.store_name,
+            store_icon = excluded.store_icon,
+            status = excluded.status,
+            order_money = excluded.order_money,
+            rebate_money = excluded.rebate_money,
+            original_user_rebate = excluded.original_user_rebate,
+            redpack_reward_num = excluded.redpack_reward_num,
+            timeout_time = excluded.timeout_time,
+            receipt_img = excluded.receipt_img,
+            reject_reason = excluded.reject_reason,
+            order_time = excluded.order_time,
+            expire_time = excluded.expire_time,
+            condition = excluded.condition,
+            order_type = excluded.order_type,
+            rebate_ratio = excluded.rebate_ratio,
+            platform_total_price = excluded.platform_total_price,
+            remark = excluded.remark,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at
+        """, {
+            "account_key": data.get("account_key", ""),
+            "order_sn": data.get("order_sn", f"XC{int(time.time()*1000)}"),
+            "promotion_order_id": int(data.get("promotion_order_id") or 0),
+            "platform_order_id": data.get("platform_order_id", ""),
+            "store_id": str(data.get("store_id", "")),
+            "store_name": data.get("store_name", ""),
+            "store_icon": data.get("store_icon", ""),
+            "platform": data.get("platform", "meituan"),
+            "order_money": float(data.get("order_money", 0)),
+            "rebate_money": float(data.get("rebate_money", 0)),
+            "original_user_rebate": float(data.get("original_user_rebate", 0)),
+            "redpack_reward_num": float(data.get("redpack_reward_num", 0)),
+            "timeout_time": int(data.get("timeout_time") or 0),
+            "status": data.get("status", "pending"),
+            "condition": data.get("condition", "无需评价"),
+            "receipt_img": data.get("receipt_img", ""),
+            "reject_reason": data.get("reject_reason", ""),
+            "expire_time": data.get("expire_time", ""),
+            "created_at": data.get("created_at", now),
+            "updated_at": now,
+            "order_time": int(data.get("order_time") or 0),
+            "order_type": int(data.get("order_type") or 0),
+            "rebate_ratio": float(data.get("rebate_ratio") or 0),
+            "platform_total_price": float(data.get("platform_total_price") or 0),
+            "remark": data.get("remark", "")
+        })
+        conn.commit()
+        last_id = cursor.lastrowid
+        return get_order_by_id(last_id) if last_id else None
+
+
+def update_order(order_id: int, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    allowed = [
+        "platform_order_id", "status", "receipt_img", "reject_reason",
+        "order_money", "rebate_money", "original_user_rebate",
+        "redpack_reward_num", "timeout_time", "store_icon"
+    ]
+    updates = []
+    params: Dict[str, Any] = {"id": order_id, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    for k in allowed:
+        if k in data:
+            updates.append(f"{k} = :{k}")
+            params[k] = data[k]
+    if not updates:
+        return get_order_by_id(order_id)
+    sql = f"UPDATE orders SET {', '.join(updates)}, updated_at = :updated_at WHERE id = :id"
+    with get_conn() as conn:
+        conn.execute(sql, params)
+        conn.commit()
+    return get_order_by_id(order_id)
+
+
+def delete_order(order_id: int) -> bool:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+        conn.commit()
+    return True
+
+
+def get_order_stats(account_key: Optional[str] = None) -> Dict[str, Any]:
+    auto_cancel_expired_orders(account_key=account_key)
+    with get_conn() as conn:
+        sql = "SELECT status, order_money, rebate_money FROM orders WHERE 1=1"
+        params: Dict[str, Any] = {}
+        if account_key:
+            sql += " AND account_key = :account_key"
+            params["account_key"] = account_key
+        rows = conn.execute(sql, params).fetchall()
+
+    total_orders = len([r for r in rows if r["status"] != "cancelled"])
+    completed_orders = sum(1 for r in rows if r["status"] == "completed")
+    pending_orders = sum(1 for r in rows if r["status"] in ("pending", "auditing"))
+    total_rebate = sum(r["rebate_money"] for r in rows if r["status"] == "completed")
+    pending_rebate = sum(r["rebate_money"] for r in rows if r["status"] in ("pending", "auditing"))
+    total_spent = sum(r["order_money"] for r in rows if r["status"] == "completed")
+
+    return {
+        "total_orders": total_orders,
+        "completed_orders": completed_orders,
+        "pending_orders": pending_orders,
+        "total_rebate": round(total_rebate, 2),
+        "pending_rebate": round(pending_rebate, 2),
+        "total_spent": round(total_spent, 2)
+    }
+
+
+def get_dashboard_chart_data(account_key: Optional[str] = None) -> Dict[str, Any]:
+    auto_cancel_expired_orders(account_key=account_key)
+    with get_conn() as conn:
+        sql = "SELECT status, platform, order_money, rebate_money, created_at, order_time FROM orders WHERE 1=1"
+        params: Dict[str, Any] = {}
+        if account_key:
+            sql += " AND account_key = :account_key"
+            params["account_key"] = account_key
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    today = datetime.date.today()
+    days_map = {}
+    for i in range(6, -1, -1):
+        d = today - datetime.timedelta(days=i)
+        d_str = d.strftime("%m-%d")
+        days_map[d.strftime("%Y-%m-%d")] = {
+            "date": d_str,
+            "full_date": d.strftime("%Y-%m-%d"),
+            "rebate": 0.0,
+            "orders": 0,
+            "spent": 0.0
+        }
+
+    status_counts = {
+        "completed": 0,
+        "auditing": 0,
+        "pending": 0,
+        "rejected": 0,
+        "cancelled": 0
+    }
+    platform_counts = {
+        "meituan": 0,
+        "eleme": 0,
+        "jingdong": 0
+    }
+
+    today_str = today.strftime("%Y-%m-%d")
+    today_rebate = 0.0
+    today_orders = 0
+    today_savings_retail = 0.0
+    today_completed_orders = 0
+    today_completed_rebate = 0.0
+    today_pending_orders = 0
+    today_pending_rebate = 0.0
+
+    for r in rows:
+        st = r.get("status") or "pending"
+        plat = r.get("platform") or "meituan"
+        if plat == "jd":
+            plat = "jingdong"
+        elif plat == "taobao":
+            plat = "eleme"
+        rebate = float(r.get("rebate_money") or 0.0)
+        spent = float(r.get("order_money") or 0.0)
+
+        if st in status_counts:
+            status_counts[st] += 1
+        else:
+            status_counts["pending"] += 1
+
+        if plat in platform_counts:
+            platform_counts[plat] += 1
+        else:
+            platform_counts["meituan"] += 1
+
+        row_date = None
+        c_at = r.get("created_at") or ""
+        if len(c_at) >= 10:
+            row_date = c_at[:10]
+        elif r.get("order_time"):
+            try:
+                row_date = datetime.datetime.fromtimestamp(r["order_time"]).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        if row_date in days_map:
+            if st != "cancelled":
+                days_map[row_date]["orders"] += 1
+                days_map[row_date]["spent"] = round(days_map[row_date]["spent"] + spent, 2)
+            if st == "completed":
+                days_map[row_date]["rebate"] = round(days_map[row_date]["rebate"] + rebate, 2)
+
+        if row_date == today_str:
+            if st != "cancelled":
+                today_orders += 1
+            if st == "completed":
+                today_completed_orders += 1
+                today_completed_rebate = round(today_completed_rebate + rebate, 2)
+                today_savings_retail = round(today_savings_retail + spent, 2)
+            elif st in ("pending", "auditing"):
+                today_pending_orders += 1
+                today_pending_rebate = round(today_pending_rebate + rebate, 2)
+
+    trend_list = [days_map[k] for k in sorted(days_map.keys())]
+
+    status_dist = [
+        {"name": "已到账", "value": status_counts["completed"], "color": "#10B981"},
+        {"name": "审核中", "value": status_counts["auditing"], "color": "#3B82F6"},
+        {"name": "待提交", "value": status_counts["pending"], "color": "#F59E0B"},
+        {"name": "已驳回", "value": status_counts["rejected"], "color": "#EF4444"},
+        {"name": "已取消", "value": status_counts["cancelled"], "color": "#9CA3AF"},
+    ]
+
+    platform_dist = [
+        {"name": "美团外卖", "value": platform_counts["meituan"], "color": "#FFC300"},
+        {"name": "饿了么/淘宝", "value": platform_counts["eleme"], "color": "#0091FF"},
+        {"name": "京东外卖", "value": platform_counts["jingdong"], "color": "#E1251B"},
+    ]
+
+    return {
+        "trend": trend_list,
+        "status_distribution": status_dist,
+        "platform_distribution": platform_dist,
+        "today_summary": {
+            "today_rebate": today_completed_rebate,
+            "today_orders": today_orders,
+            "today_completed_orders": today_completed_orders,
+            "today_pending_orders": today_pending_orders,
+            "today_savings": today_completed_rebate,
+            "today_savings_retail": today_savings_retail,
+        }
+    }
+
+
+# ---------------- 美团官方账号操作接口 ---------------- #
+
+def get_all_meituan_accounts() -> List[Dict[str, Any]]:
+    """
+    返回所有拥有美团领券凭证的账号列表：
+    优先收集已绑定美团的小蚕账号，其次兼容未关联的独立美团账号。
+    """
+    with get_conn() as conn:
+        result = []
+        # 1. 查询绑定了美团的小蚕账号
+        xiaocan_rows = conn.execute("""
+            SELECT * FROM accounts 
+            WHERE meituan_token IS NOT NULL AND meituan_token != '' AND platform != 'meituan'
+        """).fetchall()
+        for r in xiaocan_rows:
+            d = _format_account_row(dict(r))
+            result.append({
+                "key": d["key"],
+                "account_key": d["key"],
+                "nickname": d.get("meituan_nickname") or f"美团 ({d.get('nickname')})",
+                "token": d["meituan_token"],
+                "saved_at": d.get("meituan_saved_at") or 0,
+                "last_claimed_at": d.get("meituan_last_claimed_at") or 0,
+                "last_claimed_count": d.get("meituan_last_claimed_count") or 0,
+                "last_claimed_details": d.get("meituan_last_claimed_details") or [],
+                "is_active": d.get("meituan_is_active", 1),
+                "history_pool": d.get("meituan_history_pool") or [],
+                "is_bound_to_xiaocan": True,
+                "xiaocan_nickname": d.get("nickname")
+            })
+
+        # 2. 查询独立 meituan_accounts (未绑定的)
+        mt_rows = conn.execute("SELECT * FROM meituan_accounts ORDER BY created_at ASC").fetchall()
+        bound_keys = {item["key"] for item in result}
+        for r in mt_rows:
+            d = dict(r)
+            if d["key"] in bound_keys:
+                continue
+            if isinstance(d.get("last_claimed_details"), str):
+                try:
+                    d["last_claimed_details"] = json.loads(d["last_claimed_details"])
+                except Exception:
+                    d["last_claimed_details"] = []
+            if isinstance(d.get("history_pool"), str):
+                try:
+                    d["history_pool"] = json.loads(d["history_pool"])
+                except Exception:
+                    d["history_pool"] = []
+            d["is_bound_to_xiaocan"] = False
+            result.append(d)
+        return result
+
+
+def get_meituan_account(key: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM meituan_accounts WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if isinstance(d.get("last_claimed_details"), str):
+            try:
+                d["last_claimed_details"] = json.loads(d["last_claimed_details"])
+            except Exception:
+                d["last_claimed_details"] = []
+        elif not d.get("last_claimed_details"):
+            d["last_claimed_details"] = []
+        if isinstance(d.get("history_pool"), str):
+            try:
+                d["history_pool"] = json.loads(d["history_pool"])
+            except Exception:
+                d["history_pool"] = []
+        elif not d.get("history_pool"):
+            d["history_pool"] = []
+        return d
+
+
+def save_meituan_account(data: Dict[str, Any]) -> Dict[str, Any]:
+    key = str(data.get("key") or "").strip()
+    if not key:
+        key = f"mt_acc_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = int(time.time())
+    existing = get_meituan_account(key)
+
+    nickname = data.get("nickname") or (existing.get("nickname") if existing else f"美团账号 {key[-4:]}")
+    avatar = data.get("avatar") or (existing.get("avatar") if existing else "")
+    token = data.get("token") or (existing.get("token") if existing else "")
+    saved_at = int(data.get("saved_at") or now_ts)
+    last_claimed_at = int(data.get("last_claimed_at") or (existing.get("last_claimed_at") if existing else 0))
+    last_claimed_count = int(data.get("last_claimed_count") or (existing.get("last_claimed_count") if existing else 0))
+    is_active = int(data.get("is_active") if data.get("is_active") is not None else (existing.get("is_active") if existing else 1))
+
+    # 维护历史池 (最多保留 5 份历史 token)
+    pool = existing.get("history_pool") or [] if existing else []
+    if token and token not in pool:
+        pool.append(token)
+        pool = pool[-5:]
+    if data.get("history_pool") and isinstance(data["history_pool"], list):
+        for t in data["history_pool"]:
+            if t and t not in pool:
+                pool.append(t)
+        pool = pool[-5:]
+
+    details_str = json.dumps(data.get("last_claimed_details") or (existing.get("last_claimed_details") if existing else []), ensure_ascii=False)
+    pool_str = json.dumps(pool, ensure_ascii=False)
+
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO meituan_accounts (
+            key, nickname, avatar, token, saved_at, last_claimed_at, 
+            last_claimed_count, last_claimed_details, is_active, history_pool, created_at, updated_at
+        )
+        VALUES (:key, :nickname, :avatar, :token, :saved_at, :last_claimed_at, 
+                :last_claimed_count, :last_claimed_details, :is_active, :history_pool, :created_at, :updated_at)
+        ON CONFLICT(key) DO UPDATE SET
+            nickname = excluded.nickname,
+            avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE meituan_accounts.avatar END,
+            token = CASE WHEN excluded.token != '' THEN excluded.token ELSE meituan_accounts.token END,
+            saved_at = CASE WHEN excluded.token != '' THEN excluded.saved_at ELSE meituan_accounts.saved_at END,
+            last_claimed_at = CASE WHEN excluded.last_claimed_at > 0 THEN excluded.last_claimed_at ELSE meituan_accounts.last_claimed_at END,
+            last_claimed_count = CASE WHEN excluded.last_claimed_count > 0 THEN excluded.last_claimed_count ELSE meituan_accounts.last_claimed_count END,
+            last_claimed_details = CASE WHEN excluded.last_claimed_details != '[]' THEN excluded.last_claimed_details ELSE meituan_accounts.last_claimed_details END,
+            is_active = excluded.is_active,
+            history_pool = excluded.history_pool,
+            updated_at = excluded.updated_at
+        """, {
+            "key": key,
+            "nickname": nickname,
+            "avatar": avatar,
+            "token": token,
+            "saved_at": saved_at,
+            "last_claimed_at": last_claimed_at,
+            "last_claimed_count": last_claimed_count,
+            "last_claimed_details": details_str,
+            "is_active": is_active,
+            "history_pool": pool_str,
+            "created_at": existing.get("created_at") if existing else now,
+            "updated_at": now
+        })
+
+        # 仅对非小蚕账号 (如独立美团账号 mt_*) 同步写入 accounts 统一账号表 (标记 platform='meituan')
+        if not key.startswith("acc_"):
+            conn.execute("""
+            INSERT INTO accounts (
+                key, nickname, avatar, token, platform, saved_at, last_claimed_at, 
+                last_claimed_count, last_claimed_details, is_active, history_pool, created_at, updated_at
+            )
+            VALUES (:key, :nickname, :avatar, :token, 'meituan', :saved_at, :last_claimed_at, 
+                    :last_claimed_count, :last_claimed_details, :is_active, :history_pool, :created_at, :updated_at)
+            ON CONFLICT(key) DO UPDATE SET
+                nickname = excluded.nickname,
+                avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE accounts.avatar END,
+                token = CASE WHEN excluded.token != '' THEN excluded.token ELSE accounts.token END,
+                platform = 'meituan',
+                saved_at = CASE WHEN excluded.token != '' THEN excluded.saved_at ELSE accounts.saved_at END,
+                last_claimed_at = CASE WHEN excluded.last_claimed_at > 0 THEN excluded.last_claimed_at ELSE accounts.last_claimed_at END,
+                last_claimed_count = CASE WHEN excluded.last_claimed_count > 0 THEN excluded.last_claimed_count ELSE accounts.last_claimed_count END,
+                last_claimed_details = CASE WHEN excluded.last_claimed_details != '[]' THEN excluded.last_claimed_details ELSE accounts.last_claimed_details END,
+                is_active = excluded.is_active,
+                history_pool = excluded.history_pool,
+                updated_at = excluded.updated_at
+            """, {
+                "key": key,
+                "nickname": nickname,
+                "avatar": avatar,
+                "token": token,
+                "saved_at": saved_at,
+                "last_claimed_at": last_claimed_at,
+                "last_claimed_count": last_claimed_count,
+                "last_claimed_details": details_str,
+                "is_active": is_active,
+                "history_pool": pool_str,
+                "created_at": existing.get("created_at") if existing else now,
+                "updated_at": now
+            })
+        conn.commit()
+
+    return get_meituan_account(key)
+
+
+def delete_meituan_account(key: str) -> bool:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM meituan_accounts WHERE key = ?", (key,))
+        conn.execute("DELETE FROM accounts WHERE key = ?", (key,))
+        conn.execute("DELETE FROM task_configs WHERE account_key = ?", (key,))
+        conn.commit()
+        return True
+
+
+def bind_meituan_to_account(account_key: str, data: Dict[str, Any]) -> bool:
+    """为指定小蚕账号绑定美团凭证"""
+    token = (data.get("token") or "").strip()
+    nickname = (data.get("nickname") or f"美团账号 ({token[-4:] if token else '已绑定'})").strip()
+    saved_at = int(data.get("saved_at") or time.time())
+    
+    acc = get_account_by_key(account_key)
+    pool = acc.get("meituan_history_pool") or [] if acc else []
+    if token and token not in pool:
+        pool.append(token)
+        pool = pool[-5:]
+    if data.get("history_pool") and isinstance(data["history_pool"], list):
+        for t in data["history_pool"]:
+            if t and t not in pool:
+                pool.append(t)
+        pool = pool[-5:]
+    pool_str = json.dumps(pool, ensure_ascii=False)
+    
+    with get_conn() as conn:
+        conn.execute("""
+        UPDATE accounts
+        SET meituan_token = ?,
+            meituan_nickname = ?,
+            meituan_saved_at = ?,
+            meituan_is_active = 1,
+            meituan_history_pool = ?,
+            updated_at = ?
+        WHERE key = ?
+        """, (token, nickname, saved_at, pool_str, time.strftime("%Y-%m-%d %H:%M:%S"), account_key))
+        
+        # 同时在 meituan_accounts 中留存一份以保持数据对称
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("""
+        INSERT INTO meituan_accounts (key, nickname, token, saved_at, is_active, history_pool, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            nickname = excluded.nickname,
+            token = excluded.token,
+            saved_at = excluded.saved_at,
+            is_active = 1,
+            history_pool = excluded.history_pool,
+            updated_at = excluded.updated_at
+        """, (account_key, nickname, token, saved_at, pool_str, now_str, now_str))
+        conn.commit()
+    return True
+
+
+def unbind_meituan_from_account(account_key: str) -> bool:
+    """解除指定小蚕账号的美团凭证绑定"""
+    with get_conn() as conn:
+        conn.execute("""
+        UPDATE accounts
+        SET meituan_token = '',
+            meituan_nickname = '',
+            meituan_saved_at = 0,
+            meituan_is_active = 0,
+            meituan_last_claimed_count = 0,
+            meituan_last_claimed_details = '[]',
+            updated_at = ?
+        WHERE key = ?
+        """, (time.strftime("%Y-%m-%d %H:%M:%S"), account_key))
+        conn.execute("DELETE FROM meituan_accounts WHERE key = ?", (account_key,))
+        conn.commit()
+    return True
+
+
+def clear_all_meituan_data() -> bool:
+    """彻底清空全部美团凭证（清空 meituan_accounts、清理伪账号及小蚕账号美团字段）"""
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        conn.execute("DELETE FROM meituan_accounts")
+        conn.execute("DELETE FROM accounts WHERE (platform = 'meituan' AND key NOT LIKE 'acc_%') OR key LIKE 'mt_%'")
+        conn.execute("""
+        UPDATE accounts
+        SET meituan_token = '',
+            meituan_nickname = '',
+            meituan_saved_at = 0,
+            meituan_last_claimed_at = 0,
+            meituan_last_claimed_count = 0,
+            meituan_last_claimed_details = '[]',
+            meituan_history_pool = '[]',
+            meituan_is_active = 0,
+            updated_at = ?
+        """, (now,))
+        conn.commit()
+    return True
+
+
+def update_meituan_claim_stats(key: str, count: int, details: List[Dict[str, Any]], new_token: Optional[str] = None):
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = int(time.time())
+    acc = get_account_by_key(key) or get_meituan_account(key)
+    if not acc:
+        return
+
+    details_str = json.dumps(details, ensure_ascii=False)
+    
+    # 检查是否为绑定美团的小蚕账号
+    if acc.get("meituan_token"):
+        pool = acc.get("meituan_history_pool") or []
+        tok = (new_token or acc.get("meituan_token") or "").strip()
+        if tok and tok not in pool:
+            pool.append(tok)
+            pool = pool[-5:]
+        pool_str = json.dumps(pool, ensure_ascii=False)
+        with get_conn() as conn:
+            conn.execute("""
+            UPDATE accounts
+            SET meituan_last_claimed_at = ?,
+                meituan_last_claimed_count = ?,
+                meituan_last_claimed_details = ?,
+                meituan_token = ?,
+                meituan_history_pool = ?,
+                meituan_is_active = 1,
+                last_claimed_at = ?,
+                last_claimed_count = ?,
+                last_claimed_details = ?,
+                updated_at = ?
+            WHERE key = ?
+            """, (now_ts, count, details_str, tok, pool_str, now_ts, count, details_str, now, key))
+            conn.execute("""
+            UPDATE meituan_accounts
+            SET last_claimed_at = ?,
+                last_claimed_count = ?,
+                last_claimed_details = ?,
+                token = ?,
+                history_pool = ?,
+                is_active = 1,
+                updated_at = ?
+            WHERE key = ?
+            """, (now_ts, count, details_str, tok, pool_str, now, key))
+            conn.commit()
+    else:
+        # 兼容传统独立 meituan_accounts
+        pool = acc.get("history_pool") or []
+        tok = (new_token or acc.get("token") or "").strip()
+        if tok and tok not in pool:
+            pool.append(tok)
+            pool = pool[-5:]
+        pool_str = json.dumps(pool, ensure_ascii=False)
+        with get_conn() as conn:
+            conn.execute("""
+            UPDATE meituan_accounts
+            SET last_claimed_at = ?,
+                last_claimed_count = ?,
+                last_claimed_details = ?,
+                token = ?,
+                history_pool = ?,
+                is_active = 1,
+                updated_at = ?
+            WHERE key = ?
+            """, (now_ts, count, details_str, tok, pool_str, now, key))
+            conn.execute("""
+            UPDATE accounts
+            SET last_claimed_at = ?,
+                last_claimed_count = ?,
+                last_claimed_details = ?,
+                token = CASE WHEN platform = 'meituan' THEN ? ELSE token END,
+                history_pool = ?,
+                updated_at = ?
+            WHERE key = ?
+            """, (now_ts, count, details_str, tok, pool_str, now, key))
+            conn.commit()
+
+
+
+
