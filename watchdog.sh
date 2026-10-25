@@ -7,17 +7,11 @@ cd "$APP_DIR"
 echo "[XiaoCan] Watchdog 已启动。"
 
 while true; do
-    if [ ! -f "$APP_DIR/.xiaocan.pid" ]; then
-        echo "[XiaoCan] 未检测到 PID 文件，尝试启动服务..."
-        ./start.sh
+    if curl -fsS --max-time 5 http://127.0.0.1:8690/health >/dev/null 2>&1; then
+        :
     else
-        PID=$(cat "$APP_DIR/.xiaocan.pid" 2>/dev/null || true)
-
-        if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
-            echo "[XiaoCan] 服务进程异常退出，尝试重新启动..."
-            rm -f "$APP_DIR/.xiaocan.pid"
-            ./start.sh
-        fi
+        echo "[XiaoCan] 健康检查失败，尝试启动服务..."
+        ./start.sh
     fi
 
     sleep 30
