@@ -147,6 +147,7 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
         "store_keyword": "店名定时搜索",
         "store_search": "商户定向嗅探",
         "store_cancel": "霸王餐名额取消",
+        "auto_withdraw": "余额自动提现",
     }
     task_label = task_names.get(task_id, task_id)
     trig_label = "定时调度" if trigger_type == "cron" else ("手动执行" if trigger_type == "manual" else trigger_type)
@@ -964,43 +965,89 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
             log_output += f"[{time.strftime('%H:%M:%S')}] 接入元宝商城限量秒杀通道 (目标商品: {goods_ids or '自动优选券'})...\n"
             try:
                 fs_res = await client.list_flash_sale_exchanges(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, is_plus=bool(account.get("is_plus", 0)))
-                items = (fs_res.get("list") or {}).get("vip") or []
+                # ListFlashSaleExchanges 的 list 为多分组结构 (vip / svip 等各组各若干款)，必须合并全部分组，否则 svip 组商品永远匹配不上
+                list_obj = fs_res.get("list") or {}
+                items = []
+                if isinstance(list_obj, dict):
+                    for group_items in list_obj.values():
+                        if isinstance(group_items, list):
+                            items.extend(group_items)
+                elif isinstance(list_obj, list):
+                    items = list(list_obj)
                 rounds = fs_res.get("rounds") or []
                 round_strs = [f"{r//3600:02d}:{(r%3600)//60:02d}" for r in rounds]
-                log_output += f"[{time.strftime('%H:%M:%S')}] 元宝商城档期: 今日场次 [{', '.join(round_strs)}]，在架商品 {len(items)} 款\n"
+                log_output += f"[{time.strftime('%H:%M:%S')}] 元宝商城档期: 今日场次 [{', '.join(round_strs)}]，在架商品 {len(items)} 款 (已合并全部分组)\n"
+
+                # 解析用户指定商品ID列表 (支持逗号分隔多个，按填写顺序优先)
+                wanted_ids = []
+                for seg in goods_ids.split(","):
+                    seg = seg.strip()
+                    if seg.isdigit():
+                        wanted_ids.append(int(seg))
+
+                def _pick(candidates):
+                    """优先选有库存的，否则取首个候选"""
+                    for c in candidates:
+                        if c.get("left", 0) > 0:
+                            return c
+                    return candidates[0] if candidates else None
 
                 target_item = None
-                if goods_ids:
-                    target_id = int(goods_ids.split(",")[0].strip())
-                    for it in items:
-                        if it.get("exchange_id") == target_id:
-                            target_item = it
-                            break
+                if wanted_ids:
+                    matched = [it for it in items if it.get("exchange_id") in wanted_ids]
+                    if matched:
+                        ordered = sorted(matched, key=lambda it: wanted_ids.index(it.get("exchange_id")))
+                        target_item = _pick(ordered)
+                        if not target_item:
+                            log_output += f"[{time.strftime('%H:%M:%S')}] 指定商品均在架但已无库存，仍将尝试提交\n"
+                            target_item = ordered[0]
+                    else:
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 指定商品ID {wanted_ids} 未在今日在架列表中匹配到 (全部分组已检索)\n"
                 if not target_item and items:
-                    for it in items:
-                        if it.get("left", 0) > 0:
-                            target_item = it
-                            break
-                    if not target_item:
-                        target_item = items[0]
+                    in_stock = [it for it in items if it.get("left", 0) > 0]
+                    target_item = _pick(in_stock or items)
 
                 if target_item:
                     eid = target_item.get("exchange_id")
                     ename = target_item.get("goods_name") or f"商品#{eid}"
-                    esilk = target_item.get("community_silk", 0)
+                    esilk = float(target_item.get("community_silk", 0) or 0)
                     eleft = target_item.get("left", 0)
                     ts_fmt = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                    log_output += f"[{ts_fmt}] 准备秒杀目标商品: 【{ename}】(消耗: {esilk}元宝, 剩余库存: {eleft})\n"
+                    log_output += f"[{ts_fmt}] 准备秒杀目标商品: 【{ename}】(消耗: {esilk:g}元宝, 剩余库存: {eleft})\n"
+
+                    # 兑换前核验元宝余额 (UserTaskV2.yb_point)，用于事后扣款比对
+                    yb_before = None
                     try:
-                        ex_res = await client.today_exchange(exchange_id=eid, token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
-                        log_output += f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] [自动抢元宝秒杀] 兑换成功！已斩获【{ename}】\n"
-                        await send_system_notification(
-                            title="元宝秒杀抢券成功",
-                            content=f"账号【{nickname}】成功兑换【{ename}】！",
-                            account_key=account_key,
-                            event=NotificationEvent.SPIKE_SUCCESS,
-                            level=NotificationLevel.SUCCESS
-                        )
+                        ub_res = await client.get_user_task_v2(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                        yb_before = float((ub_res.get("data") or {}).get("yb_point") or 0)
+                    except Exception:
+                        yb_before = None
+
+                    try:
+                        await client.today_exchange(exchange_id=eid, token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                        # 兑换成功判定改为实际扣款核验: 接口不报错不代表兑换成功 (库存为0时官方可能返回 code=0 与无关商品)
+                        yb_after = None
+                        try:
+                            ua_res = await client.get_user_task_v2(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                            yb_after = float((ua_res.get("data") or {}).get("yb_point") or 0)
+                        except Exception:
+                            yb_after = None
+                        ts_fmt = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                        if yb_before is not None and yb_after is not None:
+                            deducted = yb_before - yb_after
+                            if deducted >= esilk and esilk > 0:
+                                log_output += f"[{ts_fmt}] [自动抢元宝秒杀] 兑换成功并经余额核验！已斩获【{ename}】(扣款 {deducted:g} 元宝, 余额 {yb_before:g} → {yb_after:g})\n"
+                                await send_system_notification(
+                                    title="元宝秒杀抢券成功",
+                                    content=f"账号【{nickname}】成功兑换【{ename}】(扣款 {deducted:g} 元宝)！",
+                                    account_key=account_key,
+                                    event=NotificationEvent.SPIKE_SUCCESS,
+                                    level=NotificationLevel.SUCCESS
+                                )
+                            else:
+                                log_output += f"[{ts_fmt}] [自动抢元宝秒杀] 未抢到: 接口已响应但余额未发生有效扣款 (前 {yb_before:g} / 后 {yb_after:g}，预期扣 {esilk:g})，不发成功通知\n"
+                        else:
+                            log_output += f"[{ts_fmt}] [自动抢元宝秒杀] 接口已响应但余额核验不可用，无法确认是否兑换成功，不发成功通知\n"
                     except XiaoCanRPCError as e:
                         log_output += f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] [自动抢元宝秒杀] 提示: {format_rpc_error(e)}\n"
                 else:
@@ -1185,6 +1232,65 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
             log_output += out
             if not monitor_ok:
                 status = "error"
+
+        elif task_id == "auto_withdraw":
+            # 余额自动提现: 定时核验钱包余额，达到门槛后自动全额提现到微信/支付宝
+            try:
+                withdraw_type = int(params.get("withdraw_type", 1))
+            except Exception:
+                withdraw_type = 1
+            try:
+                min_balance = float(params.get("min_balance", 10) or 10)
+            except Exception:
+                min_balance = 10.0
+            if withdraw_type not in (0, 1):
+                withdraw_type = 1
+            type_name = "微信钱包" if withdraw_type == 0 else "支付宝"
+
+            log_output += f"[{time.strftime('%H:%M:%S')}] 正在核验钱包余额 (提现门槛: ≥{min_balance:g} 元, 到账渠道: {type_name})...\n"
+            balance = -1.0
+            try:
+                info_res = await client.get_user_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                uinfo = info_res.get("user_info") or {}
+                balance = float(uinfo.get("silk") or 0)
+            except XiaoCanRPCError as be:
+                log_output += f"[{time.strftime('%H:%M:%S')}] 余额查询失败: {format_rpc_error(be)}\n"
+                status = "error"
+            except Exception as be:
+                log_output += f"[{time.strftime('%H:%M:%S')}] 余额查询异常: {be}\n"
+                status = "error"
+
+            if balance >= 0:
+                log_output += f"[{time.strftime('%H:%M:%S')}] 当前钱包余额: {balance:g} 元\n"
+                if balance < min_balance:
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 余额未达到提现门槛 {min_balance:g} 元，本次不提现\n"
+                else:
+                    money_cents = int(round(balance * 100))
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 余额已达门槛，正在申请全额提现 {balance:g} 元至 {type_name}...\n"
+                    try:
+                        wd_res = await client.client_withdraw(
+                            money_cents=money_cents,
+                            token=token,
+                            withdraw_type=withdraw_type,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                            city_code=city_code
+                        )
+                        wd_msg = (wd_res.get("status") or {}).get("msg") or "提现申请已提交"
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 提现成功: {balance:g} 元已申请提现至 {type_name} ({wd_msg})\n"
+                        await send_system_notification(
+                            title="余额自动提现成功",
+                            content=f"账号【{nickname}】{balance:g} 元已申请提现至{type_name}。",
+                            account_key=account_key,
+                            event=NotificationEvent.WITHDRAW_SUCCESS,
+                            level=NotificationLevel.SUCCESS
+                        )
+                    except XiaoCanRPCError as we:
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 提现失败: {format_rpc_error(we)}\n"
+                        status = "error"
+                    except Exception as we:
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 提现异常: {we}\n"
+                        status = "error"
 
         elif task_id == "meituan_coupon":
             from ..meituan.worker import claim_single_account, claim_all_meituan_accounts
