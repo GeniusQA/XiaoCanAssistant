@@ -1,4 +1,4 @@
-"""
+﻿"""
 飞书群机器人 Webhook 推送适配器
 支持可选加签鉴权与富文本 post 消息格式
 """
@@ -30,7 +30,7 @@ class FeishuNotifier(BaseNotifier):
             "content": {
                 "post": {
                     "zh_cn": {
-                        "title": f"[小蚕小帮手] {title}",
+                        "title": f"[小蚕助理] {title}",
                         "content": [
                           [{"tag": "text", "text": content}]
                         ]
@@ -76,7 +76,7 @@ class FeishuNotifier(BaseNotifier):
         secret = config.get("feishu_secret") or db.get_setting("feishu_secret", "")
         test_title = "通知连通性测试"
         test_content = (
-            "这是一条来自小蚕小帮手的连通性测试消息。如果你在飞书群中收到此卡片，"
+            "这是一条来自小蚕助理的连通性测试消息。如果你在飞书群中收到此卡片，"
             "说明飞书群机器人通道已成功接入并正常工作。"
         )
         return await self._do_send(url, secret, test_title, test_content)

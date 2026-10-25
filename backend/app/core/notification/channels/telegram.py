@@ -1,4 +1,4 @@
-"""
+﻿"""
 Telegram Bot 通知推送适配器
 支持本地 HTTP/SOCKS 代理与自定义反代 API 网关，彻底解决国内网络无法直连问题
 """
@@ -82,8 +82,8 @@ class TelegramNotifier(BaseNotifier):
         api_base_url = config.get("tg_api_base_url") or db.get_setting("tg_api_base_url", "")
         test_title = "通知连通性测试"
         test_text = (
-            f"*[小蚕小帮手] {test_title}*\n\n"
-            "这是一条来自小蚕小帮手的连通性测试消息。如果你收到此消息，"
+            f"*[小蚕助理] {test_title}*\n\n"
+            "这是一条来自小蚕助理的连通性测试消息。如果你收到此消息，"
             "说明 Telegram 机器人通道已成功连通并正常工作。"
         )
         return await self._do_send(bot_token, chat_id, test_text, proxy_url, api_base_url)

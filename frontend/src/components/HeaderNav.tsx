@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { Nav, Button, Select, Tag, Avatar, Space } from '@douyinfe/semi-ui';
 import {
   IconHome,
@@ -43,13 +43,13 @@ export const HeaderNav: React.FC = () => {
           logo: (
             <img
               src="/logo.png"
-              alt="小蚕小帮手"
+              alt="小蚕助理"
               className="w-8 h-8 rounded-lg object-contain shadow-xs border border-semi-color-border"
             />
           ),
           text: (
             <Space align="center">
-              <span className="font-semibold text-base text-semi-color-text-0">小蚕小帮手</span>
+              <span className="font-semibold text-base text-semi-color-text-0">小蚕助理</span>
             </Space>
           ),
         }}

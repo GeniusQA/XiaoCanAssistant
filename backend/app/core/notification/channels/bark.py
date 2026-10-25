@@ -1,4 +1,4 @@
-"""
+﻿"""
 iOS Bark 极速通知推送适配器
 支持设备 Key、自建服务端、声音选择、分组与角标自定义
 """
@@ -33,9 +33,9 @@ class BarkNotifier(BaseNotifier):
         endpoint = endpoint.rstrip("/")
 
         payload: Dict[str, Any] = {
-            "title": f"[小蚕小帮手] {title}",
+            "title": f"[小蚕助理] {title}",
             "body": body,
-            "group": (group or "小蚕小帮手").strip(),
+            "group": (group or "小蚕助理").strip(),
             "level": "timeSensitive"
         }
         if sound and sound.strip():
@@ -61,16 +61,16 @@ class BarkNotifier(BaseNotifier):
             return {"ok": False, "channel": self.name, "skipped": True, "message": "Bark 通道已关闭"}
 
         bark_url = db.get_setting("bark_url", "")
-        group = db.get_setting("bark_group", "小蚕小帮手")
+        group = db.get_setting("bark_group", "小蚕助理")
         sound = db.get_setting("bark_sound", "minuet")
         icon = db.get_setting("bark_icon", "")
         return await self._do_send(bark_url, data.title, data.content, group, sound, icon)
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         bark_url = config.get("bark_url") or db.get_setting("bark_url", "")
-        group = config.get("bark_group") or db.get_setting("bark_group", "小蚕小帮手")
+        group = config.get("bark_group") or db.get_setting("bark_group", "小蚕助理")
         sound = config.get("bark_sound") or db.get_setting("bark_sound", "minuet")
         icon = config.get("bark_icon") or db.get_setting("bark_icon", "")
         test_title = "通知连通性测试"
-        test_content = "这是一条来自小蚕小帮手的连通性测试消息。如果你在 iPhone 锁屏或通知中心收到震动横幅，说明 Bark 通道已成功接入。"
+        test_content = "这是一条来自小蚕助理的连通性测试消息。如果你在 iPhone 锁屏或通知中心收到震动横幅，说明 Bark 通道已成功接入。"
         return await self._do_send(bark_url, test_title, test_content, group, sound, icon)

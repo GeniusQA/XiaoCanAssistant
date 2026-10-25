@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ============================================================
-# 小蚕小帮手 (XiaoCan Assistant) - Linux / macOS 一键启动脚本
+# 小蚕助理 (XiaoCan Assistant) - Linux / macOS 一键启动脚本
 # 本地离线 · 数据仅存本机 · 零门槛无车位限制
 # ============================================================
 
@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "========================================================"
-echo "  小蚕小帮手 [XiaoCan Assistant]"
+echo "  小蚕助理 [XiaoCan Assistant]"
 echo "  本地运行 · 数据仅保存在本机 · 无车位限制"
 echo "========================================================"
 
@@ -70,7 +70,7 @@ except Exception:
 ")
 
 if [ "$PORT_IN_USE" = "1" ]; then
-    echo "  [提示] 8690 端口已被占用，小蚕小帮手可能已经在运行中"
+    echo "  [提示] 8690 端口已被占用，小蚕助理可能已经在运行中"
     echo "  正在尝试打开浏览器: http://127.0.0.1:8690"
     if command -v xdg-open >/dev/null 2>&1; then
         xdg-open "http://127.0.0.1:8690" >/dev/null 2>&1 &

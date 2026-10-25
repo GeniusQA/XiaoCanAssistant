@@ -1,4 +1,4 @@
-"""
+﻿"""
 Gotify 自建消息推送服务适配器
 支持私有部署服务器、应用 Token 与优先级配置
 """
@@ -37,7 +37,7 @@ class GotifyNotifier(BaseNotifier):
             "Content-Type": "application/json"
         }
         payload = {
-            "title": f"[小蚕小帮手] {title}",
+            "title": f"[小蚕助理] {title}",
             "message": message,
             "priority": max(1, min(10, priority or 5))
         }
@@ -68,5 +68,5 @@ class GotifyNotifier(BaseNotifier):
         token = config.get("gotify_token") or db.get_setting("gotify_token", "")
         priority = int(config.get("gotify_priority") or db.get_setting("gotify_priority", 5) or 5)
         test_title = "通知连通性测试"
-        test_content = "这是一条来自小蚕小帮手的连通性测试消息。如果你收到此消息，说明 Gotify 推送通道已成功接入并正常工作。"
+        test_content = "这是一条来自小蚕助理的连通性测试消息。如果你收到此消息，说明 Gotify 推送通道已成功接入并正常工作。"
         return await self._do_send(url, token, test_title, test_content, priority)

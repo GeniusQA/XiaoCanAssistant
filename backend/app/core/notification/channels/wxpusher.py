@@ -1,4 +1,4 @@
-"""
+﻿"""
 WxPusher 微信推送服务适配器
 微信扫码关注 WxPusher 公众号，免搭建且配额充足
 """
@@ -63,8 +63,8 @@ class WxPusherNotifier(BaseNotifier):
         uids = config.get("wxpusher_uids") or db.get_setting("wxpusher_uids", "")
         test_title = "通知连通性测试"
         test_content = (
-            "### [小蚕小帮手] 通知连通性测试\n\n"
-            "这是一条来自小蚕小帮手的连通性测试消息。如果你在微信公众号中收到此卡片，"
+            "### [小蚕助理] 通知连通性测试\n\n"
+            "这是一条来自小蚕助理的连通性测试消息。如果你在微信公众号中收到此卡片，"
             "说明 WxPusher 微信推送通道已成功接入并正常工作。"
         )
         return await self._do_send(app_token, uids, f"[小蚕] {test_title}", test_content)

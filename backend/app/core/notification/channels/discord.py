@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discord Webhook 消息推送适配器
 支持向指定的 Discord 频道 Webhook 发送格式化 Embed 卡片
 """
@@ -36,10 +36,10 @@ class DiscordNotifier(BaseNotifier):
         }
 
         payload: Dict[str, Any] = {
-            "username": (username or "小蚕小帮手").strip(),
+            "username": (username or "小蚕助理").strip(),
             "embeds": [
                 {
-                    "title": f"[小蚕小帮手] {title}",
+                    "title": f"[小蚕助理] {title}",
                     "description": content,
                     "color": color_map.get(level, 0x3498DB)
                 }
@@ -61,12 +61,12 @@ class DiscordNotifier(BaseNotifier):
             return {"ok": False, "channel": self.name, "skipped": True, "message": "Discord 通道已关闭"}
 
         url = db.get_setting("discord_webhook", "")
-        username = db.get_setting("discord_username", "小蚕小帮手")
+        username = db.get_setting("discord_username", "小蚕助理")
         return await self._do_send(url, data.title, data.content, data.level, username)
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         url = config.get("discord_webhook") or db.get_setting("discord_webhook", "")
-        username = config.get("discord_username") or db.get_setting("discord_username", "小蚕小帮手")
+        username = config.get("discord_username") or db.get_setting("discord_username", "小蚕助理")
         test_title = "通知连通性测试"
-        test_content = "这是一条来自小蚕小帮手的连通性测试消息。如果你在频道中收到此 Embed 卡片，说明 Discord 通道已成功接入并正常工作。"
+        test_content = "这是一条来自小蚕助理的连通性测试消息。如果你在频道中收到此 Embed 卡片，说明 Discord 通道已成功接入并正常工作。"
         return await self._do_send(url, test_title, test_content, NotificationLevel.SUCCESS, username)

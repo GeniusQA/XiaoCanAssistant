@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 rem ============================================================
 rem  XiaoCan Assistant - shared environment bootstrap
 rem  usage : call scripts\prepare_env.bat [build]
@@ -223,8 +223,8 @@ exit /b 1
 :ERR_VENV_LOCKED
 echo.
 echo   [错误] 无法删除旧的虚拟环境目录: %VENV_DIR%
-echo   原因: 目录中的文件正被其他程序占用，通常是另一个小蚕小帮手窗口仍在运行
-echo   解决方法: 关闭所有小蚕小帮手窗口后重新双击启动脚本；
+echo   原因: 目录中的文件正被其他程序占用，通常是另一个小蚕助理窗口仍在运行
+echo   解决方法: 关闭所有小蚕助理窗口后重新双击启动脚本；
 echo             如仍失败，可手动删除 backend\venv 文件夹后再试
 exit /b 1
 
@@ -268,7 +268,7 @@ echo.
 echo   [错误] 前端依赖安装失败
 echo   常见原因与解决方法:
 echo     1. 网络不通或被代理软件拦截: 检查网络连接，或暂时关闭代理/VPN 后重试
-echo     2. 文件被占用: 关闭正在运行的小蚕小帮手窗口和代码编辑器后重试
+echo     2. 文件被占用: 关闭正在运行的小蚕助理窗口和代码编辑器后重试
 echo     3. 仍然失败时，可手动删除 frontend\node_modules 文件夹后重新双击启动脚本
 echo   请将上方 npm ERR 开头的报错内容截图，便于排查问题
 exit /b 1

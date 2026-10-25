@@ -1,4 +1,4 @@
-"""
+﻿"""
 企业微信群机器人 Webhook 推送适配器
 支持 Markdown 排版
 """
@@ -51,8 +51,8 @@ class WeComNotifier(BaseNotifier):
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         url = config.get("wecom_webhook") or db.get_setting("wecom_webhook", "")
         test_content = (
-            "### [小蚕小帮手] 通知连通性测试\n\n"
-            "这是一条来自小蚕小帮手的连通性测试消息。如果你在企业微信群中收到此卡片，"
+            "### [小蚕助理] 通知连通性测试\n\n"
+            "这是一条来自小蚕助理的连通性测试消息。如果你在企业微信群中收到此卡片，"
             "说明企业微信群机器人通道已成功接入并正常工作。"
         )
         return await self._do_send(url, test_content)

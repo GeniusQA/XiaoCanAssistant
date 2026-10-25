@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+﻿import React, { useEffect, useState, useRef } from 'react';
 import {
   Card,
   Form,
@@ -623,7 +623,7 @@ export const SettingsView: React.FC = () => {
     feishu_secret: '',
     bark_enabled: false,
     bark_url: '',
-    bark_group: '小蚕小帮手',
+    bark_group: '小蚕助理',
     bark_sound: 'minuet',
     bark_icon: '',
     telegram_enabled: false,
@@ -649,7 +649,7 @@ export const SettingsView: React.FC = () => {
     gotify_priority: 5,
     discord_enabled: false,
     discord_webhook: '',
-    discord_username: '小蚕小帮手',
+    discord_username: '小蚕助理',
     qq_bot_enabled: true,
     qq_bot_api: 'http://127.0.0.1:8080',
     qq_bot_group_id: '954658571',
@@ -1314,7 +1314,7 @@ export const SettingsView: React.FC = () => {
                                           <Form.Input
                                             field="bark_group"
                                             label="分组名称 (选填)"
-                                            placeholder="小蚕小帮手"
+                                            placeholder="小蚕助理"
                                           />
                                         </Col>
                                       </Row>
@@ -1405,7 +1405,7 @@ export const SettingsView: React.FC = () => {
                                       <Form.Input
                                         field="discord_username"
                                         label="机器人展示昵称 (选填)"
-                                        placeholder="小蚕小帮手"
+                                        placeholder="小蚕助理"
                                       />
                                     </div>
                                   </div>

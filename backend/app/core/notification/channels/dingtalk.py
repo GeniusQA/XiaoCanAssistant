@@ -1,4 +1,4 @@
-"""
+﻿"""
 钉钉群机器人 Webhook 推送适配器
 支持 HMAC-SHA256 加签鉴权与 Markdown 格式
 """
@@ -40,7 +40,7 @@ class DingTalkNotifier(BaseNotifier):
         payload = {
             "msgtype": "markdown",
             "markdown": {
-                "title": f"[小蚕小帮手] {title}",
+                "title": f"[小蚕助理] {title}",
                 "text": text
             }
         }
@@ -79,8 +79,8 @@ class DingTalkNotifier(BaseNotifier):
         secret = config.get("dingtalk_secret") or db.get_setting("dingtalk_secret", "")
         test_title = "通知连通性测试"
         test_text = (
-            "### [小蚕小帮手] 通知连通性测试\n\n"
-            "这是一条来自小蚕小帮手的连通性测试消息。如果你在钉钉群中收到此卡片，"
+            "### [小蚕助理] 通知连通性测试\n\n"
+            "这是一条来自小蚕助理的连通性测试消息。如果你在钉钉群中收到此卡片，"
             "说明钉钉群机器人通道已成功接入并正常工作。"
         )
         return await self._do_send(url, secret, test_title, test_text)

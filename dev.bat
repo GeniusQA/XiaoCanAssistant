@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 rem ============================================================
 rem  XiaoCan Assistant - developer mode
 rem  backend : http://127.0.0.1:8690 (FastAPI hot reload, own window)
@@ -9,7 +9,7 @@ if /i "%~1"=="--inner" goto :MAIN
 if /i "%~1"=="--backend" goto :BACKEND
 
 chcp 65001 >nul
-title 小蚕小帮手 [前后端双热加载开发模式]
+title 小蚕助理 [前后端双热加载开发模式]
 cmd /d /c ""%~f0" --inner"
 set "XC_RC=%errorlevel%"
 echo.
@@ -29,7 +29,7 @@ exit /b %XC_RC%
 :MAIN
 cd /d "%~dp0"
 echo ========================================================
-echo   小蚕小帮手 [双热加载开发模式]
+echo   小蚕助理 [双热加载开发模式]
 echo   前端服务: http://127.0.0.1:5173 [Vite HMR]
 echo   后端服务: http://127.0.0.1:8690 [FastAPI Reload]
 echo ========================================================
@@ -81,7 +81,7 @@ exit /b 0
 
 :ERR_BACKEND_RUNNING
 echo.
-echo   [错误] 端口 8690 上已有小蚕小帮手在运行，通常是 run.bat 窗口未关闭
+echo   [错误] 端口 8690 上已有小蚕助理在运行，通常是 run.bat 窗口未关闭
 echo   开发模式需要启动带热重载的后端，请先关闭该窗口后重新双击 dev.bat
 exit /b 1
 

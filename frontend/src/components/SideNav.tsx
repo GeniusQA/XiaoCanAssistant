@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { Nav, Select, Avatar, Space, Button, Tooltip, Dropdown, Tag } from '@douyinfe/semi-ui';
 import {
   IconHome,
@@ -49,14 +49,14 @@ export const SideNav: React.FC = () => {
         style={{ height: '100%', borderRight: 'none' }}
         header={{
           logo: isSidebarCollapsed ? (
-            <Tooltip content="小蚕小帮手" position="right">
+            <Tooltip content="小蚕助理" position="right">
               <div
                 className="w-10 h-10 flex items-center justify-center cursor-pointer transition-all duration-200 hover:scale-105 mx-auto"
                 onClick={() => setActiveTab('dashboard')}
               >
                 <img
                   src="/logo.png"
-                  alt="小蚕小帮手"
+                  alt="小蚕助理"
                   className="w-8.5 h-8.5 object-contain rounded-xl shadow-xs"
                 />
               </div>
@@ -68,7 +68,7 @@ export const SideNav: React.FC = () => {
             >
               <img
                 src="/logo.png"
-                alt="小蚕小帮手"
+                alt="小蚕助理"
                 className="w-8 h-8 object-contain rounded-xl shadow-xs"
               />
             </div>
@@ -76,7 +76,7 @@ export const SideNav: React.FC = () => {
           text: (
             <div className="flex items-center gap-2 ml-2 cursor-pointer select-none" onClick={() => setActiveTab('dashboard')}>
               <span className="font-bold text-[16px] text-semi-color-text-0 tracking-tight hover:text-semi-color-primary transition-colors">
-                小蚕小帮手
+                小蚕助理
               </span>
               <Tag size="small" color="blue" type="light" shape="square" className="text-[10px] font-semibold px-1 py-0 scale-90 origin-left">
                 助手版

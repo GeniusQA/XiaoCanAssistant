@@ -1,4 +1,4 @@
-"""
+﻿"""
 SMTP 邮件通知推送适配器
 基于 Python 原生 smtplib 实现，异步线程池派发，无需外部第三方依赖
 支持 QQ 邮箱、163 邮箱、Gmail 及企业邮箱等
@@ -36,7 +36,7 @@ class EmailNotifier(BaseNotifier):
     ) -> Dict[str, Any]:
         msg = MIMEText(content, "plain", "utf-8")
         msg["Subject"] = Header(subject, "utf-8")
-        msg["From"] = Header(f"小蚕小帮手 <{from_addr}>", "utf-8")
+        msg["From"] = Header(f"小蚕助理 <{from_addr}>", "utf-8")
         msg["To"] = Header(", ".join(to_addrs), "utf-8")
         msg["Date"] = formatdate(localtime=True)
 
@@ -123,7 +123,7 @@ class EmailNotifier(BaseNotifier):
         from_addr = db.get_setting("email_from", "")
         to_addr = db.get_setting("email_to", "")
 
-        subject = f"[小蚕小帮手] {data.title}"
+        subject = f"[小蚕助理] {data.title}"
         return await self._do_send(host, port, use_ssl, user, password, from_addr, to_addr, subject, data.format_plain_text())
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,9 +135,9 @@ class EmailNotifier(BaseNotifier):
         from_addr = config.get("email_from") or db.get_setting("email_from", "")
         to_addr = config.get("email_to") or db.get_setting("email_to", "")
 
-        test_subject = "[小蚕小帮手] 通知连通性测试邮件"
+        test_subject = "[小蚕助理] 通知连通性测试邮件"
         test_content = (
-            "这是一封来自小蚕小帮手的连通性测试邮件。\n\n"
+            "这是一封来自小蚕助理的连通性测试邮件。\n\n"
             "如果你收到此邮件，说明 SMTP 邮件通道已正确配置，"
             "后续霸王餐中签、秒杀抢单与系统预警消息将可通过邮件向你发送。"
         )

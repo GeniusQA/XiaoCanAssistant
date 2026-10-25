@@ -1,4 +1,4 @@
-"""
+﻿"""
 通用 HTTP Webhook 推送适配器
 支持向自定义端点发送标准化 JSON 载荷或 GET 请求，无缝对接各类自动化中枢
 """
@@ -93,7 +93,7 @@ class WebhookNotifier(BaseNotifier):
             "event": NotificationEvent.SYSTEM_TEST.value,
             "level": NotificationLevel.INFO.value,
             "title": "通知连通性测试",
-            "content": "这是一条来自小蚕小帮手的连通性测试消息，说明自定义 HTTP Webhook 接收端已正常连通。",
+            "content": "这是一条来自小蚕助理的连通性测试消息，说明自定义 HTTP Webhook 接收端已正常连通。",
             "account_key": "test_account",
             "account_name": "系统测试",
             "timestamp": now,

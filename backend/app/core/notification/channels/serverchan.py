@@ -1,4 +1,4 @@
-"""
+﻿"""
 Server酱 (Turbo / 3) 微信公众号推送适配器
 通过方糖气球提供的 SendKey 直接推送至绑定的个人微信服务号
 """
@@ -52,5 +52,5 @@ class ServerChanNotifier(BaseNotifier):
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         sendkey = config.get("serverchan_sendkey") or db.get_setting("serverchan_sendkey", "")
         test_title = "通知连通性测试"
-        test_content = "这是一条来自小蚕小帮手的连通性测试消息。如果你在微信公众号中收到此卡片，说明 Server酱 (Turbo/3) 推送通道已成功接入并正常工作。"
+        test_content = "这是一条来自小蚕助理的连通性测试消息。如果你在微信公众号中收到此卡片，说明 Server酱 (Turbo/3) 推送通道已成功接入并正常工作。"
         return await self._do_send(sendkey, f"[小蚕] {test_title}", test_content)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+﻿import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Card,
   Row,
@@ -2412,7 +2412,7 @@ export const Accounts: React.FC = () => {
                       <div className="space-y-1">
                         <Text strong className="text-xs">消息分组（选填）：</Text>
                         <Input
-                          placeholder="小蚕小帮手"
+                          placeholder="小蚕助理"
                           value={notifyConfig.bark_group || ''}
                           onChange={(val) => setNotifyConfig({ ...notifyConfig, bark_group: val })}
                         />
@@ -2614,7 +2614,7 @@ export const Accounts: React.FC = () => {
                     <div className="space-y-1">
                       <Text strong className="text-xs">自定义机器人显示名称（选填）：</Text>
                       <Input
-                        placeholder="小蚕小帮手"
+                        placeholder="小蚕助理"
                         value={notifyConfig.discord_username || ''}
                         onChange={(val) => setNotifyConfig({ ...notifyConfig, discord_username: val })}
                       />

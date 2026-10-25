@@ -1,5 +1,5 @@
-"""
-小蚕小帮手 - 多通道通知调度中枢 (NotificationHub)
+﻿"""
+小蚕助理 - 多通道通知调度中枢 (NotificationHub)
 对标 BetterGI 架构设计：
 1. 统一通知数据契约 (NotificationData) 与事件枚举 (NotificationEvent)
 2. 细粒度事件订阅过滤器 (Event Subscription Filter)
@@ -52,7 +52,7 @@ async def send_qq_bot_notification(
     gid = group_id or db.get_setting("qq_bot_group_id", "")
     uid = user_id or db.get_setting("qq_bot_user_id", "")
     tkn = token or db.get_setting("qq_bot_token", "")
-    text = f"[小蚕小帮手] {title}\n{content}"
+    text = f"[小蚕助理] {title}\n{content}"
     return await notifier._do_send(raw_api, ttype, gid, uid, tkn, text)
 
 
@@ -65,7 +65,7 @@ async def send_feishu_notification(webhook_url: str, title: str, content: str, s
 async def send_dingtalk_notification(webhook_url: str, secret: Optional[str], title: str, content: str) -> Dict[str, Any]:
     """向钉钉自定义机器人 Webhook 推送 Markdown 消息"""
     notifier = ALL_NOTIFIERS["dingtalk"]
-    text = f"### [小蚕小帮手] {title}\n\n{content}"
+    text = f"### [小蚕助理] {title}\n\n{content}"
     return await notifier._do_send(webhook_url, secret, title, text)
 
 
@@ -170,7 +170,7 @@ async def send_single_custom_channel(
         return await notifier._do_send(url, sec, title, data.format_plain_text())
     elif chan == "bark":
         url = config.get("bark_url") or db.get_setting("bark_url", "")
-        group = config.get("bark_group") or db.get_setting("bark_group", "小蚕小帮手")
+        group = config.get("bark_group") or db.get_setting("bark_group", "小蚕助理")
         sound = config.get("bark_sound") or db.get_setting("bark_sound", "minuet")
         icon = config.get("bark_icon") or db.get_setting("bark_icon", "")
         return await notifier._do_send(url, title, content, group, sound, icon)
@@ -200,7 +200,7 @@ async def send_single_custom_channel(
         password = config.get("email_pass") or db.get_setting("email_pass", "")
         from_addr = config.get("email_from") or db.get_setting("email_from", "")
         to_addr = config.get("email_to") or db.get_setting("email_to", "")
-        subject = f"[小蚕小帮手] {title}"
+        subject = f"[小蚕助理] {title}"
         return await notifier._do_send(host, port, ssl_on, user, password, from_addr, to_addr, subject, content)
     elif chan == "gotify":
         url = config.get("gotify_url") or db.get_setting("gotify_url", "")
@@ -209,7 +209,7 @@ async def send_single_custom_channel(
         return await notifier._do_send(url, token, title, content, priority)
     elif chan == "discord":
         url = config.get("discord_webhook") or db.get_setting("discord_webhook", "")
-        username = config.get("discord_username") or db.get_setting("discord_username", "小蚕小帮手")
+        username = config.get("discord_username") or db.get_setting("discord_username", "小蚕助理")
         return await notifier._do_send(url, title, content, n_level, username)
     elif chan == "qq_bot":
         api_url = config.get("qq_bot_api") or db.get_setting("qq_bot_api", "http://127.0.0.1:8080")

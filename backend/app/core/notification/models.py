@@ -1,4 +1,4 @@
-"""
+﻿"""
 标准通知模型与事件定义
 遵循对标 BetterGI 的设计规范，严禁使用任何 Emoji
 """
@@ -42,7 +42,7 @@ class NotificationData:
 
     def format_plain_text(self) -> str:
         """生成通用的纯文本格式（无 Emoji，严谨清晰）"""
-        lines = [f"[小蚕小帮手] {self.title}"]
+        lines = [f"[小蚕助理] {self.title}"]
         if self.account_name:
             lines.append(f"账号: {self.account_name}")
         lines.append(self.content)
@@ -51,7 +51,7 @@ class NotificationData:
     def format_markdown(self) -> str:
         """生成支持 Markdown 排版的通道文本（加粗、引用与分块）"""
         level_tag = f"[{self.level.value.upper()}]"
-        lines = [f"### [小蚕小帮手] {self.title} {level_tag}"]
+        lines = [f"### [小蚕助理] {self.title} {level_tag}"]
         if self.account_name:
             lines.append(f"- **执行账号**: {self.account_name}")
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp))

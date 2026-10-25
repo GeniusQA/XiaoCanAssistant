@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ============================================================
-# 小蚕小帮手 (XiaoCan Assistant) - Linux / macOS 开发模式启动脚本
+# 小蚕助理 (XiaoCan Assistant) - Linux / macOS 开发模式启动脚本
 # ============================================================
 
 set -e
@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "========================================================"
-echo "  小蚕小帮手 [XiaoCan Assistant] (开发模式)"
+echo "  小蚕助理 [XiaoCan Assistant] (开发模式)"
 echo "========================================================"
 
 export XIAOCAN_RELOAD=1

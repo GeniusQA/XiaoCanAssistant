@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI RESTful 路由
 完全对齐前端调用，彻底废弃卡密、积分与到期限制（全免开放）
 """
@@ -4232,7 +4232,7 @@ async def get_settings():
         # iOS Bark
         "bark_enabled": db.get_setting("bark_enabled", False),
         "bark_url": db.get_setting("bark_url", ""),
-        "bark_group": db.get_setting("bark_group", "小蚕小帮手"),
+        "bark_group": db.get_setting("bark_group", "小蚕助理"),
         "bark_sound": db.get_setting("bark_sound", "minuet"),
         "bark_icon": db.get_setting("bark_icon", ""),
         # Telegram Bot
@@ -4263,7 +4263,7 @@ async def get_settings():
         # Discord Webhook
         "discord_enabled": db.get_setting("discord_enabled", False),
         "discord_webhook": db.get_setting("discord_webhook", ""),
-        "discord_username": db.get_setting("discord_username", "小蚕小帮手"),
+        "discord_username": db.get_setting("discord_username", "小蚕助理"),
         # QQ 机器人 (OneBot V11 / mystool-bot)
         "qq_bot_enabled": db.get_setting("qq_bot_enabled", True),
         "qq_bot_api": db.get_setting("qq_bot_api", "http://127.0.0.1:8080"),

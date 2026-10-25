@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 rem ============================================================
 rem  XiaoCan Assistant - one-click launcher for normal users
 rem  The script re-launches itself in a child cmd, so whatever
@@ -9,18 +9,18 @@ setlocal
 if /i "%~1"=="--inner" goto :MAIN
 
 chcp 65001 >nul
-title 小蚕小帮手 [XiaoCan Assistant]
+title 小蚕助理 [XiaoCan Assistant]
 cmd /d /c ""%~f0" --inner"
 set "XC_RC=%errorlevel%"
 echo.
 echo ========================================================
 if "%XC_RC%"=="0" goto :OUTER_OK
-echo   [失败] 小蚕小帮手未能正常运行，错误码 %XC_RC%
+echo   [失败] 小蚕助理未能正常运行，错误码 %XC_RC%
 echo   请根据上方 [错误] 提示处理后重新双击 run.bat
 echo   或查阅 README 文档的 常见问题 章节
 goto :OUTER_END
 :OUTER_OK
-echo   小蚕小帮手已停止运行
+echo   小蚕助理已停止运行
 :OUTER_END
 echo ========================================================
 echo   按任意键关闭此窗口...
@@ -31,7 +31,7 @@ exit /b %XC_RC%
 :MAIN
 cd /d "%~dp0"
 echo ========================================================
-echo   小蚕小帮手 [XiaoCan Assistant]
+echo   小蚕助理 [XiaoCan Assistant]
 echo   本地运行 · 数据仅保存在本机 · 无车位限制
 echo ========================================================
 echo   首次运行会自动安装依赖，大约需要 3-5 分钟，请勿关闭窗口
@@ -82,7 +82,7 @@ exit /b %RC%
 
 :ALREADY_RUNNING
 echo.
-echo   [提示] 小蚕小帮手已经在运行中，正在打开浏览器: http://127.0.0.1:8690
+echo   [提示] 小蚕助理已经在运行中，正在打开浏览器: http://127.0.0.1:8690
 echo   如需重启或更新，请先关闭原来的运行窗口，再重新双击 run.bat
 start "" "http://127.0.0.1:8690"
 exit /b 0

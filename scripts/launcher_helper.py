@@ -1,5 +1,5 @@
-"""
-小蚕小帮手启动辅助脚本 (仅依赖 Python 标准库)
+﻿"""
+小蚕助理启动辅助脚本 (仅依赖 Python 标准库)
 
 由 run.bat / dev.bat 及 scripts/prepare_env.bat 自动调用，一般无需手动执行。
 
