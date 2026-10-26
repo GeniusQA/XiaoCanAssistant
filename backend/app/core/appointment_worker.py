@@ -103,7 +103,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
     nickname = account.get("nickname") or account_key
     store_name = apt.get("store_name", "店铺活动")
     promotion_id = apt.get("promotion_id", "")
-    platform_name = "美团外卖" if apt.get("platform") == "meituan" else ("饿了么" if apt.get("platform") == "eleme" else "京东外卖")
+    platform_name = "美团外卖" if apt.get("platform") == "meituan" else ("淘宝闪购" if apt.get("platform") == "eleme" else "京东外卖")
     platform_code = int(apt.get("store_platform") or (3 if apt.get("platform") in ("jingdong", "jd") else (1 if apt.get("platform") == "meituan" else 2)))
 
     task_id = action_source if action_source in ("store_grab", "store_appoint", "store_monitor", "store_search", "store_cancel") else "store_grab"
@@ -487,8 +487,15 @@ async def process_active_appointments() -> Tuple[bool, bool]:
 
             kw = (apt.get("keyword") or apt.get("store_name") or "").strip()
             match_mode = apt.get("match_mode") or "contains"
+            is_match_all = match_mode == "match_all"
             target_plat = apt.get("platform") or "all"
+            # 平台多选支持: "all" 或逗号分隔 "meituan,eleme,jingdong"
+            target_plat_set = None if target_plat == "all" else {p.strip() for p in target_plat.split(",") if p.strip()}
             rebate_mode_filter = apt.get("rebate_mode_filter") or "all"
+            activity_requirement = apt.get("activity_requirement") or "all"
+            only_grabbable = int(apt.get("only_grabbable") if apt.get("only_grabbable") is not None else 1)
+            high_rebate_only = int(apt.get("high_rebate_only") if apt.get("high_rebate_only") is not None else 0)
+            no_comment_only = int(apt.get("no_comment_only") if apt.get("no_comment_only") is not None else 0)
             min_rebate_price = float(apt.get("min_rebate_price") or 0.0)
             min_rebate_rate = float(apt.get("min_rebate_rate") or 0.0)
             max_order_money = float(apt.get("max_order_money") or 0.0)
@@ -504,21 +511,38 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             try:
                 from ..api.endpoints import _extract_all_promos_from_raw, _normalize_shangjin_item
 
-                search_tasks = [
-                    client.search_stores(
-                        keyword=kw,
-                        city_code=city_code,
-                        longitude=lon,
-                        latitude=lat,
-                        offset=0,
-                        limit=20,
-                        token=token,
-                        silk_id=silk_id,
-                        user_id=user_id
+                search_tasks = []
+                if is_match_all:
+                    # 常规匹配模式: 不带关键词, 直接拉取附近店铺 Feed (距离最近优先)
+                    search_tasks.append(
+                        client.get_store_list(
+                            city_code=city_code,
+                            longitude=lon,
+                            latitude=lat,
+                            offset=0,
+                            limit=20,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                            sort=1
+                        )
                     )
-                ]
+                else:
+                    search_tasks.append(
+                        client.search_stores(
+                            keyword=kw,
+                            city_code=city_code,
+                            longitude=lon,
+                            latitude=lat,
+                            offset=0,
+                            limit=20,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id
+                        )
+                    )
                 has_sj = False
-                if target_plat in ("all", "meituan"):
+                if target_plat == "all" or (target_plat_set and "meituan" in target_plat_set):
                     has_sj = True
                     search_tasks.append(
                         client.search_shangjin_stores(
@@ -538,10 +562,10 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 sj_res = results[1] if has_sj and len(results) > 1 and not isinstance(results[1], Exception) else {}
 
                 candidates = []
-                # 解析常规活动列表
+                # 解析常规活动列表 (常规匹配走 Feed 结构, 店名匹配走搜索结构)
                 raw_proms = search_res.get("promotions") or search_res.get("promotion_list") or search_res.get("feed_items") or []
                 for p in raw_proms:
-                    extracted = _extract_all_promos_from_raw(p, is_search=True, user_lat=float(lat), user_lon=float(lon))
+                    extracted = _extract_all_promos_from_raw(p, is_search=not is_match_all, user_lat=float(lat), user_lon=float(lon))
                     candidates.extend(extracted)
 
                 # 解析美团赏金按比例活动
@@ -562,22 +586,37 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         continue
                     total_found_stores.add(s_name)
 
-                    # 1. 店名匹配规则
-                    if match_mode == "exact":
-                        if s_name.lower() != kw_lower:
-                            continue
-                    else:
-                        if kw_lower not in s_name.lower():
-                            continue
+                    # 1. 店名匹配规则 (常规匹配模式跳过, 匹配全部商家)
+                    if not is_match_all:
+                        if match_mode == "exact":
+                            if s_name.lower() != kw_lower:
+                                continue
+                        else:
+                            if kw_lower not in s_name.lower():
+                                continue
 
-                    # 2. 平台过滤
+                    # 2. 平台过滤 (多选集合匹配)
                     c_plat = c.get("platform")
-                    if target_plat != "all" and c_plat != target_plat:
+                    if target_plat_set is not None and c_plat not in target_plat_set:
                         continue
 
                     # 3. 返利模式过滤 (all / fixed / percent)
                     c_rtype = c.get("rebate_type")
                     if rebate_mode_filter != "all" and c_rtype != rebate_mode_filter:
+                        continue
+
+                    # 3.5 活动要求过滤 (all / designated_dish 指定餐品 / repurchase 复购专享)
+                    if activity_requirement != "all":
+                        c_req = c.get("activity_requirement") or "all"
+                        if c_req != activity_requirement:
+                            continue
+
+                    # 3.6 高返利过滤 (官方类别标记 status==7, 与官方 App「高返利」tab 同源)
+                    if high_rebate_only and not c.get("is_high_rebate"):
+                        continue
+
+                    # 3.7 无需评价过滤 (官方类别标记 status==1 或 rebate_condition==99)
+                    if no_comment_only and not c.get("no_comment_required"):
                         continue
 
                     # 4. 最低返利金额
@@ -595,9 +634,9 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     if max_order_money > 0 and c_order_money > max_order_money:
                         continue
 
-                    # 7. 库存名额
+                    # 7. 库存名额 (可抢商家过滤关闭时, 即便显示无库存也尝试提交)
                     c_left = int(c.get("left_number") or 0)
-                    if c_left <= 0:
+                    if only_grabbable and c_left <= 0:
                         continue
 
                     matched_candidates.append(c)
@@ -665,7 +704,10 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 else:
                     # 未找到符合条件的方案
                     store_count = len(total_found_stores)
-                    step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探{probe_tag}: 关键词「{kw}」，发现 {store_count} 家商户 (当前暂无满足条件的剩余名额)，持续保持监听..."
+                    if is_match_all:
+                        step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探{probe_tag}: 扫描 {store_count} 家商户 (当前暂无满足活动要求与名额条件的可抢方案)，持续保持监听..."
+                    else:
+                        step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探{probe_tag}: 关键词「{kw}」，发现 {store_count} 家商户 (当前暂无满足条件的剩余名额)，持续保持监听..."
                     if linked_log_id > 0:
                         _append_apt_log(aid, linked_log_id, step_str, sync_db=(poll_cnt == 1 or poll_cnt % 3 == 0 or is_on_minute_probe), status="running")
 
@@ -748,7 +790,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     target_left = pdetail.get("left_number", 0)
 
                 t_now = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                step_str = f"[{t_now}] 第 {poll_cnt} 次名额检测: 美团余量 {mt_left or 0} 份 / 饿了么余量 {ele_left or 0} 份，持续监听中..."
+                step_str = f"[{t_now}] 第 {poll_cnt} 次名额检测: 美团余量 {mt_left or 0} 份 / 淘宝闪购余量 {ele_left or 0} 份，持续监听中..."
                 # 每轮巡检追加，且首轮或每 3 次或有名额变动时向数据库落盘一次
                 sync_needed = (poll_cnt == 1) or (poll_cnt % 3 == 0) or (target_left and int(target_left) > 0)
                 if linked_log_id > 0:

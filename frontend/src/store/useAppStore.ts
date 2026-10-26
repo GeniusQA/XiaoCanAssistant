@@ -88,7 +88,9 @@ interface AppState {
   activeLocation: ActiveLocation | null;
   locationHistory: LocationHistoryItem[];
   isSidebarCollapsed: boolean;
-  
+  /** 跨页面跳转信号: 请求我的订单页定位到指定状态标签 (auditing/completed 等), 消费后自动清空 */
+  pendingOrderStatus: string | null;
+
   setActiveTab: (tab: string) => void;
   setDarkMode: (dark: boolean) => void;
   setCurrentAccountKey: (key: string) => void;
@@ -98,6 +100,7 @@ interface AppState {
   clearLocationHistory: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapse: () => void;
+  setPendingOrderStatus: (status: string | null) => void;
   loadAccounts: () => Promise<void>;
   loadUserInfo: () => Promise<void>;
 }
@@ -121,6 +124,9 @@ export const useAppStore = create<AppState>((set, get) => {
     activeLocation: getStoredLocation(),
     locationHistory: getStoredLocationHistory(),
     isSidebarCollapsed: getStoredSidebarCollapsed(),
+    pendingOrderStatus: null,
+
+  setPendingOrderStatus: (status: string | null) => set({ pendingOrderStatus: status }),
 
   setActiveTab: (tab: string) =>
     set((state) => ({

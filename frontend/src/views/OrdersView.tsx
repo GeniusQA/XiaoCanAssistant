@@ -16,7 +16,8 @@ import {
   Empty,
   Modal,
   Descriptions,
-  Banner
+  Banner,
+  Tooltip
 } from '@douyinfe/semi-ui';
 import { gsap, useGSAP } from '../utils/animations';
 
@@ -34,22 +35,15 @@ import type { Order } from '../types';
 
 const { Title, Text } = Typography;
 
-const getConditionTagColor = (condition?: string): 'green' | 'cyan' | 'blue' | 'amber' | 'grey' => {
-  if (!condition) return 'green';
-  const c = condition.trim();
-  if (c.includes('无需') || c.includes('免评')) {
-    return 'green';
+const normalizeConditionText = (condition?: string): string => {
+  const c = (condition || '').trim();
+  if (!c || c.includes('无需') || c.includes('免评')) {
+    return '无需评价';
   }
-  if (c.includes('用餐反馈') || c.includes('反馈')) {
-    return 'cyan';
+  if (c.includes('用餐反馈') || c.includes('反馈') || c.includes('图文') || c.includes('好评')) {
+    return '图文反馈';
   }
-  if (c.includes('随心')) {
-    return 'blue';
-  }
-  if (c.includes('图文') || c.includes('好评') || c.includes('字') || c.includes('图')) {
-    return 'amber';
-  }
-  return 'cyan';
+  return c;
 };
 
 const formatRemainingTime = (remainingSec: number | null | undefined): string => {
@@ -73,6 +67,8 @@ export const OrdersView: React.FC = () => {
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
   const accounts = useAppStore((s) => s.accounts);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const pendingOrderStatus = useAppStore((s) => s.pendingOrderStatus);
+  const setPendingOrderStatus = useAppStore((s) => s.setPendingOrderStatus);
   const containerRef = useRef<HTMLDivElement>(null);
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const [tableScrollY, setTableScrollY] = useState<number>(460);
@@ -85,8 +81,18 @@ export const OrdersView: React.FC = () => {
   const [uploadModalOrder, setUploadModalOrder] = useState<Order | null>(null);
   const [rebateRuleVisible, setRebateRuleVisible] = useState(false);
   const [platformOrderIdInput, setPlatformOrderIdInput] = useState<string>('');
+  // 取单号引导弹窗 (仿官方小程序跳转流程的分步引导)
+  const [pickGuideVisible, setPickGuideVisible] = useState(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [delayingOrderId, setDelayingOrderId] = useState<number | null>(null);
+
+  // 跨页面跳转定位: 仪表盘等入口请求定位到指定状态标签 (审核中/已完成等), 消费后清空信号
+  useEffect(() => {
+    if (pendingOrderStatus) {
+      setActiveStatusTab(pendingOrderStatus);
+      setPendingOrderStatus(null);
+    }
+  }, [pendingOrderStatus, setPendingOrderStatus]);
 
   // 纯净视口高度自适应：监听表格卡片容器，杜绝 DOM querySelector 与强制同步重排
   useEffect(() => {
@@ -117,7 +123,8 @@ export const OrdersView: React.FC = () => {
   }, []);
 
   const lastOrdersSignatureRef = useRef<string>('');
-  const inFlightOrdersRef = useRef<boolean>(false);
+  // 请求序号: 允许并发, 仅最新一次请求的结果生效 (避免切 Tab 时旧请求覆盖新数据)
+  const fetchSeqRef = useRef<number>(0);
 
   const fetchOrders = async (kw?: string, force = false, silent = false) => {
     if (accounts.length === 0) {
@@ -131,9 +138,7 @@ export const OrdersView: React.FC = () => {
     if (!force && lastOrdersSignatureRef.current === queryKey) {
       return;
     }
-    if (inFlightOrdersRef.current) return;
-    inFlightOrdersRef.current = true;
-    lastOrdersSignatureRef.current = queryKey;
+    const seq = ++fetchSeqRef.current;
 
     if (!silent) setLoading(true);
     try {
@@ -144,7 +149,11 @@ export const OrdersView: React.FC = () => {
         keyword: keywordToSearch
       });
 
+      // 过期响应 (期间已发起更新的请求) 直接丢弃, 防止旧数据覆盖新 Tab 结果
+      if (seq !== fetchSeqRef.current) return;
+
       if (ordersRes.ok) {
+        lastOrdersSignatureRef.current = queryKey;
         setOrders(ordersRes.orders || []);
         if ((ordersRes.orders || []).length === 0 && ordersRes.sync_error) {
           Toast.warning({
@@ -157,16 +166,21 @@ export const OrdersView: React.FC = () => {
       }
     } catch (e) {
       lastOrdersSignatureRef.current = '';
-      Toast.error('拉取订单列表失败');
+      if (seq === fetchSeqRef.current) {
+        Toast.error('拉取订单列表失败');
+      }
     } finally {
-      inFlightOrdersRef.current = false;
-      if (!silent) setLoading(false);
+      if (seq === fetchSeqRef.current) {
+        if (!silent) setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    // 存在跨页跳转定位信号时, 等信号消费 (Tab 已切换) 后再拉取, 避免先发一次无关请求
+    if (pendingOrderStatus) return;
     fetchOrders();
-  }, [currentAccountKey, activeStatusTab, platformFilter]);
+  }, [currentAccountKey, activeStatusTab, platformFilter, pendingOrderStatus]);
 
   // 页面切入激活或顶级重复点击时立刻拉取最新订单数据
   useOnActivated('orders', () => {
@@ -211,6 +225,44 @@ export const OrdersView: React.FC = () => {
     setPlatformOrderIdInput('');
   };
 
+  // OCR 自动识别: 粘贴外卖订单截图 -> 官方 OCR 提取单号自动回填 (手动输入的兜底)
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const handlePasteScreenshot = async (e: React.ClipboardEvent) => {
+    if (!uploadModalOrder || ocrLoading) return;
+    const items = Array.from(e.clipboardData?.items || []);
+    const imgItem = items.find((it) => it.type.startsWith('image/'));
+    if (!imgItem) return;
+    const file = imgItem.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    setOcrLoading(true);
+    try {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('读取剪贴板图片失败'));
+        reader.readAsDataURL(file);
+      });
+      const imageBase64 = dataUrl.split(',')[1] || '';
+      if (!imageBase64) {
+        Toast.warning('剪贴板内容不是有效图片');
+        return;
+      }
+      const res = await api.ocrOrderId(uploadModalOrder.id, imageBase64);
+      if (res.ok && res.order_id_str) {
+        setPlatformOrderIdInput(res.order_id_str);
+        Toast.success(`已自动识别外卖单号: ${res.order_id_str}，请核对后提交`);
+      } else {
+        Toast.warning(res.message || '未能从截图中识别出单号，请手动输入');
+      }
+    } catch (e: any) {
+      const detail = e.response?.data?.detail || e.message || e;
+      Toast.error(`截图识别失败: ${detail}`);
+    } finally {
+      setOcrLoading(false);
+    }
+  };
+
   // 提交/更新外卖单号
   const handleConfirmSubmitId = async () => {
     if (!uploadModalOrder) return;
@@ -241,20 +293,28 @@ export const OrdersView: React.FC = () => {
   };
 
   const handleDelayVoucher = async (order: Order) => {
-    setDelayingOrderId(order.id);
-    try {
-      const res = await api.delayOrderVoucher(order.id);
-      if (res.ok) {
-        Toast.success(res.message || '领红包延时特权已激活，凭证有效期已延长');
-        fetchOrders(undefined, true);
-      } else {
-        Toast.error(res.message || '延时申请失败');
-      }
-    } catch (e: any) {
-      Toast.error(`延时操作异常: ${e.response?.data?.detail || e.message || e}`);
-    } finally {
-      setDelayingOrderId(null);
-    }
+    Modal.confirm({
+      title: '使用延时券延长提交时间',
+      content: '将消耗 1 张延时券，把该订单的凭证提交时间延长（最长可至次日早 6 点）。官方延时券剩余数量以小蚕 App 为准。确定使用吗？',
+      okText: '使用延时券',
+      cancelText: '取消',
+      onOk: async () => {
+        setDelayingOrderId(order.id);
+        try {
+          const res = await api.delayOrderVoucher(order.id, true);
+          if (res.ok) {
+            Toast.success(res.message || '延时券使用成功，提交时间已延长');
+            fetchOrders(undefined, true);
+          } else {
+            Toast.error(res.message || '延时申请失败');
+          }
+        } catch (e: any) {
+          Toast.error(`延时操作失败: ${e.response?.data?.detail || e.message || e}`);
+        } finally {
+          setDelayingOrderId(null);
+        }
+      },
+    });
   };
 
   const DEFAULT_PLATFORM_ICONS: Record<string, string> = {
@@ -270,7 +330,7 @@ export const OrdersView: React.FC = () => {
       return { label: '京东外卖', color: 'red' as const, avatarColor: 'red' as const };
     }
     if (plat === 'eleme' || plat === 'taobao') {
-      return { label: '饿了么', color: 'blue' as const, avatarColor: 'blue' as const };
+      return { label: '淘宝闪购', color: 'blue' as const, avatarColor: 'blue' as const };
     }
     return { label: '美团外卖', color: 'orange' as const, avatarColor: 'orange' as const };
   };
@@ -481,17 +541,23 @@ export const OrdersView: React.FC = () => {
                   </div>
                   {status === 'pending' && !isPercentOrder && (
                     <div className="flex items-center gap-1.5 mt-1">
-                      <Button
-                        theme="light"
-                        type="warning"
-                        size="small"
-                        loading={delayingOrderId === row?.id}
-                        className="!py-0.5 !px-1.5 text-xs h-5"
-                        onClick={() => row && handleDelayVoucher(row)}
-                        title="激活官方领红包延时2小时特权"
-                      >
-                        延时2h
-                      </Button>
+                      {row?.delay_used ? (
+                        <Tooltip content="官方接口反馈该订单已使用过领红包延时特权">
+                          <Tag color="green" size="small">已延时</Tag>
+                        </Tooltip>
+                      ) : (
+                        <Button
+                          theme="light"
+                          type="warning"
+                          size="small"
+                          loading={delayingOrderId === row?.id}
+                          className="!py-0.5 !px-1.5 text-xs h-5"
+                          onClick={() => row && handleDelayVoucher(row)}
+                          title="激活官方领红包延时2小时特权"
+                        >
+                          延时2h
+                        </Button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -510,17 +576,23 @@ export const OrdersView: React.FC = () => {
                         回填单号
                       </Button>
                       {!isPercentOrder && (
-                        <Button
-                          theme="light"
-                          type="warning"
-                          size="small"
-                          loading={delayingOrderId === row?.id}
-                          className="!py-0.5 !px-1.5 text-xs h-5"
-                          onClick={() => row && handleDelayVoucher(row)}
-                          title="激活官方领红包延时2小时特权"
-                        >
-                          延时2h
-                        </Button>
+                        row?.delay_used ? (
+                          <Tooltip content="官方接口反馈该订单已使用过领红包延时特权">
+                            <Tag color="green" size="small">已延时</Tag>
+                          </Tooltip>
+                        ) : (
+                          <Button
+                            theme="light"
+                            type="warning"
+                            size="small"
+                            loading={delayingOrderId === row?.id}
+                            className="!py-0.5 !px-1.5 text-xs h-5"
+                            onClick={() => row && handleDelayVoucher(row)}
+                            title="激活官方领红包延时2小时特权"
+                          >
+                            延时2h
+                          </Button>
+                        )
                       )}
                     </div>
                   )}
@@ -541,8 +613,8 @@ export const OrdersView: React.FC = () => {
           .replace(/[（(]需含字含图[）)]/g, '')
           .trim() || '无需评价';
         return (
-          <Tag color={getConditionTagColor(cleanCond)} size="small">
-            {cleanCond}
+          <Tag color="grey" size="small">
+            {normalizeConditionText(cleanCond)}
           </Tag>
         );
       },
@@ -671,7 +743,7 @@ export const OrdersView: React.FC = () => {
           >
             <Radio value="all">全部</Radio>
             <Radio value="meituan">美团</Radio>
-            <Radio value="eleme">饿了么</Radio>
+            <Radio value="eleme">淘宝闪购</Radio>
             <Radio value="jingdong">京东</Radio>
           </RadioGroup>
 
@@ -780,7 +852,7 @@ export const OrdersView: React.FC = () => {
         </div>
       </Modal>
 
-      {/* 回填外卖单号弹窗 (禁止二次修改) */}
+      {/* 回填外卖单号弹窗 (禁止二次修改, 支持粘贴截图自动识别单号) */}
       <Modal
         title="回填外卖单号"
         visible={!!uploadModalOrder}
@@ -795,7 +867,7 @@ export const OrdersView: React.FC = () => {
         width={440}
         centered
       >
-        <div className="space-y-3 py-1">
+        <div className="space-y-3 py-1" onPaste={handlePasteScreenshot}>
           <Descriptions
             size="small"
             row={false}
@@ -820,7 +892,13 @@ export const OrdersView: React.FC = () => {
               },
               {
                 key: '预计返利',
-                value: <Text type="danger" strong>¥{uploadModalOrder?.rebate_money}</Text>
+                value: (() => {
+                  // 与列表行口径一致: max(原始返豆, 实际返豆) + 红包 (红包沿用进制定位换算)
+                  const rpRaw = Number(uploadModalOrder?.redpack_reward_num || 0);
+                  const rpYuan = rpRaw > 5 ? rpRaw / 100 : rpRaw;
+                  const total = Math.max(Number(uploadModalOrder?.original_user_rebate || 0), Number(uploadModalOrder?.rebate_money || 0)) + rpYuan;
+                  return <Text type="danger" strong>¥{total.toFixed(2)}</Text>;
+                })()
               }
             ]}
           />
@@ -834,12 +912,135 @@ export const OrdersView: React.FC = () => {
               onChange={(val) => setPlatformOrderIdInput(val || '')}
               autoFocus
             />
+            <Banner
+              type="info"
+              className="rounded-lg text-xs mt-2"
+              description={
+                ocrLoading
+                  ? '正在识别截图中的单号...'
+                  : '省事技巧：在美团/淘宝闪购 App 截图订单页后，直接在本弹窗按 Ctrl+V 粘贴截图，可自动识别单号（识别失败再手动输入）'
+              }
+              closeIcon={null}
+            />
+            <Button
+              size="small"
+              theme="light"
+              type="primary"
+              className="mt-2"
+              onClick={() => setPickGuideVisible(true)}
+            >
+              去外卖平台取单号（分步引导）
+            </Button>
           </div>
           <Banner
             type="warning"
             description="单号提交后官方将锁定绑定关系，平台禁止二次修改，请务必核对正确"
             className="rounded-lg text-xs"
           />
+          {(uploadModalOrder?.order_type === 12 || Number(uploadModalOrder?.rebate_ratio || 0) > 0) && (
+            <Banner
+              type="info"
+              className="rounded-lg text-xs"
+              description="活动返利将在订单完成 24 小时后发放至美团钱包，红包、返利券额外返利将发放至蚕豆余额"
+              closeIcon={null}
+            />
+          )}
+        </div>
+      </Modal>
+
+      {/* 取单号分步引导弹窗 (PC 端无法直接跳转小程序, 提供等效引导) */}
+      <Modal
+        title="去外卖平台取订单号"
+        visible={pickGuideVisible}
+        onCancel={() => setPickGuideVisible(false)}
+        footer={null}
+        width={480}
+        centered
+      >
+        <div className="py-1 flex flex-col gap-3">
+          <Banner
+            type="info"
+            className="rounded-lg text-xs"
+            description="PC 助手无法直接跳转微信小程序。按下面三步操作，30 秒即可拿到订单号，取号后回来粘贴截图或直接填号。"
+            closeIcon={null}
+          />
+
+          <div className="flex gap-3 items-start">
+            <Tag color="blue" size="small" shape="circle" className="!mt-0.5">1</Tag>
+            <div className="flex-1">
+              <Text strong className="text-sm">复制订单对照信息</Text>
+              <div className="text-xs text-semi-color-text-2 mt-1">
+                复制后在美团/淘宝闪购订单列表按店铺名和金额对照，快速找到这笔订单。
+              </div>
+              <Button
+                size="small"
+                theme="light"
+                className="mt-2"
+                onClick={() => {
+                  const info = `${uploadModalOrder?.store_name || ''} ¥${uploadModalOrder?.order_money || 0}`;
+                  navigator.clipboard.writeText(info).then(
+                    () => Toast.success(`已复制: ${info}`),
+                    () => Toast.error('复制失败，请手动记录')
+                  );
+                }}
+              >
+                复制店铺名与金额
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex gap-3 items-start">
+            <Tag color="blue" size="small" shape="circle" className="!mt-0.5">2</Tag>
+            <div className="flex-1">
+              <Text strong className="text-sm">打开 PC 微信的外卖小程序</Text>
+              <div className="text-xs text-semi-color-text-2 mt-1">
+                点击「打开微信」后在侧边栏小程序面板搜索
+                <Text strong size="small">{uploadModalOrder?.platform === 'eleme' ? '「淘宝闪购」' : '「美团外卖」'}</Text>
+                ，进入【订单】列表找到刚才那笔订单。
+              </div>
+              <Button
+                size="small"
+                theme="light"
+                type="primary"
+                className="mt-2"
+                onClick={() => {
+                  // 唤起 PC 微信主窗口 (无法直接定位小程序, 仅省一步)
+                  window.location.href = 'weixin://';
+                  setTimeout(() => Toast.info('若微信未唤起，请手动打开 PC 微信 → 小程序面板'), 1200);
+                }}
+              >
+                打开微信
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex gap-3 items-start">
+            <Tag color="blue" size="small" shape="circle" className="!mt-0.5">3</Tag>
+            <div className="flex-1">
+              <Text strong className="text-sm">取号并回填</Text>
+              <div className="text-xs text-semi-color-text-2 mt-1">
+                在小程序订单详情页复制订单号，回到回填弹窗粘贴；或直接截图订单页 → 回填弹窗按
+                <Text code size="small">Ctrl+V</Text> 自动识别单号。
+              </div>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-semi-color-border-subtle">
+            <Button size="small" theme="light" onClick={() => setPickGuideVisible(false)}>
+              完成
+            </Button>
+            <Button
+              size="small"
+              theme="solid"
+              type="primary"
+              onClick={() => {
+                setPickGuideVisible(false);
+                Toast.info('请回到回填弹窗，粘贴截图或输入单号');
+              }}
+            >
+              回到回填弹窗
+            </Button>
+          </div>
         </div>
       </Modal>
     </div>

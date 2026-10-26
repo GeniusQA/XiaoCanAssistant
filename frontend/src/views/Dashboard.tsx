@@ -160,6 +160,7 @@ export const Dashboard: React.FC = () => {
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
   const setCurrentAccountKey = useAppStore((s) => s.setCurrentAccountKey);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const setPendingOrderStatus = useAppStore((s) => s.setPendingOrderStatus);
   const dashboardRef = useRef<HTMLDivElement>(null);
 
   // 核心业务数据状态
@@ -834,7 +835,7 @@ export const Dashboard: React.FC = () => {
       {/* 4 大核心资产 Bento 卡片 (大字号聚焦核心资产与调度) */}
       <Row gutter={[10, 10]} className="w-full !mx-0 shrink-0">
         {/* 1. 累计到账返现 */}
-        <Col xs={12} sm={6}>
+        <Col xs={24} sm={12} xl={6}>
           <div
             onMouseEnter={handleBentoEnter}
             onMouseLeave={handleBentoLeave}
@@ -871,11 +872,11 @@ export const Dashboard: React.FC = () => {
         </Col>
 
         {/* 2. 在途/待入账返现 */}
-        <Col xs={12} sm={6}>
+        <Col xs={24} sm={12} xl={6}>
           <div
             onMouseEnter={handleBentoEnter}
             onMouseLeave={handleBentoLeave}
-            onClick={() => setActiveTab('orders')}
+            onClick={() => { setPendingOrderStatus('auditing'); setActiveTab('orders'); }}
             className="gsap-bento-card h-full cursor-pointer will-change-transform"
           >
             <Card
@@ -908,11 +909,11 @@ export const Dashboard: React.FC = () => {
         </Col>
 
         {/* 3. 今日已省外卖费 */}
-        <Col xs={12} sm={6}>
+        <Col xs={24} sm={12} xl={6}>
           <div
             onMouseEnter={handleBentoEnter}
             onMouseLeave={handleBentoLeave}
-            onClick={() => setActiveTab('orders')}
+            onClick={() => { setPendingOrderStatus('completed'); setActiveTab('orders'); }}
             className="gsap-bento-card h-full cursor-pointer will-change-transform"
           >
             <Card
@@ -948,7 +949,7 @@ export const Dashboard: React.FC = () => {
         </Col>
 
         {/* 4. 自动化任务调度 */}
-        <Col xs={12} sm={6}>
+        <Col xs={24} sm={12} xl={6}>
           <div
             onMouseEnter={handleBentoEnter}
             onMouseLeave={handleBentoLeave}
@@ -1102,7 +1103,7 @@ export const Dashboard: React.FC = () => {
                               </span>
                             </Tooltip>
                             <Tag size="small" color={order.platform === 'meituan' ? 'amber' : 'blue'} className="shrink-0">
-                              {order.platform === 'meituan' ? '美团' : '饿了么'}
+                              {order.platform === 'meituan' ? '美团' : '淘宝闪购'}
                             </Tag>
                             {isBound ? (
                               <Tag size="small" color="cyan" className="shrink-0">
@@ -1357,7 +1358,7 @@ export const Dashboard: React.FC = () => {
                             )}
                             {t.platform && (
                               <Tag size="small" color={t.platform === 'meituan' ? 'amber' : 'blue'} className="shrink-0">
-                                {t.platform === 'meituan' ? '美团' : '饿了么'}
+                                {t.platform === 'meituan' ? '美团' : '淘宝闪购'}
                               </Tag>
                             )}
                           </div>

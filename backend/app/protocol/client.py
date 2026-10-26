@@ -446,6 +446,44 @@ class XiaoCanClient:
             silk_id=silk_id
         )
 
+    async def ocr_promotion_order(
+        self,
+        image_base64: str,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        OCR 识别外卖平台订单截图 (Silkworm.SilkwormService.OcrPromotionOrder)
+        官方参数体在插件内无法静态确认, 按最可能形态依次尝试 (纯图片字段, 服务端参数校验失败无副作用)。
+        """
+        b64 = re.sub(r"^data:image/[^;]+;base64,", "", image_base64).strip()
+        base = {"silk_id": int(silk_id) if silk_id else 0, "app_id": 20}
+        candidates = [
+            {**base, "img": b64},
+            {**base, "image": b64},
+            {**base, "img_base64": b64},
+            {**base, "file": b64},
+        ]
+        last_err: Optional[XiaoCanRPCError] = None
+        for body in candidates:
+            try:
+                return await self.invoke_rpc(
+                    server_name="Silkworm",
+                    method_name="SilkwormService.OcrPromotionOrder",
+                    body=body,
+                    city_code=city_code,
+                    token=token,
+                    user_id=user_id,
+                    silk_id=silk_id
+                )
+            except XiaoCanRPCError as e:
+                last_err = e
+                if e.code not in (1, 3, 500):
+                    raise
+        raise last_err if last_err else XiaoCanRPCError(500, "OCR 识别失败", raw={})
+
     async def search_shangjin_stores(
         self,
         keyword: str,
@@ -839,7 +877,7 @@ class XiaoCanClient:
         user_id: Optional[str] = None,
         city_code: int = 440303
     ) -> Dict[str, Any]:
-        """完成任务领奖励 (SilkwormMobileMarketingService.CompleteTaskEvent: 3=饿了么, 4=美团, 6=社群)"""
+        """完成任务领奖励 (SilkwormMobileMarketingService.CompleteTaskEvent: 3=淘宝闪购, 4=美团, 6=社群)"""
         body = {
             "silk_id": int(silk_id) if silk_id else 0,
             "task_type": int(task_type)
@@ -1035,7 +1073,7 @@ class XiaoCanClient:
         user_id: Optional[str] = None,
         city_code: int = 440303
     ) -> Dict[str, Any]:
-        """领取免费任务赠送的开红包机会 (SilkwormLotteryMobile.AddLotteryTimes: 1=签到, 2=分享, 4=沾一沾, 8=饿了么, 9=美团, 10=到店, 11=福利)"""
+        """领取免费任务赠送的开红包机会 (SilkwormLotteryMobile.AddLotteryTimes: 1=签到, 2=分享, 4=沾一沾, 8=淘宝闪购, 9=美团, 10=到店, 11=福利)"""
         body = {
             "silk_id": int(silk_id) if silk_id else 0,
             "type": int(lottery_type)
@@ -1642,7 +1680,7 @@ class XiaoCanClient:
         platform: str = "app"
     ) -> Dict[str, Any]:
         """完成领红包延时或营销任务 (SilkwormMarketing.SilkwormMobileMarketingService.CompleteTaskEvent)
-        task_type: 4 (美团订单延时 2 小时 - user_receive_meituan_task), 3 (饿了么订单延时 2 小时 - user_receive_elem_task)
+        task_type: 4 (美团订单延时 2 小时 - user_receive_meituan_task), 3 (淘宝闪购订单延时 2 小时 - user_receive_elem_task)
         """
         body: Dict[str, Any] = {
             "silk_id": int(silk_id) if silk_id else 0,
@@ -1661,6 +1699,46 @@ class XiaoCanClient:
             user_id=user_id,
             platform=platform
         )
+
+    async def use_user_delay_card(
+        self,
+        promotion_order_id: int,
+        num: int = 1,
+        token: str = "",
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        使用延时券延长订单凭证提交时间 (SilkwormService.DelayPromotionQuota, 官方 App「选择使用延时券数量」同源)
+        官方参数体在插件内无法静态确认, 按最可能形态依次尝试; 服务端参数校验失败不会扣券。
+        """
+        base = {"silk_id": int(silk_id) if silk_id else 0, "app_id": 20}
+        candidates = [
+            {**base, "promotion_order_id": int(promotion_order_id), "num": int(num)},
+            {**base, "promotion_order_id": int(promotion_order_id), "card_num": int(num)},
+            {**base, "promotion_order_id": int(promotion_order_id), "delay_num": int(num)},
+            {**base, "order_id": int(promotion_order_id), "num": int(num)},
+        ]
+        last_err: Optional[XiaoCanRPCError] = None
+        for body in candidates:
+            try:
+                return await self.invoke_rpc(
+                    server_name="Silkworm",
+                    method_name="DelayPromotionQuota",
+                    body=body,
+                    city_code=city_code,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    platform="mini"
+                )
+            except XiaoCanRPCError as e:
+                last_err = e
+                # 参数形态不匹配 (参数错误/网关500) 时继续尝试下一形态; 其它业务错误直接抛出
+                if e.code not in (1, 3, 500):
+                    raise
+        raise last_err if last_err else XiaoCanRPCError(500, "延时券调用失败", raw={})
 
     async def vip_prizes_lottery(
         self,

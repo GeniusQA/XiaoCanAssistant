@@ -561,6 +561,14 @@ class MeituanAuthManager:
                         if city_name:
                             nickname += f" - {city_name}"
 
+                    # 绑定前把当前使用的旧美团凭证归档到保留槽位 (最多保留2个, 合计3个账号可互相切换)
+                    try:
+                        archived = db.archive_meituan_slot_before_bind(account_key, token)
+                        if archived:
+                            log_lines.append(f"[{time.strftime('%H:%M:%S')}] 旧美团凭证已自动归档至保留槽位，可随时切换回用")
+                    except Exception:
+                        pass
+
                     bind_meituan_to_account(account_key, {
                         "token": token,
                         "nickname": nickname,

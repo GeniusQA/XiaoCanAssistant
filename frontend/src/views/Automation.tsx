@@ -1084,6 +1084,7 @@ export const Automation: React.FC = () => {
                   fullMode={false}
                   type="info"
                   bordered
+                  closeIcon={null}
                   description={
                     <span style={{ fontSize: 12 }}>
                       {selectedTask.task_id === 'dual_rebate_monitor'

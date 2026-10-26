@@ -24,13 +24,13 @@ export const SideNav: React.FC = () => {
   const currentAccount = accounts.find((a) => a.key === currentAccountKey) || accounts[0];
 
   const navItems = [
-    { itemKey: 'dashboard', text: '概览仪表盘', icon: <IconHome size="large" /> },
+    { itemKey: 'dashboard', text: '数据概览', icon: <IconHome size="large" /> },
     { itemKey: 'accounts', text: '账号管理', icon: <IconUser size="large" /> },
-    { itemKey: 'automation', text: '自动化任务', icon: <IconPlay size="large" /> },
-    { itemKey: 'store', text: '店铺抢单预约', icon: <IconShoppingBag size="large" /> },
+    { itemKey: 'automation', text: '自动任务', icon: <IconPlay size="large" /> },
+    { itemKey: 'store', text: '商家抢单', icon: <IconShoppingBag size="large" /> },
     { itemKey: 'orders', text: '我的订单', icon: <IconOrderedList size="large" /> },
     { itemKey: 'logs', text: '运行日志', icon: <IconFile size="large" /> },
-    { itemKey: 'settings', text: '系统与通知', icon: <IconSetting size="large" /> },
+    { itemKey: 'settings', text: '系统配置', icon: <IconSetting size="large" /> },
   ];
 
   return (

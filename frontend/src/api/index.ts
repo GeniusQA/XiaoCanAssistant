@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { Toast } from '@douyinfe/semi-ui';
-import type { Account, AccountDetailData, UserCardItem, TaskItem, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse } from '../types';
+import type { Account, AccountDetailData, UserCardItem, TaskItem, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse, MeituanSlot, MediaVipRecord } from '../types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -114,6 +114,9 @@ export const api = {
   clearAllMeituan: () => client.post<{ ok: boolean; message: string }>('/meituan/clear-all').then(r => r.data),
   unbindMeituan: (accountKey: string) => client.post<{ ok: boolean; message: string }>(`/accounts/${accountKey}/unbind-meituan`).then(r => r.data),
   bindExistingMeituan: (accountKey: string, meituanKey: string) => client.post<{ ok: boolean; message: string }>(`/accounts/${accountKey}/bind-meituan`, { meituan_key: meituanKey }).then(r => r.data),
+  getMeituanSlots: (accountKey: string) => client.get<{ ok: boolean; slots: MeituanSlot[]; cap: number }>(`/accounts/${accountKey}/meituan-slots`).then(r => r.data),
+  switchMeituanSlot: (accountKey: string, slotId: number) => client.post<{ ok: boolean; message: string; meituan_nickname: string }>(`/accounts/${accountKey}/meituan-slots/${slotId}/switch`).then(r => r.data),
+  deleteMeituanSlot: (accountKey: string, slotId: number) => client.delete<{ ok: boolean; message: string }>(`/accounts/${accountKey}/meituan-slots/${slotId}`).then(r => r.data),
   pollMeituanAuth: (sessionId: string) => client.get<MeituanAuthPollResponse>('/meituan/auth/poll', { params: { session_id: sessionId } }).then(r => r.data),
   cancelMeituanAuth: (sessionId: string) => client.post<{ ok: boolean; message: string }>('/meituan/auth/cancel', { session_id: sessionId }).then(r => r.data),
   runMeituanClaim: (data?: { account_key?: string; force?: boolean }) => client.post<{ ok: boolean; result?: any; results?: any[]; message?: string }>('/meituan/claim/run', data, { timeout: 150000 }).then(r => r.data),
@@ -171,8 +174,12 @@ export const api = {
     client.put<{ ok: boolean; order: Order; message: string }>(`/orders/${id}`, data).then(r => r.data),
   submitPlatformOrderId: (id: number, platformOrderId: string, receiptImg?: string) =>
     client.post<{ ok: boolean; order: Order; message: string; error?: string }>(`/orders/${id}/submit-platform-id`, { platform_order_id: platformOrderId, receipt_img: receiptImg }).then(r => r.data),
-  delayOrderVoucher: (id: number) =>
-    client.post<{ ok: boolean; is_delayed: boolean; delay_time: number; message: string }>(`/orders/${id}/delay-voucher`).then(r => r.data),
+  ocrOrderId: (id: number, imageBase64: string) =>
+    client.post<{ ok: boolean; order_id_str: string; candidates?: string[]; message?: string }>(`/orders/${id}/ocr-order-id`, { image_base64: imageBase64 }, { timeout: 60000 }).then(r => r.data),
+  delayOrderVoucher: (id: number, useDelayCard: boolean = false) =>
+    client.post<{ ok: boolean; is_delayed: boolean; delay_time: number; message: string; use_delay_card?: boolean }>(`/orders/${id}/delay-voucher`, { use_delay_card: useDelayCard }).then(r => r.data),
+  getMediaVipRecords: (key: string) =>
+    client.get<{ ok: boolean; records: MediaVipRecord[]; error?: string }>(`/accounts/${key}/media-vip-records`, { timeout: 30000 }).then(r => r.data),
   deleteOrder: (id: number) => 
     client.delete<{ ok: boolean; message: string }>(`/orders/${id}`).then(r => r.data),
 

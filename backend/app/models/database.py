@@ -208,6 +208,34 @@ def init_db():
     )
     """)
 
+    # 7.1 美团多账号槽位表 (每个小蚕账号最多 2 个保留槽 + 1 个当前使用 = 3 个美团凭证)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS meituan_slots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_key TEXT NOT NULL,
+        nickname TEXT DEFAULT '',
+        avatar TEXT DEFAULT '',
+        token TEXT DEFAULT '',
+        saved_at INTEGER DEFAULT 0,
+        remark TEXT DEFAULT '',
+        last_claimed_at INTEGER DEFAULT 0,
+        last_claimed_count INTEGER DEFAULT 0,
+        last_claimed_details TEXT DEFAULT '[]',
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(account_key, token)
+    )
+    """)
+
+    # 动态补充槽位统计字段 (早期建的表)
+    slot_cols = [r[1] for r in c.execute("PRAGMA table_info(meituan_slots)").fetchall()]
+    if "last_claimed_at" not in slot_cols:
+        c.execute("ALTER TABLE meituan_slots ADD COLUMN last_claimed_at INTEGER DEFAULT 0")
+    if "last_claimed_count" not in slot_cols:
+        c.execute("ALTER TABLE meituan_slots ADD COLUMN last_claimed_count INTEGER DEFAULT 0")
+    if "last_claimed_details" not in slot_cols:
+        c.execute("ALTER TABLE meituan_slots ADD COLUMN last_claimed_details TEXT DEFAULT '[]'")
+
     # 动态检查补充 orders 字段
     cols = [r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
     if "promotion_order_id" not in cols:
@@ -230,6 +258,8 @@ def init_db():
         c.execute("ALTER TABLE orders ADD COLUMN platform_total_price REAL DEFAULT 0")
     if "remark" not in cols:
         c.execute("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''")
+    if "delay_used" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN delay_used INTEGER DEFAULT 0")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -297,6 +327,14 @@ def init_db():
         c.execute("ALTER TABLE store_appointments ADD COLUMN auto_stop_on_success INTEGER DEFAULT 1")
     if "max_order_money" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN max_order_money REAL DEFAULT 0")
+    if "activity_requirement" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN activity_requirement TEXT DEFAULT 'all'")
+    if "only_grabbable" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN only_grabbable INTEGER DEFAULT 1")
+    if "high_rebate_only" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN high_rebate_only INTEGER DEFAULT 0")
+    if "no_comment_only" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN no_comment_only INTEGER DEFAULT 0")
 
     # 自动自愈 store_appointments 中缺失 store_icon 的记录 (从 orders 表或同店名同ID回填)
     try:
@@ -896,9 +934,10 @@ def add_appointment(data: Dict[str, Any]) -> int:
             task_type, start_time, until_time, notified_31m, notified_1m,
             check_interval, platform, order_money, rebate_price, rebate_desc, rebate_type, log_id,
             use_advance_card, redpack_id, redpack_name,
-            keyword, match_mode, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
+            keyword, match_mode, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money,
+            activity_requirement, only_grabbable, high_rebate_only, no_comment_only
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["account_key"],
             str(data.get("store_id", "")),
@@ -932,7 +971,11 @@ def add_appointment(data: Dict[str, Any]) -> int:
             float(data.get("min_rebate_rate") or 0.0),
             str(data.get("rebate_mode_filter") or "all"),
             int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1),
-            float(data.get("max_order_money") or 0.0)
+            float(data.get("max_order_money") or 0.0),
+            str(data.get("activity_requirement") or "all"),
+            int(data.get("only_grabbable") if data.get("only_grabbable") is not None else 1),
+            int(data.get("high_rebate_only") if data.get("high_rebate_only") is not None else 0),
+            int(data.get("no_comment_only") if data.get("no_comment_only") is not None else 0)
         ))
         conn.commit()
         return cur.lastrowid
@@ -1256,18 +1299,27 @@ def delete_order(order_id: int) -> bool:
 def get_order_stats(account_key: Optional[str] = None) -> Dict[str, Any]:
     auto_cancel_expired_orders(account_key=account_key)
     with get_conn() as conn:
-        sql = "SELECT status, order_money, rebate_money FROM orders WHERE 1=1"
+        sql = "SELECT status, order_money, rebate_money, original_user_rebate, redpack_reward_num FROM orders WHERE 1=1"
         params: Dict[str, Any] = {}
         if account_key:
             sql += " AND account_key = :account_key"
             params["account_key"] = account_key
         rows = conn.execute(sql, params).fetchall()
 
+    # 在途金额口径与「我的订单」列表完全一致:
+    # - 审核中单数 = status==auditing (待上传 pending 不算审核中, 与订单页「审核中」tab 一致)
+    # - 在途金额 = max(原始返豆, 实际返豆) + 红包 (红包沿用进制定位换算: >5 视为分)
+    def _rebate_display(r) -> float:
+        rp = float(r["redpack_reward_num"] or 0)
+        rp = rp / 100.0 if rp > 5 else rp
+        return max(float(r["original_user_rebate"] or 0), float(r["rebate_money"] or 0)) + rp
+
     total_orders = len([r for r in rows if r["status"] != "cancelled"])
     completed_orders = sum(1 for r in rows if r["status"] == "completed")
-    pending_orders = sum(1 for r in rows if r["status"] in ("pending", "auditing"))
+    auditing_rows = [r for r in rows if r["status"] == "auditing"]
+    pending_orders = len(auditing_rows)
     total_rebate = sum(r["rebate_money"] for r in rows if r["status"] == "completed")
-    pending_rebate = sum(r["rebate_money"] for r in rows if r["status"] in ("pending", "auditing"))
+    pending_rebate = sum(_rebate_display(r) for r in auditing_rows)
     total_spent = sum(r["order_money"] for r in rows if r["status"] == "completed")
 
     return {
@@ -1385,7 +1437,7 @@ def get_dashboard_chart_data(account_key: Optional[str] = None) -> Dict[str, Any
 
     platform_dist = [
         {"name": "美团外卖", "value": platform_counts["meituan"], "color": "#FFC300"},
-        {"name": "饿了么/淘宝", "value": platform_counts["eleme"], "color": "#0091FF"},
+        {"name": "淘宝闪购/淘宝", "value": platform_counts["eleme"], "color": "#0091FF"},
         {"name": "京东外卖", "value": platform_counts["jingdong"], "color": "#E1251B"},
     ]
 
@@ -1599,7 +1651,12 @@ def bind_meituan_to_account(account_key: str, data: Dict[str, Any]) -> bool:
     token = (data.get("token") or "").strip()
     nickname = (data.get("nickname") or f"美团账号 ({token[-4:] if token else '已绑定'})").strip()
     saved_at = int(data.get("saved_at") or time.time())
-    
+
+    # 数据库层兜底归档: 绑定新凭证前把当前使用的旧凭证存入保留槽 (幂等, 与 runner 层归档互不冲突)
+    try:
+        archive_meituan_slot_before_bind(account_key, token)
+    except Exception:
+        pass
     acc = get_account_by_key(account_key)
     pool = acc.get("meituan_history_pool") or [] if acc else []
     if token and token not in pool:
@@ -1620,10 +1677,13 @@ def bind_meituan_to_account(account_key: str, data: Dict[str, Any]) -> bool:
             meituan_saved_at = ?,
             meituan_is_active = 1,
             meituan_history_pool = ?,
+            meituan_last_claimed_at = 0,
+            meituan_last_claimed_count = 0,
+            meituan_last_claimed_details = '[]',
             updated_at = ?
         WHERE key = ?
         """, (token, nickname, saved_at, pool_str, time.strftime("%Y-%m-%d %H:%M:%S"), account_key))
-        
+
         # 同时在 meituan_accounts 中留存一份以保持数据对称
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
         conn.execute("""
@@ -1658,6 +1718,184 @@ def unbind_meituan_from_account(account_key: str) -> bool:
         conn.execute("DELETE FROM meituan_accounts WHERE key = ?", (account_key,))
         conn.commit()
     return True
+
+
+# ---------------- 美团多账号槽位 (每账号最多 2 个保留槽, 与当前使用凭证合计 3 个) ----------------
+
+MEITUAN_SLOT_CAP = 2
+
+
+def get_meituan_slots(account_key: str) -> List[Dict[str, Any]]:
+    """获取指定小蚕账号的全部保留美团凭证槽位 (不含当前使用)"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meituan_slots WHERE account_key = ? ORDER BY saved_at DESC",
+            (account_key,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_meituan_slot(account_key: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """保存/更新一个保留槽位; 超过上限时淘汰最旧的"""
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    token = (data.get("token") or "").strip()
+    if not token:
+        raise ValueError("token 不能为空")
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM meituan_slots WHERE account_key = ? AND token = ?",
+            (account_key, token)
+        ).fetchone()
+        if existing:
+            conn.execute("""
+            UPDATE meituan_slots
+            SET nickname = ?, avatar = ?, saved_at = ?, remark = ?,
+                last_claimed_at = ?, last_claimed_count = ?, last_claimed_details = ?, updated_at = ?
+            WHERE id = ?
+            """, (
+                (data.get("nickname") or "").strip(),
+                (data.get("avatar") or "").strip(),
+                int(data.get("saved_at") or time.time()),
+                (data.get("remark") or "").strip(),
+                int(data.get("last_claimed_at") or 0),
+                int(data.get("last_claimed_count") or 0),
+                data.get("last_claimed_details") or "[]",
+                now,
+                existing["id"]
+            ))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM meituan_slots WHERE id = ?", (existing["id"],)).fetchone())
+
+        rows = conn.execute(
+            "SELECT id FROM meituan_slots WHERE account_key = ? ORDER BY saved_at ASC",
+            (account_key,)
+        ).fetchall()
+        while len(rows) >= MEITUAN_SLOT_CAP:
+            oldest = rows.pop(0)
+            conn.execute("DELETE FROM meituan_slots WHERE id = ?", (oldest["id"],))
+        conn.execute("""
+        INSERT INTO meituan_slots (account_key, nickname, avatar, token, saved_at, remark, last_claimed_at, last_claimed_count, last_claimed_details, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            account_key,
+            (data.get("nickname") or "").strip(),
+            (data.get("avatar") or "").strip(),
+            token,
+            int(data.get("saved_at") or time.time()),
+            (data.get("remark") or "").strip(),
+            int(data.get("last_claimed_at") or 0),
+            int(data.get("last_claimed_count") or 0),
+            data.get("last_claimed_details") or "[]",
+            now,
+            now
+        ))
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM meituan_slots WHERE account_key = ? AND token = ?",
+            (account_key, token)
+        ).fetchone())
+
+
+def delete_meituan_slot(account_key: str, slot_id: int) -> bool:
+    """删除一个保留槽位"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM meituan_slots WHERE account_key = ? AND id = ?",
+            (account_key, slot_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def swap_meituan_slot(account_key: str, slot_id: int) -> bool:
+    """原子交换: 当前使用的美团凭证与指定保留槽位互换 (实现多账号互相切换)"""
+    with get_conn() as conn:
+        slot = conn.execute(
+            "SELECT * FROM meituan_slots WHERE account_key = ? AND id = ?",
+            (account_key, slot_id)
+        ).fetchone()
+        acc = conn.execute("SELECT * FROM accounts WHERE key = ?", (account_key,)).fetchone()
+        if not slot or not acc:
+            return False
+        if not (slot["token"] or "").strip():
+            return False
+
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        now_ts = int(time.time())
+
+        # 1. 当前使用的凭证连同领券统计一起存入该槽位 (或删除该槽位若当前无凭证)
+        cur_token = (acc["meituan_token"] or "").strip()
+        if cur_token:
+            conn.execute("""
+            UPDATE meituan_slots
+            SET nickname = ?, avatar = '', token = ?, saved_at = ?,
+                last_claimed_at = ?, last_claimed_count = ?, last_claimed_details = ?, updated_at = ?
+            WHERE id = ?
+            """, (
+                acc["meituan_nickname"] or "",
+                cur_token,
+                int(acc["meituan_saved_at"] or now_ts),
+                int(acc["meituan_last_claimed_at"] or 0),
+                int(acc["meituan_last_claimed_count"] or 0),
+                acc["meituan_last_claimed_details"] or "[]",
+                now_str,
+                slot["id"]
+            ))
+        else:
+            conn.execute("DELETE FROM meituan_slots WHERE id = ?", (slot["id"],))
+
+        # 2. 槽位凭证连同其领券统计晋升为当前使用
+        conn.execute("""
+        UPDATE accounts
+        SET meituan_token = ?, meituan_nickname = ?, meituan_saved_at = ?, meituan_is_active = 1,
+            meituan_last_claimed_at = ?, meituan_last_claimed_count = ?, meituan_last_claimed_details = ?, updated_at = ?
+        WHERE key = ?
+        """, (
+            slot["token"],
+            slot["nickname"] or "",
+            now_ts,
+            int(slot["last_claimed_at"] or 0),
+            int(slot["last_claimed_count"] or 0),
+            slot["last_claimed_details"] or "[]",
+            now_str,
+            account_key
+        ))
+
+        # 3. 同步 meituan_accounts 镜像 (保持数据对称)
+        conn.execute("""
+        INSERT INTO meituan_accounts (key, nickname, token, saved_at, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            nickname = excluded.nickname,
+            token = excluded.token,
+            saved_at = excluded.saved_at,
+            is_active = 1,
+            updated_at = excluded.updated_at
+        """, (account_key, slot["nickname"] or "", slot["token"], now_ts, now_str, now_str))
+        conn.commit()
+    return True
+
+
+def archive_meituan_slot_before_bind(account_key: str, new_token: str) -> int:
+    """扫码绑定新美团凭证前, 把当前使用的旧凭证归档到保留槽 (返回归档数量)"""
+    acc = get_account_by_key(account_key)
+    if not acc:
+        return 0
+    cur_token = (acc.get("meituan_token") or "").strip()
+    if not cur_token or cur_token == (new_token or "").strip():
+        return 0
+    try:
+        save_meituan_slot(account_key, {
+            "token": cur_token,
+            "nickname": acc.get("meituan_nickname") or "",
+            "saved_at": acc.get("meituan_saved_at") or int(time.time()),
+            "last_claimed_at": acc.get("meituan_last_claimed_at") or 0,
+            "last_claimed_count": acc.get("meituan_last_claimed_count") or 0,
+            "last_claimed_details": acc.get("meituan_last_claimed_details") or "[]",
+        })
+        return 1
+    except Exception:
+        return 0
 
 
 def clear_all_meituan_data() -> bool:
@@ -1725,6 +1963,15 @@ def update_meituan_claim_stats(key: str, count: int, details: List[Dict[str, Any
                 updated_at = ?
             WHERE key = ?
             """, (now_ts, count, details_str, tok, pool_str, now, key))
+            # 同步领券统计到持有相同 token 的保留槽位 (切换账号后各自统计互不串扰)
+            conn.execute("""
+            UPDATE meituan_slots
+            SET last_claimed_at = ?,
+                last_claimed_count = ?,
+                last_claimed_details = ?,
+                updated_at = ?
+            WHERE account_key = ? AND token = ?
+            """, (now_ts, count, details_str, now, key, tok))
             conn.commit()
     else:
         # 兼容传统独立 meituan_accounts

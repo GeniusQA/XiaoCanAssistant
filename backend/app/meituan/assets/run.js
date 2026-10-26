@@ -1035,9 +1035,9 @@ commands.order = function (argv) {
 };
 
 /**
-* logout — 退出登录
-* 直接通过 runPassport 清除 pt-passport CLI 缓存（避免 Python 找不到 pt-passport 的 PATH 问题）
-*/
+ * logout — 退出登录
+ * 直接通过 runPassport 清除 pt-passport CLI 缓存（避免 Python 找不到 pt-passport 的 PATH 问题）
+ */
 commands.logout = function () {
 var cli_cleared = false;
 try {

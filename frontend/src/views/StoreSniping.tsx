@@ -17,6 +17,7 @@ import {
   Input,
   RadioGroup,
   Radio,
+  Checkbox,
   Empty,
   Spin,
   Tooltip,
@@ -142,6 +143,20 @@ export const getConditionShortText = (cond?: string): string => {
   return cond.slice(0, 2);
 };
 
+// 评价要求统一展示文案: 无需评价 / 图文反馈 (与订单页保持一致)
+export const normalizeConditionLabel = (cond?: string): string => {
+  const c = (cond || '').trim();
+  if (!c || c.includes('无需') || c.includes('免评')) return '无需评价';
+  return '图文反馈';
+};
+
+// 活动要求标签 (对齐小蚕官方: 指定餐品/复购专享), 无特定要求返回 null 不展示
+export const getActivityRequirementTag = (req?: string): { color: 'orange' | 'cyan'; text: string } | null => {
+  if (req === 'designated_dish') return { color: 'orange', text: '指定餐品' };
+  if (req === 'repurchase') return { color: 'cyan', text: '复购专享' };
+  return null;
+};
+
 export const formatPromoDescForTier = (desc?: string): string => {
   if (!desc) return '';
   return cleanEmoji(desc).replace(/[(（]\s*最高[^)）]*[)）]/gi, '').trim();
@@ -172,7 +187,7 @@ const getPlatformBadge = (plat?: string) => {
     return { label: '京东外卖', color: 'red' as const, avatarColor: 'red' as const };
   }
   if (p === 'eleme') {
-    return { label: '饿了么', color: 'blue' as const, avatarColor: 'blue' as const };
+    return { label: '淘宝闪购', color: 'blue' as const, avatarColor: 'blue' as const };
   }
   return { label: '美团外卖', color: 'orange' as const, avatarColor: 'orange' as const };
 };
@@ -444,8 +459,11 @@ export const StoreSniping: React.FC = () => {
   const activeSearchKeywordRef = useRef<string>('');
   const pagePvIdRef = useRef<string>('');
 
-  // 仅且只有「周边门店通用」的店铺归入大牌券专享 Tab，其他所有店铺均为普通附近店铺
+  // 大牌券专享 Tab: 官方大牌商家 (status==3 Vip 类别 / store_brand_type==1) 与「周边门店通用」品牌券店
   const isBrandCouponStore = useCallback((s: StoreItem) => {
+    if (s.is_brand_vip || s.is_vip_brand) {
+      return true;
+    }
     return Boolean(
       s.distance_text && (
         s.distance_text === '周边门店通用' ||
@@ -1359,8 +1377,9 @@ export const StoreSniping: React.FC = () => {
 
   const handleSubmitNameMonitor = async (values: any) => {
     if (!currentAccountKey) return;
+    const isMatchAll = (values.match_mode || 'contains') === 'match_all';
     const kw = (values.keyword || '').trim();
-    if (!kw) {
+    if (!isMatchAll && !kw) {
       Toast.warning('请输入商户名称或搜索关键词');
       return;
     }
@@ -1381,14 +1400,20 @@ export const StoreSniping: React.FC = () => {
         account_key: currentAccountKey,
         keyword: kw,
         match_mode: values.match_mode || 'contains',
-        platform: values.platform || 'all',
+        platform: Array.isArray(values.platform_sel) && values.platform_sel.length > 0 && !values.platform_sel.includes('all')
+          ? values.platform_sel.join(',')
+          : 'all',
         rebate_mode_filter: values.rebate_mode_filter || 'all',
+        activity_requirement: values.activity_requirement || 'all',
+        only_grabbable: values.only_grabbable === false ? 0 : 1,
+        high_rebate_only: values.high_rebate_only ? 1 : 0,
+        no_comment_only: values.no_comment_only ? 1 : 0,
         min_rebate_price: Number(values.min_rebate_price || 0),
         min_rebate_rate: Number(values.min_rebate_rate || 0),
         max_order_money: 0,
         auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
         timeout_sec: values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200,
-        until_time: Number(values.timeout_sec) === 0 ? '23:59' : undefined,
+        until_time: Number(values.timeout_sec) === -1 ? '' : (Number(values.timeout_sec) === 0 ? '23:59' : undefined),
         check_interval: Number(values.check_interval ?? 10),
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
@@ -1493,7 +1518,7 @@ export const StoreSniping: React.FC = () => {
                   {row.distance_text && row.distance_text !== '0m' ? row.distance_text : '附近'}
                 </Tag>
                 <Tag size="small" color={getConditionTagColor(row.condition)}>
-                  {row.condition}
+                  {normalizeConditionLabel(row.condition)}
                 </Tag>
                 {row.if_use_red_pack && (
                   <Tag color="red" size="small" shape="square">
@@ -1505,6 +1530,15 @@ export const StoreSniping: React.FC = () => {
                     共 {row.promotions?.length} 档活动
                   </Tag>
                 )}
+                {row.is_high_rebate && (
+                  <Tag color="orange" size="small" shape="square">
+                    高返利
+                  </Tag>
+                )}
+                {(() => {
+                  const arTag = getActivityRequirementTag(row.activity_requirement);
+                  return arTag ? <Tag size="small" color={arTag.color}>{arTag.text}</Tag> : null;
+                })()}
               </div>
 
               <div className="text-[11px] text-semi-color-text-3 mt-1 truncate max-w-[280px]" title={row.address || '依据外卖平台定位'}>
@@ -1784,7 +1818,7 @@ export const StoreSniping: React.FC = () => {
               </div>
               <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                 <Tag size="small" color={getConditionTagColor(row.condition)}>
-                  {row.condition}
+                  {normalizeConditionLabel(row.condition)}
                 </Tag>
                 <Tag size="small" color="grey">
                   {row.distance_text && row.distance_text !== '0m' ? row.distance_text : '附近'}
@@ -1792,6 +1826,15 @@ export const StoreSniping: React.FC = () => {
                 {row.if_use_red_pack && (
                   <Tag color="red" size="small" shape="square">
                     可用红包
+                  </Tag>
+                )}
+                {(() => {
+                  const arTag = getActivityRequirementTag(row.activity_requirement);
+                  return arTag ? <Tag size="small" color={arTag.color}>{arTag.text}</Tag> : null;
+                })()}
+                {row.is_high_rebate && (
+                  <Tag color="orange" size="small" shape="square">
+                    高返利
                   </Tag>
                 )}
               </div>
@@ -2787,7 +2830,7 @@ export const StoreSniping: React.FC = () => {
                   >
                     <Radio value="all">全部</Radio>
                     <Radio value="meituan">美团</Radio>
-                    <Radio value="eleme">饿了么</Radio>
+                    <Radio value="eleme">淘宝闪购</Radio>
                     <Radio value="jingdong">京东</Radio>
                   </RadioGroup>
                 </div>
@@ -2816,7 +2859,7 @@ export const StoreSniping: React.FC = () => {
                   >
                     <Radio value="all">全部</Radio>
                     <Radio value="no_review">无需评价</Radio>
-                    <Radio value="good_review">需要图文好评</Radio>
+                    <Radio value="good_review">图文反馈</Radio>
                   </RadioGroup>
                 </div>
 
@@ -3697,7 +3740,7 @@ export const StoreSniping: React.FC = () => {
                             {item.name || '霸王餐红包'}
                           </Text>
                           {platforms.includes(1) && <Tag size="small" color="amber">美团</Tag>}
-                          {platforms.includes(2) && <Tag size="small" color="blue">饿了么</Tag>}
+                          {platforms.includes(2) && <Tag size="small" color="blue">淘宝闪购</Tag>}
                           {platforms.includes(3) && <Tag size="small" color="orange">大众点评</Tag>}
                           {platforms.length === 0 && <Tag size="small" color="cyan">外卖全通用</Tag>}
                         </div>
@@ -3741,9 +3784,13 @@ export const StoreSniping: React.FC = () => {
           key={nameMonitorInitialKeyword}
           initValues={{
             keyword: nameMonitorInitialKeyword,
+            listen_mode: 'name',
             match_mode: 'contains',
-            platform: 'all',
+            platform_sel: ['all'],
             rebate_mode_filter: 'all',
+            activity_requirement: 'all',
+            high_rebate_only: false,
+            no_comment_only: false,
             min_rebate_price: 0,
             min_rebate_rate: 0,
             timeout_sec: 7200,
@@ -3753,58 +3800,164 @@ export const StoreSniping: React.FC = () => {
           }}
           onSubmit={handleSubmitNameMonitor}
         >
-          {() => (
+          {({ formState, formApi }) => (
             <div className="flex flex-col gap-3">
-              {/* 关键词输入 */}
-              <Form.Input
-                field="keyword"
-                label="商户名称 / 关键词"
-                size="default"
-                placeholder="请输入店铺名称，例如：霸王茶姬"
-                rules={[{ required: true, message: '请输入要监听的店铺关键词' }]}
-                showClear
-              />
-
-              {/* 平台与匹配模式：一行两个 */}
-              <Row gutter={16}>
-                <Col xs={24} sm={12}>
-                  <Form.RadioGroup
-                    field="platform"
-                    label="目标外卖平台"
-                    type="button"
-                    buttonSize="middle"
-                    className="whitespace-nowrap"
-                  >
-                    <Radio value="all">全部平台</Radio>
-                    <Radio value="meituan">美团外卖</Radio>
-                    <Radio value="eleme">饿了么</Radio>
-                  </Form.RadioGroup>
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Form.RadioGroup
-                    field="match_mode"
-                    label="店名匹配模式"
-                    type="button"
-                    buttonSize="middle"
-                    className="whitespace-nowrap"
-                  >
-                    <Radio value="contains">包含匹配</Radio>
-                    <Radio value="exact">完全匹配</Radio>
-                  </Form.RadioGroup>
-                </Col>
-              </Row>
-
-              {/* 活动方案偏好 */}
+              {/* 监听模式 */}
               <Form.RadioGroup
-                field="rebate_mode_filter"
-                label="活动方案偏好"
+                field="listen_mode"
+                label="监听模式"
                 type="button"
                 buttonSize="middle"
               >
+                <Radio value="name">店名匹配</Radio>
+                <Radio value="all">常规匹配</Radio>
+              </Form.RadioGroup>
+
+              {/* 关键词输入 (仅店名匹配模式; 常规匹配不设必填校验) */}
+              {formState.values?.listen_mode !== 'all' && (
+                <Form.Input
+                  field="keyword"
+                  label="商户名称 / 关键词"
+                  size="default"
+                  placeholder="请输入店铺名称，例如：霸王茶姬"
+                  rules={formState.values?.listen_mode !== 'all' ? [{ required: true, message: '请输入要监听的店铺关键词' }] : []}
+                  showClear
+                />
+              )}
+
+              {/* 外卖平台 (多选: 全部平台与具体平台互斥; 比例返仅美团支持 -> 淘宝闪购/京东 在比例返下禁用) */}
+              <div>
+                <div className="text-sm text-semi-color-text-2 font-medium mb-2">外卖平台</div>
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                  {([
+                    { v: 'all', l: '全部平台' },
+                    { v: 'meituan', l: '美团' },
+                    { v: 'eleme', l: '淘宝闪购' },
+                    { v: 'jingdong', l: '京东' },
+                  ] as { v: string; l: string }[]).map((opt) => {
+                    const sel: string[] = Array.isArray(formState.values?.platform_sel) ? formState.values.platform_sel : ['all'];
+                    const checked = sel.includes(opt.v);
+                    const onlyPercentMode = formState.values?.rebate_mode_filter === 'percent';
+                    const disabledByPercent = onlyPercentMode && (opt.v === 'eleme' || opt.v === 'jingdong');
+                    return (
+                      <Checkbox
+                        key={opt.v}
+                        checked={checked}
+                        disabled={disabledByPercent}
+                        onChange={(e: any) => {
+                          const nextChecked = Boolean(e?.target?.checked);
+                          let next: string[];
+                          if (opt.v === 'all') {
+                            next = nextChecked ? ['all'] : sel.filter((v) => v !== 'all');
+                          } else if (nextChecked) {
+                            next = [...sel.filter((v) => v !== 'all'), opt.v];
+                          } else {
+                            next = sel.filter((v) => v !== opt.v);
+                          }
+                          if (next.length === 0) next = ['all'];
+                          if (next.includes('all') && next.length > 1) {
+                            next = next.filter((v) => v !== 'all');
+                          }
+                          formApi.setValue('platform_sel', next);
+                          // 互斥: 选择淘宝闪购/京东时, 比例返自动回退为全部方案 (比例返仅美团支持)
+                          if ((opt.v === 'eleme' || opt.v === 'jingdong') && nextChecked && formState.values?.rebate_mode_filter === 'percent') {
+                            formApi.setValue('rebate_mode_filter', 'all');
+                            Toast.info('淘宝闪购/京东不支持按比例返，返利形式已切回「全部方案」');
+                          }
+                        }}
+                      >
+                        {opt.l}
+                      </Checkbox>
+                    );
+                  })}
+                </div>
+                {formState.values?.rebate_mode_filter === 'percent' && (
+                  <div className="text-xs text-semi-color-text-3 mt-1.5">按比例返仅美团渠道支持，淘宝闪购/京东暂不可选</div>
+                )}
+              </div>
+
+              {/* 店名匹配模式 / 可抢商家 (独立一行, 与其他 RadioGroup 同构对齐) */}
+              {formState.values?.listen_mode !== 'all' ? (
+                <Form.RadioGroup
+                  field="match_mode"
+                  label="店名匹配模式"
+                  type="button"
+                  buttonSize="middle"
+                  className="whitespace-nowrap"
+                >
+                  <Radio value="contains">包含匹配</Radio>
+                  <Radio value="exact">完全匹配</Radio>
+                </Form.RadioGroup>
+              ) : (
+                <div className="flex items-center gap-2 py-1" style={{ paddingLeft: 2 }}>
+                  <Checkbox checked disabled>
+                    <span className="text-sm">仅监听可抢商家 (有剩余名额)</span>
+                  </Checkbox>
+                </div>
+              )}
+
+              {/* 返利形式 (互斥: 含淘宝闪购/京东 时不可选按比例返) */}
+              <Form.RadioGroup
+                field="rebate_mode_filter"
+                label="返利形式"
+                type="button"
+                buttonSize="middle"
+                onChange={(val: any) => {
+                  const nextVal = typeof val === 'string' ? val : (val?.target?.value ?? val);
+                  if (nextVal === 'percent') {
+                    const sel: string[] = Array.isArray(formState.values?.platform_sel) ? formState.values.platform_sel : ['all'];
+                    const hasNonPercentPlat = sel.includes('eleme') || sel.includes('jingdong');
+                    if (hasNonPercentPlat) {
+                      const kept = sel.filter((v) => v !== 'eleme' && v !== 'jingdong');
+                      const finalSel = kept.length > 0 ? kept : ['meituan'];
+                      formApi.setValue('platform_sel', finalSel);
+                      Toast.info('按比例返仅美团渠道支持，已自动取消淘宝闪购/京东勾选');
+                    }
+                  }
+                }}
+              >
                 <Radio value="all">全部方案</Radio>
                 <Radio value="fixed">仅实付满返</Radio>
-                <Radio value="percent">仅按比例返</Radio>
+                <Radio
+                  value="percent"
+                  disabled={(() => {
+                    const sel: string[] = Array.isArray(formState.values?.platform_sel) ? formState.values.platform_sel : ['all'];
+                    return sel.includes('eleme') || sel.includes('jingdong');
+                  })()}
+                >
+                  仅按比例返
+                </Radio>
               </Form.RadioGroup>
+
+              {/* 活动要求 */}
+              <Form.RadioGroup
+                field="activity_requirement"
+                label="活动要求"
+                type="button"
+                buttonSize="middle"
+              >
+                <Radio value="all">不限</Radio>
+                <Radio value="designated_dish">指定餐品</Radio>
+                <Radio value="repurchase">复购专享</Radio>
+              </Form.RadioGroup>
+
+              {/* 高返利筛选 (官方类别标记, 与官方 App 高返利 tab 同源) */}
+              <div className="flex flex-col gap-2">
+                <Checkbox
+                  checked={Boolean(formState.values?.high_rebate_only)}
+                  onChange={(e: any) => formApi.setValue('high_rebate_only', Boolean(e?.target?.checked))}
+                >
+                  <span className="text-sm">仅监听官方标记的高返利商家</span>
+                </Checkbox>
+
+                {/* 无需评价筛选 (官方类别标记 status==1 / rebate_condition==99) */}
+                <Checkbox
+                  checked={Boolean(formState.values?.no_comment_only)}
+                  onChange={(e: any) => formApi.setValue('no_comment_only', Boolean(e?.target?.checked))}
+                >
+                  <span className="text-sm">仅监听无需评价的商家 (免写好评直领)</span>
+                </Checkbox>
+              </div>
 
               {/* 返利门槛：一行两个 */}
               <Row gutter={16}>
@@ -3846,6 +3999,7 @@ export const StoreSniping: React.FC = () => {
                     <Select.Option value={7200}>2 小时</Select.Option>
                     <Select.Option value={14400}>4 小时</Select.Option>
                     <Select.Option value={0}>今日结束</Select.Option>
+                    <Select.Option value={-1}>永久 (服务运行期间)</Select.Option>
                   </Form.Select>
                 </Col>
                 <Col xs={24} sm={12}>
@@ -3880,7 +4034,7 @@ export const StoreSniping: React.FC = () => {
                   loading={nameMonitorSubmitting}
                   className="px-4 font-semibold"
                 >
-                  启动店名抢单监听
+                  启动
                 </Button>
               </div>
             </div>

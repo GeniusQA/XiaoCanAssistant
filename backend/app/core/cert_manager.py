@@ -82,7 +82,8 @@ class CertManager:
         """检查根证书是否已经存在于系统的信任根证书存储中"""
         try:
             if sys.platform == "win32":
-                res = subprocess.run(["certutil", "-user", "-store", "Root"], capture_output=True, text=True, timeout=5)
+                # certutil 在中文 Windows 输出 GBK，严格 utf-8 解码会崩线程；errors="ignore" 保住 ASCII 关键字匹配
+                res = subprocess.run(["certutil", "-user", "-store", "Root"], capture_output=True, text=True, timeout=5, encoding="utf-8", errors="ignore")
                 return "XiaoCan Assistant CA" in res.stdout
             elif sys.platform == "darwin":
                 res = subprocess.run(["security", "find-certificate", "-c", "XiaoCan Assistant CA"], capture_output=True, text=True, timeout=5)

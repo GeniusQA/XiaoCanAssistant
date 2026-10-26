@@ -24,13 +24,13 @@ export const HeaderNav: React.FC = () => {
   const setDarkMode = useAppStore((s) => s.setDarkMode);
 
   const navItems = [
-    { itemKey: 'dashboard', text: '概览仪表盘', icon: <IconHome /> },
+    { itemKey: 'dashboard', text: '数据概览', icon: <IconHome /> },
     { itemKey: 'accounts', text: '账号管理', icon: <IconUser /> },
-    { itemKey: 'automation', text: '自动化任务', icon: <IconPlay /> },
-    { itemKey: 'store', text: '店铺抢单预约', icon: <IconShoppingBag /> },
+    { itemKey: 'automation', text: '自动任务', icon: <IconPlay /> },
+    { itemKey: 'store', text: '商家抢单', icon: <IconShoppingBag /> },
     { itemKey: 'orders', text: '我的订单', icon: <IconOrderedList /> },
     { itemKey: 'logs', text: '运行日志', icon: <IconFile /> },
-    { itemKey: 'settings', text: '系统与通知', icon: <IconSetting /> },
+    { itemKey: 'settings', text: '系统配置', icon: <IconSetting /> },
   ];
 
   return (

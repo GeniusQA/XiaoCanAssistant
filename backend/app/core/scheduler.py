@@ -259,7 +259,7 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 (1, "每日签到(+2次)"),
                 (2, "每日分享(+1次)"),
                 (4, "沾一沾(+1次)"),
-                (8, "饿了么加赠(+1次)"),
+                (8, "淘宝闪购加赠(+1次)"),
                 (9, "美团加赠(+1次)"),
                 (10, "浏览福利中心(+1次)"),
                 (11, "浏览霸王餐页(+1次)")
@@ -743,9 +743,9 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 except Exception as e:
                     log_output += f"[{datetime.now().strftime('%H:%M:%S')}] 任务 [{t_title}] 执行异常: {e}\n"
 
-            # 补充领券与专属社群事件打卡 (饿了么: 3, 美团: 4, 官方社群: 6)
+            # 补充领券与专属社群事件打卡 (淘宝闪购: 3, 美团: 4, 官方社群: 6)
             task_events = [
-                (3, "饿了么领券"),
+                (3, "淘宝闪购领券"),
                 (4, "美团领券"),
                 (6, "小蚕专属社群")
             ]

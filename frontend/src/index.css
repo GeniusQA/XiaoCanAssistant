@@ -432,5 +432,75 @@ html, body, #root {
   justify-content: center !important;
 }
 
+/* ==================== 移动端竖屏适配 (主流手机 360~430px) ==================== */
+@media screen and (max-width: 640px) {
+  /* 卡片内边距与圆角收紧, 提升信息密度 */
+  .semi-card-body {
+    padding: 10px 12px !important;
+  }
+
+  /* 表格紧凑化: 缩小单元格内边距与字号 */
+  .semi-table-row-cell {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    font-size: 12px !important;
+  }
+
+  .semi-table-thead .semi-table-row-cell {
+    font-size: 12px !important;
+  }
+
+  /* 弹窗在窄屏占满可用宽度 */
+  .semi-modal {
+    max-width: 94vw !important;
+  }
+
+  /* 页面标题与副标题缩小 */
+  .semi-typography-h3 {
+    font-size: 18px !important;
+  }
+}
+
+/* ==================== 移动端横屏模式 (手机倒置后自动切换) ==================== */
+@media screen and (orientation: landscape) and (max-height: 560px) {
+  html.is-mobile .semi-card-body {
+    padding: 8px 12px !important;
+  }
+
+  /* 横屏高度有限: 压缩纵向留白, 避免频繁滚动 */
+  html.is-mobile .mobile-compact-gap {
+    gap: 8px !important;
+  }
+
+  html.is-mobile .semi-typography-h3 {
+    font-size: 16px !important;
+  }
+
+  /* 横屏下弹窗限制高度并内部滚动 */
+  html.is-mobile .semi-modal-content {
+    max-height: 78vh !important;
+    overflow-y: auto !important;
+  }
+}
+
+/* 横屏模式: 内容区允许更紧凑的横向排布 */
+html.is-landscape .flex.flex-col.gap-3 {
+  gap: 10px !important;
+}
+
+/* 触屏设备: 保证按钮最小点击热区 */
+@media (pointer: coarse) {
+  .semi-button {
+    min-height: 28px;
+  }
+
+  /* 触屏滚动条更细 */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+
 
 

@@ -46,6 +46,15 @@ export interface Account {
 
 export type AccountNotifyMode = 'global' | 'custom' | 'disabled';
 
+export interface MediaVipRecord {
+  platform: string;
+  cdk: string;
+  claimed_at: number;
+  expire_time?: string;
+  status_text?: string;
+  raw?: Record<string, unknown>;
+}
+
 export interface AccountNotifyConfig {
   channel?: 'clawbot' | 'serverchan' | 'wxpusher' | 'wecom' | 'dingtalk' | 'feishu' | 'bark' | 'telegram' | 'webhook' | 'email' | 'gotify' | 'discord' | 'qq_bot' | string;
   // 微信 ClawBot
@@ -195,6 +204,10 @@ export interface StoreItem {
   condition: string;
   platform?: 'meituan' | 'eleme' | 'jingdong' | string;
   store_platform?: number;
+  activity_requirement?: 'all' | 'designated_dish' | 'repurchase' | string;
+  is_high_rebate?: boolean;
+  /** 官方「大牌商家」类别标记 (status==3 Vip) */
+  is_brand_vip?: boolean;
   promotions?: StorePromotion[];
   promotion_count?: number;
   need_brand_coupon?: boolean;
@@ -230,6 +243,8 @@ export interface Order {
   platform_total_price?: number;
   rebate_money: number;
   remark?: string;
+  /** 官方接口反馈已使用过领红包延时特权 (code=0/3 后置位) */
+  delay_used?: number;
   original_user_rebate?: number;
   redpack_reward_num?: number;
   status: 'pending' | 'auditing' | 'completed' | 'rejected' | 'cancelled';
@@ -295,9 +310,13 @@ export interface StoreAppointment {
 export interface NameMonitorPayload {
   account_key: string;
   keyword: string;
-  match_mode?: 'contains' | 'exact';
-  platform?: 'all' | 'meituan' | 'eleme';
+  match_mode?: 'contains' | 'exact' | 'match_all';
+  platform?: string;
   rebate_mode_filter?: 'all' | 'fixed' | 'percent';
+  activity_requirement?: 'all' | 'designated_dish' | 'repurchase';
+  only_grabbable?: number;
+  high_rebate_only?: number;
+  no_comment_only?: number;
   min_rebate_price?: number;
   min_rebate_rate?: number;
   max_order_money?: number;
@@ -320,6 +339,8 @@ export interface JobLog {
   status: 'success' | 'error' | 'failed' | 'running' | 'aborted' | string;
   output: string;
   created_at: string;
+  /** 业务结果摘要 (后端从日志内容提取, 如 [自动抢元宝秒杀] 未抢到) */
+  result_summary?: string;
 }
 
 export interface UserInfo {
@@ -384,6 +405,19 @@ export interface MeituanAccount {
   history_pool?: string[];
   created_at: string;
   updated_at?: string;
+}
+
+export interface MeituanSlot {
+  id: number;
+  account_key: string;
+  nickname: string;
+  avatar?: string;
+  token: string;
+  saved_at?: number;
+  remark?: string;
+  last_claimed_at?: number;
+  last_claimed_count?: number;
+  last_claimed_details?: { name?: string; discount_info?: string; valid_period?: string }[];
 }
 
 export interface MeituanAuthStartResponse {

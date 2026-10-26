@@ -66,7 +66,7 @@ import {
 import { useAppStore } from '../store/useAppStore';
 import { api } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
-import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode, ClawBotStatus } from '../types';
+import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode, ClawBotStatus, MeituanSlot, MediaVipRecord } from '../types';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -178,6 +178,8 @@ export const Accounts: React.FC = () => {
 
   // 同步状态
   const [syncingKey, setSyncingKey] = useState<string | null>(null);
+  const [meituanSlotsMap, setMeituanSlotsMap] = useState<Record<string, MeituanSlot[]>>({});
+  const [slotManagerAcc, setSlotManagerAcc] = useState<Account | null>(null);
 
   // 账号详情抽屉 (SideSheet) 状态与数据
   const [detailVisible, setDetailVisible] = useState(false);
@@ -187,6 +189,13 @@ export const Accounts: React.FC = () => {
   const [cardFilterStatus, setCardFilterStatus] = useState<number>(0);
   const [cardsLoading, setCardsLoading] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState<string>('redpacks');
+  // 影音会员领取记录 (VipRightsService.UserTencentVipList, 兑换码直领直用)
+  const [mediaVipRecords, setMediaVipRecords] = useState<MediaVipRecord[]>([]);
+  const [mediaVipLoading, setMediaVipLoading] = useState(false);
+  const [mediaVipError, setMediaVipError] = useState('');
+  const mediaVipLoadedKeyRef = useRef<string>('');
+  const [viewingCdk, setViewingCdk] = useState<MediaVipRecord | null>(null);
+  const [mediaRuleVisible, setMediaRuleVisible] = useState(false);
 
   // 账号专属推送配置模态框状态
   const [notifyModalVisible, setNotifyModalVisible] = useState(false);
@@ -319,11 +328,66 @@ export const Accounts: React.FC = () => {
     }
   };
 
+  const loadMeituanSlots = async (key: string) => {
+    try {
+      const res = await api.getMeituanSlots(key);
+      if (res.ok) {
+        setMeituanSlotsMap(prev => ({ ...prev, [key]: res.slots || [] }));
+      }
+    } catch {
+      /* 静默失败, 槽位属于增强功能 */
+    }
+  };
+
+  const handleSwitchMeituanSlot = async (acc: Account, slot: MeituanSlot) => {
+    Modal.confirm({
+      title: '切换美团账号',
+      content: `确定切换到【${slot.nickname || '未命名美团账号'}】吗？当前使用的美团凭证会自动保留到槽位，随时可以切回。`,
+      onOk: async () => {
+        try {
+          const res = await api.switchMeituanSlot(acc.key, slot.id);
+          if (res.ok) {
+            Toast.success(res.message || '切换成功');
+            await loadAccounts();
+            await loadMeituanSlots(acc.key);
+          } else {
+            Toast.error('切换失败');
+          }
+        } catch (e: any) {
+          Toast.error(`切换异常: ${e.message || e}`);
+        }
+      },
+    });
+  };
+
+  const handleDeleteMeituanSlot = async (acc: Account, slot: MeituanSlot) => {
+    Modal.confirm({
+      title: '删除保留的美团账号',
+      content: `确定删除【${slot.nickname || '未命名美团账号'}】的保留凭证吗？删除后需要重新扫码才能使用该账号。`,
+      okType: 'danger',
+      onOk: async () => {
+        try {
+          const res = await api.deleteMeituanSlot(acc.key, slot.id);
+          if (res.ok) {
+            Toast.success('已删除该保留账号');
+            await loadMeituanSlots(acc.key);
+          } else {
+            Toast.error('删除失败');
+          }
+        } catch (e: any) {
+          Toast.error(`删除异常: ${e.message || e}`);
+        }
+      },
+    });
+  };
+
   const handleOpenDetail = async (acc: Account) => {
     setDetailAccount(acc);
     setDetailVisible(true);
     setCardFilterStatus(0);
     setActiveDetailTab('redpacks');
+    mediaVipLoadedKeyRef.current = '';
+    setMediaVipRecords([]);
     await fetchAccountDetail(acc.key);
   };
 
@@ -372,6 +436,40 @@ export const Accounts: React.FC = () => {
       Toast.error('切换卡券状态失败');
     } finally {
       setCardsLoading(false);
+    }
+  };
+
+  const loadMediaVipRecords = async (key: string) => {
+    if (mediaVipLoadedKeyRef.current === key) return;
+    setMediaVipLoading(true);
+    setMediaVipError('');
+    try {
+      const res = await api.getMediaVipRecords(key);
+      if (res.ok) {
+        setMediaVipRecords(res.records || []);
+        setMediaVipError(res.error || '');
+        mediaVipLoadedKeyRef.current = key;
+      } else {
+        setMediaVipError('获取失败');
+      }
+    } catch (e: any) {
+      setMediaVipError(e.message || '获取失败');
+    } finally {
+      setMediaVipLoading(false);
+    }
+  };
+
+  const maskCdk = (cdk: string): string => {
+    if (!cdk) return '-';
+    return cdk.length > 6 ? `${cdk.slice(0, 3)}***${cdk.slice(-2)}` : cdk;
+  };
+
+  const copyCdkToClipboard = async (cdk: string) => {
+    try {
+      await navigator.clipboard.writeText(cdk);
+      Toast.success('兑换码已复制，请前往网易云音乐 App 或官网兑换');
+    } catch {
+      Toast.error('复制失败，请手动选择复制');
     }
   };
 
@@ -1119,10 +1217,20 @@ export const Accounts: React.FC = () => {
                         <Dropdown
                           trigger="click"
                           position="topRight"
+                          onVisibleChange={(visible) => { if (visible) loadMeituanSlots(acc.key); }}
                           render={
                             <Dropdown.Menu>
                               <Dropdown.Item icon={<IconQrCode />} onClick={() => handleStartMeituanLogin(acc)}>
                                 重新扫码授权
+                              </Dropdown.Item>
+                              <Dropdown.Item
+                                icon={<IconRefresh />}
+                                onClick={() => {
+                                  setSlotManagerAcc(acc);
+                                  loadMeituanSlots(acc.key);
+                                }}
+                              >
+                                切换美团账号{(meituanSlotsMap[acc.key] || []).length > 0 ? ` (${(meituanSlotsMap[acc.key] || []).length} 个已保留)` : ''}
                               </Dropdown.Item>
                               <Dropdown.Item icon={<IconEdit />} onClick={() => handleOpenEditMeituanName(acc)}>
                                 修改美团备注
@@ -1729,7 +1837,10 @@ export const Accounts: React.FC = () => {
             <Tabs
               type="line"
               activeKey={activeDetailTab}
-              onChange={(k) => setActiveDetailTab(k)}
+              onChange={(k) => {
+                setActiveDetailTab(k);
+                if (k === 'media' && detailAccount) loadMediaVipRecords(detailAccount.key);
+              }}
               className="mt-2"
             >
               {/* Tab 1: 霸王餐可用红包 */}
@@ -1795,7 +1906,7 @@ export const Accounts: React.FC = () => {
                                 {item.name || '霸王餐红包'}
                               </Text>
                               {platforms.includes(1) && <Tag size="small" color="amber">美团</Tag>}
-                              {platforms.includes(2) && <Tag size="small" color="blue">饿了么</Tag>}
+                              {platforms.includes(2) && <Tag size="small" color="blue">淘宝闪购</Tag>}
                               {platforms.includes(3) && <Tag size="small" color="orange">大众点评</Tag>}
                               {platforms.length === 0 && <Tag size="small" color="cyan">外卖全通用</Tag>}
                             </div>
@@ -1930,6 +2041,82 @@ export const Accounts: React.FC = () => {
                         </div>
                       );
                     })
+                  )}
+                </div>
+              </TabPane>
+
+              {/* Tab 2.5: 影音会员领取记录 (VIP周卡兑换码直领直用) */}
+              <TabPane
+                tab={
+                  <span className="flex items-center gap-1.5">
+                    <IconGift />
+                    <span>影音会员</span>
+                    {mediaVipRecords.length > 0 ? (
+                      <Badge count={mediaVipRecords.length} overflowCount={99} type="primary" />
+                    ) : null}
+                  </span>
+                }
+                itemKey="media"
+              >
+                <div className="py-2 flex flex-col gap-2.5">
+                  <div className="flex justify-between items-center">
+                    <Text size="small" type="secondary">VIP 会员周卡领取记录 (兑换码直领直用)</Text>
+                    <Button size="small" theme="borderless" onClick={() => setMediaRuleVisible(true)}>
+                      兑换说明
+                    </Button>
+                  </div>
+
+                  {mediaVipLoading ? (
+                    <div className="py-16 flex flex-col items-center justify-center">
+                      <Space vertical align="center" spacing="medium">
+                        <Spin size="large" />
+                        <Text type="secondary" className="text-xs text-semi-color-text-2">正在加载领取记录...</Text>
+                      </Space>
+                    </div>
+                  ) : mediaVipError ? (
+                    <Banner
+                      type="warning"
+                      description={`领取记录获取失败: ${mediaVipError}。请刷新数据后重试。`}
+                      className="rounded-lg text-xs"
+                    />
+                  ) : mediaVipRecords.length === 0 ? (
+                    <div className="py-10 text-center">
+                      <Empty
+                        title="暂无领取记录"
+                        description="影音VIP周卡通过自动任务在每日 10:00 / 17:00 / 20:00 场次抢领，成功后兑换码将展示在这里"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {mediaVipRecords.map((rec, idx) => (
+                        <div
+                          key={`${rec.cdk}_${idx}`}
+                          className="border border-semi-color-border rounded-semi-border-radius-medium p-3 bg-semi-color-bg-0 flex items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Text strong className="text-sm">{rec.platform || '影音平台'}</Text>
+                            </div>
+                            <div className="text-xs text-semi-color-text-2 mt-1">
+                              领取时间: {rec.claimed_at ? formatTimestamp(rec.claimed_at) : '-'}
+                            </div>
+                            <div className="text-xs text-semi-color-text-2 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                              <span>兑换码</span>
+                              <Text code size="small">{maskCdk(rec.cdk)}</Text>
+                              {rec.expire_time && <span className="text-semi-color-text-3">有效期 {rec.expire_time}</span>}
+                            </div>
+                          </div>
+                          <Space spacing={6} style={{ flexShrink: 0 }}>
+                            <Button size="small" theme="light" onClick={() => setViewingCdk(rec)}>
+                              查看
+                            </Button>
+                            <Button size="small" theme="solid" type="primary" onClick={() => copyCdkToClipboard(rec.cdk)}>
+                              复制
+                            </Button>
+                          </Space>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               </TabPane>
@@ -2843,6 +3030,187 @@ export const Accounts: React.FC = () => {
             placeholder="例如：我的美团号 / 张三"
             autoFocus
           />
+        </div>
+      </Modal>
+
+      {/* 影音会员兑换码查看弹窗 */}
+      <Modal
+        title="兑换码详情"
+        visible={!!viewingCdk}
+        onCancel={() => setViewingCdk(null)}
+        footer={null}
+        width={400}
+        centered
+      >
+        {viewingCdk && (
+          <div className="py-1 flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <Tag color="red" size="small">{viewingCdk.platform || '影音平台'}</Tag>
+              <Text size="small" type="secondary">
+                领取时间: {viewingCdk.claimed_at ? formatTimestamp(viewingCdk.claimed_at) : '-'}
+              </Text>
+            </div>
+            <div
+              className="p-3 rounded-lg text-center select-all"
+              style={{ backgroundColor: 'var(--semi-color-fill-0)', border: '1px dashed var(--semi-color-border)' }}
+            >
+              <Text code strong style={{ fontSize: 16, letterSpacing: 1 }}>
+                {viewingCdk.cdk}
+              </Text>
+            </div>
+            {viewingCdk.expire_time && (
+              <Text size="small" type="secondary">有效期: {viewingCdk.expire_time}</Text>
+            )}
+            <Button theme="solid" type="primary" block onClick={() => copyCdkToClipboard(viewingCdk.cdk)}>
+              复制完整兑换码
+            </Button>
+            <Text size="small" type="tertiary">
+              兑换方式：网易云音乐 App →【我的】→ 会员中心 → 找到「兑换」→ 输入兑换码完成兑换；或登录 music.163.com 网页端兑换。
+            </Text>
+          </div>
+        )}
+      </Modal>
+
+      {/* 影音会员兑换说明弹窗 (对齐官方规则文案) */}
+      <Modal
+        title="规则说明"
+        visible={mediaRuleVisible}
+        onCancel={() => setMediaRuleVisible(false)}
+        footer={null}
+        width={520}
+        centered
+      >
+        <div className="py-1 flex flex-col gap-2 text-sm" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
+          <Title heading={5} style={{ textAlign: 'center' }}>免费抢影音VIP周卡 活动说明</Title>
+          <Text type="secondary">欢迎您参与"小蚕VIP会员免费抢影音VIP周卡"活动！为保障您的权益，请在参与前仔细阅读并理解以下全部规则。</Text>
+
+          <Text strong>一、活动时间</Text>
+          <Text type="secondary">本活动为小蚕VIP会员长期专属权益。活动下线或规则变更将另行通知。</Text>
+
+          <Text strong>二、参与资格</Text>
+          <Text type="secondary">1. 本活动仅限处于有效期内的小蚕会员与SVIP会员，且会员等级达到 V5、V6、SVIP会员等级达到 SVIP4、SVIP5、SVIP6 的用户参与。</Text>
+          <Text type="secondary">2. 若用户会员等级不满足条件或会员身份已过期，则无法参与本活动。</Text>
+
+          <Text strong>三、权益细则</Text>
+          <div className="p-2 rounded-lg" style={{ backgroundColor: 'var(--semi-color-fill-0)' }}>
+            <div className="flex justify-between"><Text size="small">V5和SVIP4会员</Text><Text size="small">每个自然月有 1 次领取资格</Text></div>
+            <div className="flex justify-between"><Text size="small">V6和SVIP5会员</Text><Text size="small">每个自然月有 1 次领取资格</Text></div>
+            <div className="flex justify-between"><Text size="small">SVIP6会员</Text><Text size="small">每个自然月有 2 次领取资格</Text></div>
+          </div>
+          <Text type="secondary" size="small">"自然月"指每月1日00:00:00至当月最后一日23:59:59。用户的月度领取次数将于等级重新评定后自动重置。若用户在当月升级至符合条件的等级，将立即获得该等级对应的领取资格和次数。若用户会员等级降级或会员过期，将立即失去领取资格，即使当月仍有剩余次数。</Text>
+
+          <Text strong>四、活动参与方式</Text>
+          <Text type="secondary">活动采用每日限量、分场次抢领、先到先得的方式进行。每日三个领取场次分别为：10:00:00，17:00:00，20:00:00。</Text>
+
+          <Text strong>五、兑换码使用说明</Text>
+          <Text type="secondary">1. 成功领取的权益将以"兑换码"的形式发放，您可在【领取记录】页面查看。</Text>
+          <Text type="secondary">2. 本商品只能手机、电脑、平板上使用，不支持电视端。兑换码具有有效期，请在有效期内尽快兑换，逾期将自动失效，不予补发。</Text>
+          <Text type="secondary">3. 兑换步骤：</Text>
+          <div className="p-2 rounded-lg" style={{ backgroundColor: 'var(--semi-color-fill-0)' }}>
+            <Text size="small" strong>方法一：网页兑换</Text>
+            <Text size="small" type="secondary" className="block">第一步：在【领取记录】页面，点击"复制"按钮，复制完整的兑换码</Text>
+            <Text size="small" type="secondary" className="block">第二步：进入网址 https://music.163.com/#/discover 登录账号后，头像下拉→VIP会员→点击"使用兑换码"→输入兑换码即可进行兑换。</Text>
+            <Text size="small" strong>方法二：手机兑换</Text>
+            <Text size="small" type="secondary" className="block">第一步：在【领取记录】页面，点击"复制"按钮，复制完整的兑换码</Text>
+            <Text size="small" type="secondary" className="block">第二步：进入网易云音乐 app【我的】→登录账号→点击【我的】页面左上角→进入会员中心→左右查找到"兑换"并点击</Text>
+            <Text size="small" type="secondary" className="block">第三步：按照提示输入兑换码，完成兑换。</Text>
+          </div>
+          <Text type="secondary" size="small">4. 重要提示：兑换码将充值至您登录的芒果TV账号，请在兑换前仔细核对账号信息，一旦兑换成功，无法撤销或转移至其他账号。</Text>
+
+          <Text strong>六、其他说明</Text>
+          <Text type="secondary" size="small">1. 为保证活动的公平公正，任何通过非正常手段（如使用外挂、恶意注册、机器刷票等）参与活动的用户，平台有权取消其参与资格和已获得的权益。</Text>
+          <Text type="secondary" size="small">2. 本活动所赠权益为会员增值服务，仅限用户个人使用，不可兑换现金、不可转让、不设找零。</Text>
+          <Text type="secondary" size="small">3. 如因不可抗力因素（如服务器攻击、系统故障等）导致活动无法正常进行，平台有权暂停或终止本活动，并免责于相关责任。</Text>
+          <Text type="secondary" size="small">4. 平台在法律允许的范围内，对本活动规则保留最终解释权。如您对活动有任何疑问，请联系我们的客服。</Text>
+        </div>
+      </Modal>
+
+      {/* 美团多账号切换/管理弹窗 (最多 2 个保留槽 + 当前使用 = 3 个凭证) */}
+      <Modal
+        title="切换美团账号"
+        visible={!!slotManagerAcc}
+        onCancel={() => setSlotManagerAcc(null)}
+        footer={null}
+        width={480}
+        centered
+      >
+        <div className="py-1">
+          {/* 当前使用 (实时取自账号列表, 避免弹窗打开时快照过期) */}
+          <Text size="small" type="secondary" className="mb-2 block">当前使用</Text>
+          <div
+            className="flex items-center gap-3 p-3 mb-4"
+            style={{
+              borderRadius: 'var(--semi-border-radius-medium)',
+              border: '1px solid var(--semi-color-success-light-active)',
+              backgroundColor: 'var(--semi-color-success-light-default)',
+            }}
+          >
+            <Avatar size="extra-extra-small" style={{ backgroundColor: '#ffc300', color: '#222', fontWeight: 600, fontSize: '10px', flexShrink: 0 }}>
+              美
+            </Avatar>
+            <div className="min-w-0 flex-1">
+              <Text strong ellipsis={{ showTooltip: true }} style={{ maxWidth: 240, display: 'block' }}>
+                {accounts.find((a) => a.key === slotManagerAcc?.key)?.meituan_nickname || '美团官方账号'}
+              </Text>
+            </div>
+            <Tag color="green" size="small">使用中</Tag>
+          </div>
+
+          {/* 保留槽位 */}
+          <div className="flex items-center justify-between mb-2">
+            <Text size="small" type="secondary">保留的账号</Text>
+            <Tag size="small" color="grey">{(meituanSlotsMap[slotManagerAcc?.key || ''] || []).length} / 2</Tag>
+          </div>
+          {(meituanSlotsMap[slotManagerAcc?.key || ''] || []).length === 0 ? (
+            <Empty description="暂无保留的美团账号，重新扫码授权绑定新账号后，旧账号会自动出现在这里" />
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(meituanSlotsMap[slotManagerAcc?.key || ''] || []).map((slot) => (
+                <div
+                  key={slot.id}
+                  className="flex items-center gap-3 p-3 transition-colors hover:border-semi-color-primary-light-active"
+                  style={{
+                    borderRadius: 'var(--semi-border-radius-medium)',
+                    backgroundColor: 'var(--semi-color-fill-0)',
+                    border: '1px solid var(--semi-color-border)',
+                  }}
+                >
+                  <Avatar size="extra-extra-small" style={{ backgroundColor: 'var(--semi-color-fill-2)', color: 'var(--semi-color-text-2)', fontSize: '10px', flexShrink: 0 }}>
+                    美
+                  </Avatar>
+                  <div className="min-w-0 flex-1">
+                    <Text strong ellipsis={{ showTooltip: true }} style={{ maxWidth: 200, display: 'block' }}>
+                      {slot.nickname || '未命名美团账号'}
+                    </Text>
+                    <Text type="tertiary" size="small" className="block truncate">
+                      保留于 {slot.saved_at ? new Date(slot.saved_at * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'}
+                      {Number(slot.last_claimed_count || 0) > 0 && ` · 已领 ${slot.last_claimed_count} 张券`}
+                    </Text>
+                  </div>
+                  <Space spacing={6} style={{ flexShrink: 0 }}>
+                    <Button
+                      size="small"
+                      theme="solid"
+                      type="primary"
+                      onClick={() => slotManagerAcc && handleSwitchMeituanSlot(slotManagerAcc, slot)}
+                    >
+                      切换
+                    </Button>
+                    <Popconfirm
+                      title="确定删除该保留账号？"
+                      content="删除后需重新扫码才能使用该账号"
+                      onConfirm={() => { if (slotManagerAcc) handleDeleteMeituanSlot(slotManagerAcc, slot); }}
+                    >
+                      <Button size="small" theme="borderless" type="danger" icon={<IconDelete />} style={{ padding: '0 6px' }} />
+                    </Popconfirm>
+                  </Space>
+                </div>
+              ))}
+            </div>
+          )}
+          <Text size="small" type="tertiary" className="mt-3 block">
+            重新扫码授权绑定新美团账号时，当前使用的账号会自动保留到上方列表（最多 2 个）。
+          </Text>
         </div>
       </Modal>
 

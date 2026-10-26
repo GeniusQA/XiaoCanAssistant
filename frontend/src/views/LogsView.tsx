@@ -371,6 +371,22 @@ export const LogsView: React.FC = () => {
       },
     },
     {
+      title: '执行结果',
+      dataIndex: 'result_summary',
+      width: 190,
+      render: (summary: string, record: JobLog) => {
+        const text = (summary || '').trim() || (record.status === 'success' ? '执行成功' : '执行失败');
+        const isFail = /未抢到|上限|失败|异常|未找到|401/.test(text);
+        return (
+          <Tooltip content={text} position="topLeft">
+            <Tag color={isFail ? 'red' : 'green'} size="small" style={{ maxWidth: 180 }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
+            </Tag>
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: '执行步骤与摘要',
       dataIndex: 'output',
       render: (out: string, record: JobLog) => {

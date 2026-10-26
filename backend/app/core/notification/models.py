@@ -17,6 +17,7 @@ class NotificationEvent(str, Enum):
     TOKEN_WARN = "token_warn"              # 账号凭据失效或安全风控报警
     COUPON_EXPIRE = "coupon_expire"        # 卡券即将到期预警
     TASK_FAIL = "task_fail"                # 抢单失败/名额售罄/异常中断
+    WITHDRAW_SUCCESS = "withdraw_success"  # 钱包余额自动提现成功
     SYSTEM_TEST = "system_test"            # 通道连通性测试消息
 
 

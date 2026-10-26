@@ -534,7 +534,7 @@ const STRATEGIES: StrategyItem[] = [
     tagColor: 'green' as const,
     icon: <IconTick className="text-semi-color-success" />,
     iconBg: 'bg-semi-color-success-light-default',
-    description: '当霸王餐名额放量并成功抢单锁定名额时，立即触发全通道通知提醒用户及时前往美团/饿了么下单。',
+    description: '当霸王餐名额放量并成功抢单锁定名额时，立即触发全通道通知提醒用户及时前往美团/淘宝闪购下单。',
   },
   {
     field: 'notify_on_spike',

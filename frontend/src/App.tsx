@@ -60,6 +60,30 @@ export const App: React.FC = () => {
     loadUserInfo();
   }, [loadAccounts, loadUserInfo]);
 
+  // 移动端屏幕方向自适应: 手机横置(倒过来)自动切横屏紧凑布局, 竖屏切回单列布局
+  useEffect(() => {
+    const root = document.documentElement;
+    const autoCollapsedRef = { done: false };
+    const syncOrientationClass = () => {
+      const isMobile = window.innerWidth <= 900 || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+      root.classList.toggle('is-mobile', isMobile);
+      root.classList.toggle('is-landscape', isMobile && window.innerWidth > window.innerHeight);
+      root.classList.toggle('is-portrait', isMobile && window.innerHeight >= window.innerWidth);
+      // 移动端首次进入自动折叠侧边栏, 释放内容区宽度 (仅一次, 不覆盖用户后续手动选择)
+      if (isMobile && !autoCollapsedRef.done) {
+        autoCollapsedRef.done = true;
+        setSidebarCollapsed(true);
+      }
+    };
+    syncOrientationClass();
+    window.addEventListener('resize', syncOrientationClass);
+    window.addEventListener('orientationchange', syncOrientationClass);
+    return () => {
+      window.removeEventListener('resize', syncOrientationClass);
+      window.removeEventListener('orientationchange', syncOrientationClass);
+    };
+  }, [setSidebarCollapsed]);
+
   // 空闲时静默预加载其他 Chunk，消除后续首次切入模块的网络与解析延迟
   useEffect(() => {
     const timer = window.setTimeout(() => {
