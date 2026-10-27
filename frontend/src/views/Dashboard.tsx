@@ -158,7 +158,6 @@ const getConditionTagColor = (condition?: string): 'green' | 'cyan' | 'blue' | '
 export const Dashboard: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
-  const setCurrentAccountKey = useAppStore((s) => s.setCurrentAccountKey);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const setPendingOrderStatus = useAppStore((s) => s.setPendingOrderStatus);
   const dashboardRef = useRef<HTMLDivElement>(null);
@@ -207,7 +206,7 @@ export const Dashboard: React.FC = () => {
   });
   const [enabledTaskCount, setEnabledTaskCount] = useState<number>(0);
   const [totalTaskCount, setTotalTaskCount] = useState<number>(12);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [, setLoading] = useState<boolean>(true);
 
   // 按钮异步操作 Loading 状态 (防重复点击)
   const [batchAllLoading, setBatchAllLoading] = useState<boolean>(false);
@@ -758,77 +757,11 @@ export const Dashboard: React.FC = () => {
               </span>
               {Boolean(currentAccount?.vip_score) && (
                 <span className="hidden lg:inline text-semi-color-text-2">
-                  成长值: <span className="font-mono text-semi-color-text-1">{(currentAccount?.vip_score || 0).toLocaleString()}</span>
+                  成长值: <span className="font-mono text-semi-color-text-1">{((currentAccount?.vip_score || 0) / 100).toLocaleString()}</span>
                 </span>
               )}
             </div>
           </div>
-        </div>
-
-        {/* 右侧：多账号切换与全局操作 */}
-        <div className="flex items-center gap-2 shrink-0">
-          {accounts.length > 1 && (
-            <Select
-              value={currentAccountKey}
-              onChange={(v) => {
-                setCurrentAccountKey(String(v));
-                const target = accounts.find((a) => a.key === v);
-                Toast.success(`已切换主控为【${target?.nickname || v}】`);
-              }}
-              style={{ width: 150 }}
-              size="small"
-              renderSelectedItem={(opt: any) => {
-                const acc = accounts.find((a) => a.key === opt?.value);
-                return (
-                  <div className="flex items-center gap-1.5 text-xs truncate">
-                    <Avatar size="extra-extra-small" src={acc?.avatar || undefined} color="orange">
-                      {acc?.nickname?.[0] || '蚕'}
-                    </Avatar>
-                    <span className="truncate">{acc?.nickname || '选择账号'}</span>
-                  </div>
-                );
-              }}
-            >
-              {accounts.map((a) => (
-                <Select.Option key={a.key} value={a.key}>
-                  <div className="flex items-center gap-1.5 py-0.5">
-                    <Avatar size="extra-extra-small" src={a.avatar || undefined} color="orange">
-                      {a.nickname?.[0] || '蚕'}
-                    </Avatar>
-                    <span className="text-xs truncate flex-1">{a.nickname}</span>
-                    <Tag size="small" color={a.is_plus ? 'amber' : 'blue'}>
-                      {a.is_plus ? `SVIP${a.vip_level || 1}` : `VIP${a.vip_level || 1}`}
-                    </Tag>
-                  </div>
-                </Select.Option>
-              ))}
-            </Select>
-          )}
-
-          <Button
-            theme="light"
-            type="primary"
-            size="small"
-            icon={<IconRefresh spin={loading} />}
-            loading={loading}
-            onClick={() => {
-              loadDashboardData(true);
-              Toast.success('已同步最新资产与任务数据');
-            }}
-          >
-            刷新数据
-          </Button>
-
-          <Button
-            theme="light"
-            type="tertiary"
-            size="small"
-            icon={<IconChevronRight />}
-            iconPosition="right"
-            onClick={() => setActiveTab('accounts')}
-          >
-            账号管理
-          </Button>
         </div>
       </div>
 

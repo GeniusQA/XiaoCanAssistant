@@ -296,10 +296,14 @@ export interface StoreAppointment {
   redpack_name?: string;
   use_advance_card?: number | boolean;
   keyword?: string;
-  match_mode?: 'contains' | 'exact' | string;
+  match_mode?: 'contains' | 'exact' | 'match_all' | string;
   min_rebate_price?: number;
   min_rebate_rate?: number;
   rebate_mode_filter?: 'all' | 'fixed' | 'percent' | string;
+  activity_requirement?: string;
+  only_grabbable?: number;
+  high_rebate_only?: number;
+  no_comment_only?: number;
   auto_stop_on_success?: number | boolean;
   max_order_money?: number;
   log_id?: number;

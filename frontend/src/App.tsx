@@ -7,6 +7,7 @@ import { SideNav } from './components/SideNav';
 import { TopHeader } from './components/TopHeader';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PageLoading } from './components/PageLoading';
+import { PairingGate } from './components/PairingGate';
 import { useAppStore } from './store/useAppStore';
 
 gsap.registerPlugin(useGSAP);
@@ -180,16 +181,16 @@ export const App: React.FC = () => {
           </Tooltip>
         </div>
       </Sider>
-      <Layout className="h-full flex flex-col flex-1 min-w-0 overflow-hidden">
+      <Layout className="app-main-layout h-full flex flex-col flex-1 min-w-0 overflow-hidden">
         <div className="shrink-0 z-10">
           <TopHeader />
         </div>
-        <Content className="flex-1 min-h-0 bg-semi-color-bg-0 p-3 sm:p-3.5 sm:px-5 overflow-hidden flex flex-col">
+        <Content className="app-page-host flex-1 min-h-0 bg-semi-color-bg-0 p-3 sm:p-3.5 sm:px-5 overflow-hidden flex flex-col">
           <ErrorBoundary>
             <Suspense fallback={<PageLoading />}>
               <div
                 ref={pageContainerRef}
-                className="w-full h-full min-h-0 flex-1 relative overflow-hidden"
+                className="app-page-container w-full h-full min-h-0 flex-1 relative overflow-hidden"
               >
                 {visitedTabs.has('dashboard') && (
                   <div
@@ -266,6 +267,8 @@ export const App: React.FC = () => {
           </ErrorBoundary>
         </Content>
       </Layout>
+      {/* 多端设备配对门 (远程设备 401 时显示) */}
+      <PairingGate />
     </Layout>
   );
 };

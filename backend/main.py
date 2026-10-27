@@ -31,6 +31,16 @@ logger = logging.getLogger("xiaocan.main")
 async def lifespan(app: FastAPI):
     logger.info("正在启动小蚕助手系统...")
     init_db()
+    # 全局 RPS 限速 (设置项 global_rps_limit, 默认 8 次/秒; 设为 0 表示不限速)
+    try:
+        from app.models.database import get_setting
+        from app.protocol.rate_limiter import set_global_rate
+        _rps = get_setting("global_rps_limit", None)
+        if _rps is not None:
+            set_global_rate(float(_rps))
+        logger.info(f"全局请求限速已启用: {get_setting('global_rps_limit', 8)} 次/秒")
+    except Exception as _rate_err:
+        logger.warning(f"全局限速初始化提示: {_rate_err}")
     start_scheduler()
     try:
         from app.meituan.runner import ensure_meituan_assets
@@ -61,6 +71,39 @@ app.add_middleware(
 # 挂载 API 路由
 app.include_router(api_router)
 
+APP_PORT = 8690
+
+# ---------------- 多端设备协同鉴权 ----------------
+# 本机 (localhost) 直连信任免认证; 非本机来源访问 /api/** 需携带配对换发的设备 JWT
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from app.core.device_auth import verify_device_token, mark_device_seen
+
+_TRUSTED_HOSTS = {"127.0.0.1", "::1", "localhost", "testserver"}
+
+@app.middleware("http")
+async def device_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    client_host = request.client.host if request.client else ""
+    # 1) 非 API 路径 (前端页面/静态资源/健康检查) 与本机来源: 直接放行
+    if not path.startswith("/api") or client_host in _TRUSTED_HOSTS:
+        return await call_next(request)
+    # 2) 配对端点免认证 (移动端换取 JWT 的唯一入口)
+    if path.startswith("/api/pairing/redeem") or path.startswith("/api/pairing/create"):
+        return await call_next(request)
+    # 3) 其余 /api/** 要求设备 JWT
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else auth_header
+    payload = verify_device_token(token.strip())
+    if not payload:
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "detail": "设备未配对或凭证已失效，请在 PC 端生成配对码重新登录"}
+        )
+    mark_device_seen(payload)
+    request.state.device_id = payload.get("device_id")
+    return await call_next(request)
+
 
 from fastapi.responses import RedirectResponse
 
@@ -83,6 +126,8 @@ if os.path.exists(FRONTEND_DIST):
 if __name__ == "__main__":
     import uvicorn
     # run.bat 设置 XIAOCAN_RELOAD=0 以生产模式运行；dev.bat 设置为 1 启用代码热重载
+    # XIAOCAN_PORT 可自定义服务端口 (默认 8690)
     reload_enabled = os.environ.get("XIAOCAN_RELOAD", "1") != "0"
-    logger.info(f"启动本地 Web 服务: http://0.0.0.0:8690 (热重载: {'开启' if reload_enabled else '关闭'})")
-    uvicorn.run("main:app", host="0.0.0.0", port=8690, reload=reload_enabled)
+    app_port = int(os.environ.get("XIAOCAN_PORT", "8690"))
+    logger.info(f"启动本地 Web 服务: http://0.0.0.0:{app_port} (热重载: {'开启' if reload_enabled else '关闭'})")
+    uvicorn.run("main:app", host="0.0.0.0", port=app_port, reload=reload_enabled)

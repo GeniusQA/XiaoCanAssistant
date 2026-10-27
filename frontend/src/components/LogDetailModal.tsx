@@ -20,34 +20,7 @@ import type { JobLog } from '../types';
 
 const { Text } = Typography;
 
-const TASK_LABELS: Record<string, string> = {
-  // 霸王餐抢单与预约
-  store_grab: '霸王餐即时抢单',
-  store_appoint: '倒计时预约抢单',
-  store_monitor: '实时名额监听捡漏',
-  store_keyword: '商户定时搜索捡漏',
-  store_search: '商户定向搜索捡漏',
-  store_cancel: '霸王餐名额取消',
-
-  // 日常自动化任务
-  user_sign: '每日签到打卡',
-  sign_in_lottery: '天天赚元宝抽奖',
-  vip_task: '会员日常成长任务',
-  brand_flash: 'SVIP大牌神券秒杀',
-  svip_rebate: 'SVIP专属返利券秒杀',
-  free_order: '全平台免单券秒杀',
-  media_vip: '腾讯/网易影视周卡秒杀',
-  flash_sale: '元宝秒杀券兑换',
-  daily_redpack: '每日全平台红包雨',
-  lottery: '免费开红包与抽奖',
-  step_reward: '阶段阶梯打卡进度领取',
-  auto_withdraw: '账户佣金自动提现',
-  check_assets: '全资产与明细轮询',
-  token_refresh: '多账号鉴权状态巡检',
-  dual_rebate_monitor: '美团同店双返利监控',
-  meituan_coupon: '美团官方领券打卡',
-  meituan_auth: '美团官方扫码授权'
-};
+import { getTaskLabel } from '../constants/taskLabels';
 
 export interface LogDetailModalProps {
   visible: boolean;
@@ -84,7 +57,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
 
   const activeLog = selectedLog || log;
   const taskId = customTaskId || activeLog?.task_id || '';
-  const taskName = customTitle || TASK_LABELS[taskId] || (taskId ? `任务 [${taskId}]` : '调度任务');
+  const taskName = customTitle || getTaskLabel(taskId);
   const accountKey = customAccountKey || activeLog?.account_key || '';
   const matchedAccount = accounts.find((a) => a.key === accountKey);
   const accountNickname = matchedAccount?.nickname || accountKey || '默认账号';
@@ -162,7 +135,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
             >
               {logs.map((l) => (
                 <Select.Option key={l.id} value={l.id}>
-                  [{l.created_at?.split(' ')[1] || l.created_at}] {TASK_LABELS[l.task_id] || l.task_id} ({l.status === 'success' ? '成功' : l.status === 'failed' ? '失败' : l.status})
+                  [{l.created_at?.split(' ')[1] || l.created_at}] {getTaskLabel(l.task_id || '')} ({l.status === 'success' ? '成功' : l.status === 'failed' ? '失败' : l.status})
                 </Select.Option>
               ))}
             </Select>

@@ -19,7 +19,6 @@ import {
   IconRefresh,
   IconDelete,
   IconClock,
-  IconFile,
   IconCheckCircleStroked,
   IconAlertCircle,
   IconSpin
@@ -34,42 +33,7 @@ import type { JobLog } from '../types';
 
 const { Title, Text } = Typography;
 
-const TASK_LABELS: Record<string, string> = {
-  // 霸王餐抢单与预约
-  store_grab: '霸王餐即时抢单',
-  store_appoint: '倒计时预约抢单',
-  store_monitor: '实时名额监听捡漏',
-  store_keyword: '商户定时搜索捡漏',
-  store_search: '商户定向搜索捡漏',
-  store_cancel: '霸王餐名额取消',
-  // 日常自动化任务
-  yb_task: '领天天赚元宝',
-  yb_sign: '天天赚元宝签到',
-  collect_points: '收取未收元宝',
-  daily: '元宝乐园综合打卡',
-  group_lottery: '免费开红包与抽奖',
-  redpack_rain: '整点红包雨',
-  flash_sale: '元宝秒杀抢券',
-  vip_expand: '会员每日签到',
-  brand_flash: '大牌畅享秒杀',
-  svip_rebate: 'SVIP高额返利券',
-  media_vip: '影音会员周卡',
-  free_order: '订单全额免单券',
-  expire_remind: '凭据/JWT到期预警',
-  coupon_remind: '卡券/红包到期提醒',
-  dual_rebate_monitor: '美团同店双返利监控',
-  meituan_coupon: '美团官方领券打卡',
-  meituan_auth: '美团官方扫码授权',
-};
-
-const STORE_TASK_KEYS = new Set([
-  'store_grab',
-  'store_appoint',
-  'store_monitor',
-  'store_keyword',
-  'store_search',
-  'store_cancel',
-]);
+import { TASK_LABELS, STORE_TASK_KEYS } from '../constants/taskLabels';
 
 export const LogsView: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
@@ -376,10 +340,13 @@ export const LogsView: React.FC = () => {
       width: 190,
       render: (summary: string, record: JobLog) => {
         const text = (summary || '').trim() || (record.status === 'success' ? '执行成功' : '执行失败');
-        const isFail = /未抢到|上限|失败|异常|未找到|401/.test(text);
+        const isFail = /未抢到|上限|失败|异常|未找到|401|未能|WAF|拦截|熔断|403/.test(text);
+        // 部分完成 / 留有未达成目标: 用橙色警示, 避免"处理完毕"式误导
+        const isPartial = !isFail && /未完成|还差|未补齐|待补齐|未达标/.test(text);
+        const color = isFail ? 'red' : (isPartial ? 'orange' : 'green');
         return (
           <Tooltip content={text} position="topLeft">
-            <Tag color={isFail ? 'red' : 'green'} size="small" style={{ maxWidth: 180 }}>
+            <Tag color={color} size="small" style={{ maxWidth: 180 }}>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
             </Tag>
           </Tooltip>
@@ -438,27 +405,6 @@ export const LogsView: React.FC = () => {
           </div>
         );
       },
-    },
-    {
-      title: '操作',
-      dataIndex: 'actions',
-      width: 100,
-      fixed: 'right' as const,
-      align: 'center' as const,
-      render: (_: any, record: JobLog) => (
-        <div className="w-full flex justify-center items-center">
-          <Button
-            theme="light"
-            type="tertiary"
-            size="small"
-            icon={<IconFile />}
-            onClick={() => handleOpenDetail(record)}
-            className="text-xs"
-          >
-            详情
-          </Button>
-        </div>
-      ),
     },
   ], [accounts, handleOpenDetail]);
 

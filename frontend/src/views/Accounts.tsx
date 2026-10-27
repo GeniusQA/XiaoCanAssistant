@@ -66,6 +66,7 @@ import {
 import { useAppStore } from '../store/useAppStore';
 import { api } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
+import { DevicePairingPanel } from '../components/DevicePairingPanel';
 import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode, ClawBotStatus, MeituanSlot, MediaVipRecord } from '../types';
 
 const { Title, Text, Paragraph } = Typography;
@@ -1073,7 +1074,7 @@ export const Accounts: React.FC = () => {
                     </div>
                     {Boolean(acc.vip_score) && (
                       <Text size="small" type="tertiary">
-                        成长值: <Text size="small" strong>{(acc.vip_score || 0).toLocaleString()}</Text>
+                        成长值: <Text size="small" strong>{((acc.vip_score || 0) / 100).toLocaleString()}</Text>
                       </Text>
                     )}
                   </div>
@@ -1678,6 +1679,19 @@ export const Accounts: React.FC = () => {
               </div>
             </div>
           </TabPane>
+
+          {/* TAB 4: 设备协同 (移动端配对) */}
+          <TabPane
+            tab={
+              <span className="flex items-center gap-1.5">
+                <IconSmartphoneStroked />
+                <span>设备协同</span>
+              </span>
+            }
+            itemKey="device_pairing"
+          >
+            <DevicePairingPanel />
+          </TabPane>
         </Tabs>
       </Modal>
 
@@ -1775,8 +1789,9 @@ export const Accounts: React.FC = () => {
                 const vipInfo = detailData.user_info.vip_level_info;
                 const isPlus = Boolean(vipInfo.is_plus);
                 const currentVipLevel = vipInfo.new_level || 1;
-                const maxScore = vipInfo.next_level_score || 150000;
-                const curScore = vipInfo.score || 0;
+                // 官方接口返回分为单位, 官方 App 按「元」展示 (÷100), 如 148940 → 1489.4
+                const maxScore = (vipInfo.next_level_score || 150000) / 100;
+                const curScore = (vipInfo.score || 0) / 100;
                 const pct = Math.min(100, Math.round((curScore / (maxScore || 1)) * 100));
 
                 return (
@@ -1787,7 +1802,7 @@ export const Accounts: React.FC = () => {
                         <Tag size="small" color={isPlus ? "orange" : "blue"}>等级 {currentVipLevel}</Tag>
                       </div>
                       <Text type="secondary">
-                        {curScore.toLocaleString()} / {maxScore.toLocaleString()} 分
+                        {curScore.toLocaleString()} / {maxScore.toLocaleString()}
                       </Text>
                     </div>
                     <Progress

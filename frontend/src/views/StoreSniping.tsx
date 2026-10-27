@@ -459,7 +459,7 @@ export const StoreSniping: React.FC = () => {
   const activeSearchKeywordRef = useRef<string>('');
   const pagePvIdRef = useRef<string>('');
 
-  // 大牌券专享 Tab: 官方大牌商家 (status==3 Vip 类别 / store_brand_type==1) 与「周边门店通用」品牌券店
+  // 大牌商家 Tab: 官方大牌商家 (status==3 Vip 类别 / store_brand_type==1) 与「周边门店通用」品牌券店
   const isBrandCouponStore = useCallback((s: StoreItem) => {
     if (s.is_brand_vip || s.is_vip_brand) {
       return true;
@@ -544,6 +544,18 @@ export const StoreSniping: React.FC = () => {
 
   // 店名抢单监听弹窗状态
   const [nameMonitorVisible, setNameMonitorVisible] = useState(false);
+  // 编辑模式: 待编辑的监听任务 (打开配置弹窗预填参数, 保存后自动重启)
+  const [editingApt, setEditingApt] = useState<StoreAppointment | null>(null);
+  // 详情弹窗: 展示任务全部参数设置
+  const [detailApt, setDetailApt] = useState<StoreAppointment | null>(null);
+  const handleEditApt = (row: StoreAppointment) => {
+    setEditingApt(row);
+    setNameMonitorVisible(true);
+    // 编辑预填了红包策略, 确保红包列表数据可用
+    if (currentAccountKey && !assetDetail?.redpacks?.length) {
+      fetchAccountAssets(currentAccountKey, true);
+    }
+  };
   const [nameMonitorSubmitting, setNameMonitorSubmitting] = useState(false);
   const [nameMonitorInitialKeyword, setNameMonitorInitialKeyword] = useState('');
 
@@ -1371,13 +1383,18 @@ export const StoreSniping: React.FC = () => {
       Toast.warning('请先选择或绑定账号');
       return;
     }
+    // 红包下拉数据源: 打开弹窗时若尚未加载账户红包则立即拉取
+    if (!assetDetail?.redpacks?.length) {
+      fetchAccountAssets(currentAccountKey, true);
+    }
     setNameMonitorInitialKeyword(kw || searchKeyword || '');
     setNameMonitorVisible(true);
-  }, [currentAccountKey, searchKeyword]);
+  }, [currentAccountKey, searchKeyword, assetDetail, fetchAccountAssets]);
 
   const handleSubmitNameMonitor = async (values: any) => {
     if (!currentAccountKey) return;
-    const isMatchAll = (values.match_mode || 'contains') === 'match_all';
+    // 常规匹配 = listen_mode 'all' (对应后端 match_mode 'match_all'); 校验应依据监听模式而非匹配模式字段
+    const isMatchAll = values.listen_mode === 'all';
     const kw = (values.keyword || '').trim();
     if (!isMatchAll && !kw) {
       Toast.warning('请输入商户名称或搜索关键词');
@@ -1386,6 +1403,11 @@ export const StoreSniping: React.FC = () => {
     setNameMonitorSubmitting(true);
     try {
       const rpMode = values.redpack_mode ?? 0;
+      if (rpMode === 1 && !values.redpack_id) {
+        Toast.warning('请选择要绑定的红包');
+        setNameMonitorSubmitting(false);
+        return;
+      }
       let chosenRpId = '';
       let chosenRpName = '';
       if (rpMode === 1 && values.redpack_id) {
@@ -1396,10 +1418,11 @@ export const StoreSniping: React.FC = () => {
         }
       }
 
-      const res = await api.createNameMonitor({
+      const payload = {
         account_key: currentAccountKey,
-        keyword: kw,
-        match_mode: values.match_mode || 'contains',
+        keyword: isMatchAll ? '' : kw,
+        // 常规匹配 → match_all (走 feed 数据源); 店名匹配 → contains/exact (走搜索接口)
+        match_mode: isMatchAll ? 'match_all' : (values.match_mode || 'contains'),
         platform: Array.isArray(values.platform_sel) && values.platform_sel.length > 0 && !values.platform_sel.includes('all')
           ? values.platform_sel.join(',')
           : 'all',
@@ -1415,17 +1438,24 @@ export const StoreSniping: React.FC = () => {
         timeout_sec: values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200,
         until_time: Number(values.timeout_sec) === -1 ? '' : (Number(values.timeout_sec) === 0 ? '23:59' : undefined),
         check_interval: Number(values.check_interval ?? 10),
+        use_advance_card: values.use_advance_card ? 1 : 0,
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
         redpack_name: chosenRpName
-      });
+      };
+
+      // 编辑模式: 调用更新接口, 持续时长按新选择从当前时间重新计算截止时间, 后端重置状态自动重启监听
+      const res = editingApt
+        ? await api.updateNameMonitor(editingApt.id, payload)
+        : await api.createNameMonitor(payload);
 
       if (res.ok) {
-        Toast.success(res.message || `已启动「${kw}」店名抢单监听`);
+        Toast.success(editingApt ? `监听任务 #${editingApt.id} 已更新并重新启动` : (res.message || `已启动「${kw}」店名抢单监听`));
         setNameMonitorVisible(false);
+        setEditingApt(null);
         await fetchAppointments(true);
       } else {
-        Toast.warning(res.message || '创建监听任务失败');
+        Toast.warning(res.message || (editingApt ? '更新监听任务失败' : '创建监听任务失败'));
       }
     } catch (err: any) {
       Toast.error('创建店名监听任务失败: ' + (err?.message || '网络异常'));
@@ -1489,6 +1519,14 @@ export const StoreSniping: React.FC = () => {
               <Avatar size="medium" shape="square" src={row.icon || undefined} color={platInfo.avatarColor}>
                 {name?.[0] || '店'}
               </Avatar>
+              {isBrandCouponStore(row) && (
+                <span
+                  className="absolute -top-1.5 -right-1.5 bg-red-500 text-white font-bold leading-none shadow-sm z-10"
+                  style={{ fontSize: 9, padding: '2px 3px', borderRadius: 3 }}
+                >
+                  大牌
+                </span>
+              )}
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
@@ -2240,11 +2278,13 @@ export const StoreSniping: React.FC = () => {
       title: '任务类型',
       dataIndex: 'task_type',
       width: 130,
-      render: (t: string) => {
+      render: (t: string, row?: StoreAppointment) => {
         if (t === 'name_monitor' || t === 'keyword') {
+          // 常规匹配模式: 任务类型直接反映监听模式
+          const isMatchAll = row?.match_mode === 'match_all';
           return (
             <Tag color="cyan" shape="square">
-              店名监听
+              {isMatchAll ? '常规匹配' : '店名监听'}
             </Tag>
           );
         }
@@ -2262,7 +2302,10 @@ export const StoreSniping: React.FC = () => {
       render: (name: string, row?: StoreAppointment) => {
         const isNameMon = row?.task_type === 'name_monitor' || row?.task_type === 'keyword';
         const platInfo = getPlatformBadge(row?.platform);
-        const iconSrc = row?.store_icon || row?.icon || (row?.store_id ? storeIconMap.get(row.store_id) : undefined) || (name ? storeIconMap.get(name) : undefined);
+        // 店名监听任务无固定店铺: 不做 storeIconMap 回填 (避免关键词同名/搜索错配导致头像与店铺不符)
+        const iconSrc = isNameMon
+          ? (row?.store_icon || row?.icon || undefined)
+          : (row?.store_icon || row?.icon || (row?.store_id ? storeIconMap.get(row.store_id) : undefined) || (name ? storeIconMap.get(name) : undefined));
         return (
           <div className="flex items-start gap-3 py-1">
             <div className="relative flex-shrink-0 mt-0.5">
@@ -2280,8 +2323,8 @@ export const StoreSniping: React.FC = () => {
                 <Tag color={platInfo.color} size="small" shape="square" className="flex-shrink-0">
                   {row?.platform === 'all' ? '全平台' : platInfo.label}
                 </Tag>
-                <StoreNameCell name={name} maxWidth={240} />
-                {isNameMon && (
+                {name ? <StoreNameCell name={name} maxWidth={240} /> : null}
+                {isNameMon && row?.match_mode !== 'match_all' && (
                   <Tag color="light-blue" size="small" shape="square">
                     {row?.match_mode === 'exact' ? '精确匹配' : '包含匹配'}
                   </Tag>
@@ -2325,7 +2368,7 @@ export const StoreSniping: React.FC = () => {
         if (row.task_type === 'name_monitor' || row.task_type === 'keyword') {
           return (
             <div className="text-xs space-y-0.5">
-              <div>监听时段: <span className="font-mono font-semibold">{row.start_time || '即刻'} ~ {row.until_time || '23:59'}</span></div>
+              <div>监听时段: <span className="font-mono font-semibold">{row.start_time || '即刻'} ~ {row.until_time || '永久'}</span></div>
               <div className="text-semi-color-text-2">嗅探频率: 每 {row.check_interval || 10} 秒</div>
             </div>
           );
@@ -2430,7 +2473,7 @@ export const StoreSniping: React.FC = () => {
     {
       title: '操作',
       dataIndex: 'actions',
-      width: 110,
+      width: 150,
       fixed: 'right',
       render: (_: any, row?: StoreAppointment) => {
         if (!row) return null;
@@ -2438,34 +2481,52 @@ export const StoreSniping: React.FC = () => {
         if (isActive) {
           if (row.status === 'monitoring') {
             return (
-              <Button
-                theme="light"
-                type="warning"
-                size="small"
-                onClick={() => handleStopAppoint(row.id)}
-              >
-                停止
-              </Button>
+              <div className="flex items-center gap-1">
+                <Button size="small" theme="light" onClick={() => setDetailApt(row)}>
+                  详情
+                </Button>
+                <Button
+                  theme="light"
+                  type="warning"
+                  size="small"
+                  onClick={() => handleStopAppoint(row.id)}
+                >
+                  停止
+                </Button>
+              </div>
             );
           }
           return (
-            <Popconfirm title="确定取消此预约？" onConfirm={() => handleCancelAppoint(row.id)}>
-              <Button theme="light" type="danger" size="small">
-                取消
+            <div className="flex items-center gap-1">
+              <Button size="small" theme="light" onClick={() => setDetailApt(row)}>
+                详情
               </Button>
-            </Popconfirm>
+              <Popconfirm title="确定取消此预约？" onConfirm={() => handleCancelAppoint(row.id)}>
+                <Button theme="light" type="danger" size="small">
+                  取消
+                </Button>
+              </Popconfirm>
+            </div>
           );
         }
         return (
-          <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
-            <Button theme="borderless" type="tertiary" size="small">
-              删除
+          <div className="flex items-center gap-1">
+            <Button size="small" theme="light" onClick={() => setDetailApt(row)}>
+              详情
             </Button>
-          </Popconfirm>
+            <Button size="small" theme="light" onClick={() => handleEditApt(row)}>
+              编辑
+            </Button>
+            <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
+              <Button theme="borderless" type="tertiary" size="small">
+                删除
+              </Button>
+            </Popconfirm>
+          </div>
         );
       },
     },
-  ], [handleStopAppoint, handleCancelAppoint, storeIconMap, calcAdvanceTime]);
+  ], [handleStopAppoint, handleCancelAppoint, handleEditApt, storeIconMap, calcAdvanceTime]);
 
 
 
@@ -2735,11 +2796,11 @@ export const StoreSniping: React.FC = () => {
               }}
             >
               <TabPane tab={`附近店铺 (${regularStores.length})`} itemKey="stores" />
-              <TabPane tab={`大牌券专享 (${brandCouponStores.length})`} itemKey="brand_coupon" />
+              <TabPane tab={`大牌商家 (${brandCouponStores.length})`} itemKey="brand_coupon" />
               <TabPane
                 tab={
                   <div className="flex items-center gap-1.5">
-                    <span>美团同店双返利</span>
+                    <span>美团双返</span>
                     {dualScanDone && (
                       <Tag color="amber" size="small" shape="circle">{dualStores.length}</Tag>
                     )}
@@ -2747,7 +2808,7 @@ export const StoreSniping: React.FC = () => {
                 }
                 itemKey="dual_rebate"
               />
-              <TabPane tab={`预约与监听 (${appointments.length})`} itemKey="appointments" />
+              <TabPane tab={`抢单监听 (${appointments.length})`} itemKey="appointments" />
             </Tabs>
 
             {/* 店铺主 Tab / 大牌券 Tab 搜索框与店名抢单监听按钮 */}
@@ -3024,7 +3085,7 @@ export const StoreSniping: React.FC = () => {
             </div>
           )}
 
-          {/* 大牌券专享分栏（周边门店通用专享） */}
+          {/* 大牌商家分栏（周边门店通用专享） */}
           {visitedTabs.has('brand_coupon') && (
             <div
               ref={brandContainerRef}
@@ -3056,7 +3117,7 @@ export const StoreSniping: React.FC = () => {
                 <div className="store-table-footer flex-shrink-0 mt-auto border-t border-semi-color-border bg-semi-color-fill-0 py-2.5 px-4 flex items-center justify-center">
                   <div className="text-xs text-semi-color-text-3 flex items-center gap-2">
                     <Tag color="grey" size="small">已到底部</Tag>
-                    <span>已呈现全部 {brandCouponStores.length} 家周边门店通用商户</span>
+                    <span>已呈现全部 {brandCouponStores.length} 家大牌商家</span>
                   </div>
                 </div>
               )}
@@ -3767,11 +3828,53 @@ export const StoreSniping: React.FC = () => {
         </Tabs>
       </Modal>
 
-      {/* 店名抢单监听配置弹窗 */}
+      {/* 任务参数详情弹窗 */}
       <Modal
-        title="店名抢单监听配置"
+        title={detailApt ? `任务 #${detailApt.id} 参数详情` : ''}
+        visible={!!detailApt}
+        onCancel={() => setDetailApt(null)}
+        footer={<Button onClick={() => setDetailApt(null)}>关闭</Button>}
+        width={580}
+        style={{ maxWidth: '94vw' }}
+        centered
+      >
+        {detailApt && (
+          <div className="flex flex-col">
+            {([
+              ['任务 ID', `#${detailApt.id}`],
+              ['监听模式', detailApt.match_mode === 'match_all' ? '常规匹配' : '店名监听'],
+              ['商户名称 / 关键词', detailApt.keyword || '(未指定)'],
+              ['匹配模式', detailApt.match_mode === 'match_all' ? '—' : (detailApt.match_mode === 'exact' ? '完全匹配' : '包含匹配')],
+              ['外卖平台', detailApt.platform === 'all' ? '全部平台 (美团 / 淘宝闪购 / 京东)' : (detailApt.platform || '').split(',').map((p: string) => ({ meituan: '美团', eleme: '淘宝闪购', jingdong: '京东' } as any)[p] || p).join('、')],
+              ['返利形式', ({ all: '全部方案', fixed: '仅实付满返', percent: '仅比例返' } as any)[detailApt.rebate_mode_filter || 'all'] || detailApt.rebate_mode_filter],
+              ['活动要求', ({ all: '不限', designated_dish: '指定餐品', repurchase: '复购专享' } as any)[detailApt.activity_requirement || 'all'] || detailApt.activity_requirement],
+              ['仅监听有库存商家', detailApt.only_grabbable !== 0 ? '是' : '否'],
+              ['仅监听高返利商家', detailApt.high_rebate_only ? '是' : '否'],
+              ['仅监听无需评价商家', detailApt.no_comment_only ? '是' : '否'],
+              ['最低返利金额门槛', `¥ ${(Number(detailApt.min_rebate_price) || 0).toFixed(2)}`],
+              ['最低返利比例门槛', `${Number(detailApt.min_rebate_rate) || 0} %`],
+              ['抢成自停', detailApt.auto_stop_on_success !== 0 ? '开启' : '关闭'],
+              ['超前抢单券', detailApt.use_advance_card ? '使用 (提前 30 分钟进入抢购)' : '未使用 (常规开抢)'],
+              ['红包使用策略', Number(detailApt.redpack_mode) === 1 ? `指定红包 (ID: ${detailApt.redpack_id || '-'})` : (Number(detailApt.redpack_mode) === 2 ? '不使用红包' : '自动最优红包')],
+              ['监听时段', `${detailApt.start_time || '-'} ~ ${detailApt.until_time || '永久'}`],
+              ['嗅探频率', `每 ${detailApt.check_interval || 10} 秒`],
+              ['当前状态', ({ pending: '就绪中', monitoring: '正在监听', scheduled: '定时等待', primed: '抢购预备', cancelled: '已停止', expired: '监听结束', failed: '失败', success: '抢单成功' } as any)[detailApt.status] || detailApt.status],
+              ['创建时间', detailApt.created_at || '-'],
+            ] as [string, any][]).map(([k, v]) => (
+              <div key={k} className="flex items-start gap-3 py-1.5 border-b border-dashed border-semi-color-border last:border-0">
+                <span className="text-semi-color-text-2 w-40 shrink-0">{k}</span>
+                <span className="font-medium break-all">{String(v)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
+
+      {/* 店名抢单监听配置弹窗 (支持编辑模式预填) */}
+      <Modal
+        title={editingApt ? `编辑监听任务 #${editingApt.id}` : '店名抢单监听配置'}
         visible={nameMonitorVisible}
-        onCancel={() => setNameMonitorVisible(false)}
+        onCancel={() => { setNameMonitorVisible(false); setEditingApt(null); }}
         footer={null}
         width={640}
         style={{ maxWidth: '94vw' }}
@@ -3781,8 +3884,26 @@ export const StoreSniping: React.FC = () => {
         }}
       >
         <Form
-          key={nameMonitorInitialKeyword}
-          initValues={{
+          key={editingApt ? `edit_${editingApt.id}` : `new_${nameMonitorInitialKeyword}`}
+          initValues={editingApt ? {
+            keyword: editingApt.keyword || '',
+            listen_mode: editingApt.match_mode === 'match_all' ? 'all' : 'name',
+            match_mode: editingApt.match_mode === 'exact' ? 'exact' : 'contains',
+            platform_sel: editingApt.platform === 'all' ? ['all'] : (editingApt.platform || 'all').split(',').filter(Boolean),
+            rebate_mode_filter: editingApt.rebate_mode_filter || 'all',
+            activity_requirement: editingApt.activity_requirement || 'all',
+            high_rebate_only: Boolean(editingApt.high_rebate_only),
+            no_comment_only: Boolean(editingApt.no_comment_only),
+            only_grabbable: editingApt.only_grabbable !== 0,
+            min_rebate_price: Number(editingApt.min_rebate_price || 0),
+            min_rebate_rate: Number(editingApt.min_rebate_rate || 0),
+            timeout_sec: 7200,
+            check_interval: Number(editingApt.check_interval || 10),
+            auto_stop_on_success: editingApt.auto_stop_on_success !== 0,
+            redpack_mode: Number(editingApt.redpack_mode || 0),
+            redpack_id: editingApt.redpack_id || '',
+            use_advance_card: Boolean(editingApt.use_advance_card),
+          } : {
             keyword: nameMonitorInitialKeyword,
             listen_mode: 'name',
             match_mode: 'contains',
@@ -3797,6 +3918,8 @@ export const StoreSniping: React.FC = () => {
             check_interval: 10,
             auto_stop_on_success: true,
             redpack_mode: 0,
+            redpack_id: '',
+            use_advance_card: false,
           }}
           onSubmit={handleSubmitNameMonitor}
         >
@@ -3993,6 +4116,7 @@ export const StoreSniping: React.FC = () => {
                     field="timeout_sec"
                     label="监听持续时长"
                     style={{ width: '100%' }}
+                    helpText={editingApt ? '修改后将从当前时间重新计算截止时间' : undefined}
                   >
                     <Select.Option value={1800}>30 分钟</Select.Option>
                     <Select.Option value={3600}>1 小时</Select.Option>
@@ -4015,6 +4139,57 @@ export const StoreSniping: React.FC = () => {
                   </Form.Select>
                 </Col>
               </Row>
+
+              {/* 红包使用策略 */}
+              <Form.RadioGroup
+                field="redpack_mode"
+                label="红包使用策略"
+                type="button"
+                buttonSize="small"
+              >
+                <Radio value={0}>自动最优红包</Radio>
+                <Radio value={1}>指定红包</Radio>
+                <Radio value={2}>不使用红包</Radio>
+              </Form.RadioGroup>
+              {formState.values?.redpack_mode === 1 && (
+                <Form.Select
+                  field="redpack_id"
+                  label="选择指定红包"
+                  placeholder="请选择要绑定的红包"
+                  loading={assetStats.loading}
+                  emptyContent={assetStats.loading ? '正在加载账户红包数据...' : '暂无可用红包 (已被使用/过期，或资产数据加载失败，请关闭后重试)'}
+                  rules={[{ required: true, message: '请选择要使用的红包' }]}
+                  helpText="开抢前若此红包已核销或过期，系统自动替换为最优红包"
+                  className="w-full"
+                >
+                  {(assetDetail?.redpacks || []).map((rp: any) => {
+                    const rId = String(rp.user_red_pack_id || rp.id || '');
+                    const rName = rp.name || rp.title || '外卖满返红包';
+                    const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
+                    const rReward = `¥${((Number(rawVal) || 0) / 100).toFixed(2)}`;
+                    const thresholdStr = rp.threshold_num ? `满${(rp.threshold_num / 100).toFixed(0)}元可用` : '无门槛';
+                    const rExpire = rp.end_time ? formatTimestamp(rp.end_time) : (rp.expire_time ? formatTimestamp(rp.expire_time) : '');
+                    return (
+                      <Select.Option key={rId} value={rId}>
+                        <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5">
+                          <span className="truncate">{cleanEmoji(rName)}</span>
+                          <span className="text-semi-color-text-2 shrink-0 ml-2">{rReward} · {thresholdStr}{rExpire ? ` · ${rExpire}` : ''}</span>
+                        </div>
+                      </Select.Option>
+                    );
+                  })}
+                </Form.Select>
+              )}
+
+              {/* 抢单行为开关 */}
+              <div className="flex flex-col gap-2">
+                <Form.Checkbox field="auto_stop_on_success" noLabel>
+                  <span className="text-sm">抢成自停（抢单成功后自动停止监听）</span>
+                </Form.Checkbox>
+                <Form.Checkbox field="use_advance_card" noLabel>
+                  <span className="text-sm">使用超前抢单券（提前 30 分钟进入抢购队列）</span>
+                </Form.Checkbox>
+              </div>
 
               {/* 底部操作栏 */}
               <div className="flex items-center justify-end gap-3 pt-3 mt-1 border-t border-semi-color-border-subtle">

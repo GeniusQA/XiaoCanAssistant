@@ -393,6 +393,8 @@ html, body, #root {
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
+  /* 关键: 勾选框本体不得被拉伸, 否则会把右侧文字推到最远端形成巨大间距 */
+  flex: 0 0 auto !important;
 }
 
 .semi-checkbox-inner-display {
@@ -400,6 +402,7 @@ html, body, #root {
   align-items: center !important;
   justify-content: center !important;
   line-height: 1 !important;
+  flex: 0 0 auto !important;
 }
 
 .semi-checkbox-inner-display .semi-icon {
@@ -407,8 +410,6 @@ html, body, #root {
   align-items: center !important;
   justify-content: center !important;
   vertical-align: baseline !important;
-  width: 100% !important;
-  height: 100% !important;
   line-height: 1 !important;
 }
 
@@ -420,6 +421,22 @@ html, body, #root {
 .semi-checkbox-content {
   display: flex !important;
   align-items: center !important;
+}
+
+/* ==================== 勾选项统一布局 ====================
+   修复部分页面复选框与文字之间被容器拉伸出巨大空白的问题:
+   强制 checkbox 宽度自适应 + 内容左对齐紧贴 */
+label.semi-checkbox,
+.semi-checkbox {
+  width: fit-content !important;
+  max-width: 100%;
+  justify-content: flex-start !important;
+}
+
+.semi-checkbox > .semi-checkbox-addon,
+.semi-checkbox-addon {
+  margin-left: 8px !important;
+  flex: 0 0 auto !important;
 }
 
 .semi-radio {
@@ -486,6 +503,64 @@ html, body, #root {
 /* 横屏模式: 内容区允许更紧凑的横向排布 */
 html.is-landscape .flex.flex-col.gap-3 {
   gap: 10px !important;
+}
+
+/* ==================== 移动端整页自然滚动 (修复竖屏/横屏无法滑动、侧边栏菜单不可滚动) ==================== */
+@media screen and (max-width: 900px) {
+  html.is-mobile,
+  html.is-mobile body,
+  html.is-mobile #root {
+    height: auto !important;
+    min-height: 100% !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 根布局与主布局: 解除固定视口高度锁, 允许整页滚动 */
+  html.is-mobile .app-root-layout,
+  html.is-mobile .app-main-layout,
+  html.is-mobile .semi-layout {
+    height: auto !important;
+    min-height: 100vh !important;
+    overflow: visible !important;
+  }
+
+  /* 内容区与页面容器: 高度自适应内容, 不再裁切 */
+  html.is-mobile .app-page-host,
+  html.is-mobile .app-page-container,
+  html.is-mobile [data-tab] {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  /* 页面内部固定高度/隐藏溢出的容器一并放开, 让内容自然撑开 */
+  html.is-mobile [data-tab] > div {
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+  }
+
+  /* 侧边栏: 随内容自然高度展开, 菜单项全部可见并可随整页滚动 */
+  html.is-mobile .semi-layout-sider,
+  html.is-mobile .side-nav-root,
+  html.is-mobile .semi-navigation {
+    height: auto !important;
+    min-height: 100vh !important;
+    overflow: visible !important;
+  }
+
+  html.is-mobile .semi-navigation-list-wrapper {
+    overflow-y: visible !important;
+  }
+
+  /* 表格类页面允许横向滑动查看完整列 */
+  html.is-mobile .semi-table-wrapper,
+  html.is-mobile .semi-table-body {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 
 /* 触屏设备: 保证按钮最小点击热区 */

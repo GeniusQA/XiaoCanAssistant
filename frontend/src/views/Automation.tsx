@@ -19,6 +19,8 @@ import {
   TabPane,
   Checkbox,
   Select,
+  RadioGroup,
+  Radio,
 } from '@douyinfe/semi-ui';
 import {
   IconPlay,
@@ -275,7 +277,7 @@ const TaskCard: React.FC<TaskCardProps> = React.memo(({
                 theme="borderless"
                 type="tertiary"
                 size="small"
-                style={{ padding: '0 4px', fontSize: 11, height: 'auto', lineHeight: '18px' }}
+                style={{ padding: '0 4px', fontSize: 11, height: 20, lineHeight: '20px' }}
                 onClick={() => onToggleAllAccounts(task.task_id, !isAllAccountsEnabled)}
               >
                 {isAllAccountsEnabled ? '全部暂停' : '全部开启'}
@@ -357,6 +359,46 @@ export const Automation: React.FC = () => {
   const [drawerVisible, setDrawerVisible] = useState<boolean>(false);
   const [selectedTask, setSelectedTask] = useState<TaskItem | null>(null);
   const [drawerParams, setDrawerParams] = useState<Record<string, any>>({});
+  // 元宝秒杀: 在架商品列表 (供商品多选勾选)
+  const [flashGoods, setFlashGoods] = useState<{ exchange_id: number; goods_name: string; community_silk: number; left: number; group: string; round_ts: number }[]>([]);
+  const [flashGoodsLoading, setFlashGoodsLoading] = useState(false);
+  const [flashGoodsError, setFlashGoodsError] = useState('');
+  const [flashGoodsRounds, setFlashGoodsRounds] = useState<string[]>([]);
+  const [flashRoundTs, setFlashRoundTs] = useState<number[]>([]);
+  const [activeFlashRound, setActiveFlashRound] = useState<number>(-1);
+  const [flashGoodsLoadedFor, setFlashGoodsLoadedFor] = useState<string>('');
+
+  const loadFlashGoods = async (force = false) => {
+    if (flashGoodsLoading) return;
+    if (!force && flashGoodsLoadedFor === (currentAccountKey || '')) return;
+    setFlashGoodsLoading(true);
+    setFlashGoodsError('');
+    try {
+      const res = await api.getFlashSaleGoods(currentAccountKey || undefined);
+      if (res.ok) {
+        setFlashGoods(res.items || []);
+        setFlashGoodsRounds(res.rounds || []);
+        const tsList = (res.round_ts_list || []).slice().sort((a: number, b: number) => a - b);
+        setFlashRoundTs(tsList);
+        setFlashGoodsLoadedFor(currentAccountKey || '');
+        // 默认选中「进行中」场次, 无则第一个未开始场次
+        const now = Math.floor(Date.now() / 1000);
+        let pick = -1;
+        for (let i = 0; i < tsList.length; i++) {
+          const nextR = tsList[i + 1] || tsList[i] + 2 * 3600;
+          if (now >= tsList[i] && now < nextR) { pick = tsList[i]; break; }
+        }
+        if (pick === -1) pick = tsList.find((r: number) => r > now) ?? -1;
+        setActiveFlashRound(pick);
+      } else {
+        setFlashGoodsError(res.error || '获取在架商品失败');
+      }
+    } catch (e: any) {
+      setFlashGoodsError(e.message || '获取在架商品失败');
+    } finally {
+      setFlashGoodsLoading(false);
+    }
+  };
   const [drawerCronTime, setDrawerCronTime] = useState<string>('09:00');
   const [drawerApplyAllAccounts, setDrawerApplyAllAccounts] = useState<boolean>(false);
   const [savingParams, setSavingParams] = useState<boolean>(false);
@@ -545,6 +587,10 @@ export const Automation: React.FC = () => {
     setDrawerCronTime(task.cron_time || '09:00');
     setDrawerApplyAllAccounts(false);
     setDrawerVisible(true);
+    // 元宝秒杀任务: 打开配置自动拉取在架商品
+    if (task.task_id === 'flash_sale') {
+      loadFlashGoods();
+    }
   };
 
   // 下拉选择参数变更处理（针对美团同店双返利 30 分钟高频风控二次确认）
@@ -1262,6 +1308,125 @@ export const Automation: React.FC = () => {
                             {pd.hint.replace(/[（(][^）)]*[）)]/g, '').trim()}
                           </Text>
                         )}
+                      </div>
+                    );
+                  }
+
+                  if (pd.type === 'goods_picker') {
+                    const selectedIds = String(val || '')
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    const toggleGoods = (eid: number) => {
+                      const idStr = String(eid);
+                      const next = selectedIds.includes(idStr)
+                        ? selectedIds.filter((s) => s !== idStr)
+                        : [...selectedIds, idStr];
+                      setDrawerParams((prev) => ({ ...prev, [pd.key]: next.join(',') }));
+                    };
+                    return (
+                      <div
+                        key={pd.key}
+                        style={{
+                          backgroundColor: 'var(--semi-color-fill-0)',
+                          padding: '12px 14px',
+                          borderRadius: 'var(--semi-border-radius-medium)',
+                          border: '1px solid var(--semi-color-border)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, gap: 8 }}>
+                          <Text strong style={{ fontSize: 13 }}>
+                            {pd.label.replace(/[（(][^）)]*[）)]/g, '').trim()}
+                          </Text>
+                          <Button
+                            size="small"
+                            theme="borderless"
+                            loading={flashGoodsLoading}
+                            onClick={() => loadFlashGoods(true)}
+                          >
+                            {flashGoods.length > 0 ? '刷新商品' : '加载在架商品'}
+                          </Button>
+                        </div>
+
+                        {/* 场次 Tabs (对齐官方: 已结束 / 进行中 / 下一场开抢) */}
+                        {(() => {
+                          const now = Math.floor(Date.now() / 1000);
+                          const rounds = flashRoundTs.slice().sort((a, b) => a - b);
+                          if (!rounds.length) return null;
+                          return (
+                            <RadioGroup
+                              type="button"
+                              buttonSize="small"
+                              value={String(activeFlashRound)}
+                              onChange={(e: any) => setActiveFlashRound(Number(e.target.value))}
+                              className="mb-2"
+                            >
+                              {rounds.map((r, i) => {
+                                const nextR = rounds[i + 1] || r + 2 * 3600;
+                                const state = now < r ? '下一场' : (now < nextR ? '进行中' : '已结束');
+                                return <Radio key={r} value={String(r)}>{state} · {flashGoodsRounds[i] || ''}场</Radio>;
+                              })}
+                            </RadioGroup>
+                          );
+                        })()}
+
+                        {flashGoodsError ? (
+                          <Text type="warning" size="small">{flashGoodsError}</Text>
+                        ) : flashGoodsLoading && flashGoods.length === 0 ? (
+                          <Text type="tertiary" size="small">正在拉取在架商品...</Text>
+                        ) : flashGoods.length === 0 ? (
+                          <Text type="tertiary" size="small">当前无在架商品，将在场次放量时自动优选</Text>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
+                            {(() => {
+                              const sortedAll = [...flashGoods].sort((a, b) => (b.left > 0 ? 1 : 0) - (a.left > 0 ? 1 : 0));
+                              if (activeFlashRound <= 0) return sortedAll;
+                              const inRound = sortedAll.filter((g) => g.round_ts === activeFlashRound);
+                              if (inRound.length) return inRound;
+                              // 该场次未识别到归属商品时, 展示未标注场次的商品兜底
+                              return sortedAll.filter((g) => !g.round_ts);
+                            })()
+                              .map((g) => {
+                              const checked = selectedIds.includes(String(g.exchange_id));
+                              return (
+                                <label
+                                  key={g.exchange_id}
+                                  className="transition-all hover:bg-semi-color-fill-1"
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    padding: '6px 8px',
+                                    borderRadius: 'var(--semi-border-radius-small)',
+                                    cursor: 'pointer',
+                                    border: `1px solid ${checked ? 'var(--semi-color-primary-light-active)' : 'transparent'}`,
+                                    backgroundColor: checked ? 'var(--semi-color-primary-light-default)' : 'transparent',
+                                  }}
+                                >
+                                  <Checkbox checked={checked} onChange={() => toggleGoods(g.exchange_id)} />
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <Text size="small" strong style={{ display: 'block' }} ellipsis={{ showTooltip: true }}>
+                                      {g.goods_name}
+                                    </Text>
+                                    <Text type="tertiary" size="small">
+                                      {g.community_silk > 0 ? `${g.community_silk} 元宝` : '免费'}
+                                      {' · '}
+                                      {g.left > 0 ? `剩余 ${g.left}` : '已抢完'}
+                                      {g.group ? ` · ${g.group}` : ''}
+                                    </Text>
+                                  </div>
+                                  <Tag size="small" color={g.left > 0 ? 'green' : 'grey'} shape="circle">
+                                    {g.left > 0 ? '在架' : '无库存'}
+                                  </Tag>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        <Text type="tertiary" size="small" style={{ display: 'block', marginTop: 6 }}>
+                          已勾选 {selectedIds.length} 个{selectedIds.length > 0 ? '，秒杀时按勾选顺序优先' : '，留空则默认场次自动优选'}
+                        </Text>
                       </div>
                     );
                   }

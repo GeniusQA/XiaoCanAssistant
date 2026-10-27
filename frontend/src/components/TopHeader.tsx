@@ -22,7 +22,6 @@ import {
   IconUser,
   IconTick,
   IconExit,
-  IconPlus,
   IconUserSetting
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
@@ -283,9 +282,6 @@ export const TopHeader: React.FC = () => {
                 {/* 账号切换列表（当账号数量大于1时呈现） */}
                 {accounts.length > 1 ? (
                   <>
-                    <div className="px-3.5 pt-1.5 pb-1 text-xs text-semi-color-text-2 font-medium">
-                      切换账号
-                    </div>
                     <div className="max-h-44 overflow-y-auto">
                       {accounts.map(acc => {
                         const isCurrent = acc.key === currentAccount?.key;
@@ -311,7 +307,7 @@ export const TopHeader: React.FC = () => {
                                   {acc.nickname ? cleanEmoji(acc.nickname)[0] : <IconUser />}
                                 </Avatar>
                                 <span className="truncate text-xs text-semi-color-text-0 max-w-[110px]">
-                                  {cleanEmoji(acc.nickname) || '未命名'}
+                                  {cleanEmoji(acc.nickname)}
                                 </span>
                                 {vipLabel ? (
                                   <Tag
@@ -334,18 +330,12 @@ export const TopHeader: React.FC = () => {
                   </>
                 ) : null}
 
-                {/* 账号管理 / 添加账号 */}
-                <Dropdown.Item
-                  icon={<IconPlus />}
-                  onClick={() => setActiveTab('accounts')}
-                >
-                  <span className="text-xs">添加 / 导入新账号</span>
-                </Dropdown.Item>
+                {/* 账号管理 */}
                 <Dropdown.Item
                   icon={<IconUserSetting />}
                   onClick={() => setActiveTab('accounts')}
                 >
-                  <span className="text-xs">账号管理与凭据中心</span>
+                  <span className="text-xs">账号管理</span>
                 </Dropdown.Item>
 
                 {/* 退出当前账号 */}

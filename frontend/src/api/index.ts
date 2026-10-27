@@ -9,12 +9,44 @@ const client = axios.create({
   timeout: 30000,
 });
 
+// ---------------- 多端设备协同认证 ----------------
+// 移动端等远程设备通过配对码换取设备 JWT, 之后所有请求自动携带
+export const DEVICE_JWT_KEY = 'xc_device_jwt';
+
+export const getDeviceJwt = (): string => {
+  try {
+    return localStorage.getItem(DEVICE_JWT_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+
+export const setDeviceJwt = (token: string) => {
+  try {
+    if (token) localStorage.setItem(DEVICE_JWT_KEY, token);
+    else localStorage.removeItem(DEVICE_JWT_KEY);
+  } catch { /* ignore */ }
+};
+
+client.interceptors.request.use((config) => {
+  const jwt = getDeviceJwt();
+  if (jwt) {
+    config.headers = config.headers || {};
+    (config.headers as any).Authorization = `Bearer ${jwt}`;
+  }
+  return config;
+});
+
 // 全局响应拦截器：统一网络异常与安全兜底
 client.interceptors.response.use(
   (response) => response,
   (error) => {
     if (axios.isCancel(error)) {
       return Promise.reject(error);
+    }
+    // 远程设备凭证失效 → 触发全局配对门
+    if (error.response?.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('xc-pairing-required'));
     }
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
       Toast.error('请求超时，请检查后端服务是否正常响应');
@@ -104,6 +136,20 @@ export const api = {
   toggleTask: (data: { account_key: string; task_id: string; enabled: boolean; cron_time?: string; params?: Record<string, any> }) => client.post<{ ok: boolean; message: string }>('/tasks/toggle', data).then(r => r.data),
   runTaskNow: (accountKey: string, taskId: string) => client.post<{ ok: boolean; job_id?: string; output: string }>('/tasks/run', { account_key: accountKey, task_id: taskId }, { timeout: 60000 }).then(r => r.data),
   batchRunDaily: (accountKey?: string) => client.post<BatchDailyResult>('/tasks/batch-run-daily', { account_key: accountKey }, { timeout: 180000 }).then(r => r.data),
+  updateNameMonitor: (id: number, data: Record<string, any>) =>
+    client.put<{ ok: boolean; appointment: any; message: string }>(`/store/name-monitor/${id}`, data, { timeout: 30000 }).then(r => r.data),
+  createPairing: () =>
+    client.post<{ ok: boolean; code: string; expires_in: number; lan_address: string }>('/pairing/create', {}, { timeout: 15000 }).then(r => r.data),
+  redeemPairing: (code: string, deviceName: string) =>
+    client.post<{ ok: boolean; token: string; device_id: number; device_name: string; expires_days: number }>('/pairing/redeem', { code, device_name: deviceName }, { timeout: 15000 }).then(r => r.data),
+  getPairingDevices: () =>
+    client.get<{ ok: boolean; devices: { id: number; device_name: string; created_at: string; last_seen: string; revoked: number }[] }>('/pairing/devices', { timeout: 15000 }).then(r => r.data),
+  revokePairingDevice: (id: number) =>
+    client.delete<{ ok: boolean; message: string }>(`/pairing/devices/${id}`, { timeout: 15000 }).then(r => r.data),
+  getFlashSaleGoods: (accountKey?: string) =>
+    client.get<{ ok: boolean; items: { exchange_id: number; goods_name: string; community_silk: number; left: number; group: string; round_ts: number }[]; rounds?: string[]; round_ts_list?: number[]; error?: string }>(
+      '/tasks/flash-sale-goods', { params: { account_key: accountKey }, timeout: 30000 }
+    ).then(r => r.data),
 
   // 美团官方账号与神券领取
   getMeituanAccounts: () => client.get<{ ok: boolean; accounts: MeituanAccount[] }>('/meituan/accounts').then(r => r.data),
@@ -172,8 +218,10 @@ export const api = {
     client.post<{ ok: boolean; order: Order; message: string }>('/orders', data).then(r => r.data),
   updateOrder: (id: number, data: Partial<Order>) => 
     client.put<{ ok: boolean; order: Order; message: string }>(`/orders/${id}`, data).then(r => r.data),
-  submitPlatformOrderId: (id: number, platformOrderId: string, receiptImg?: string) =>
-    client.post<{ ok: boolean; order: Order; message: string; error?: string }>(`/orders/${id}/submit-platform-id`, { platform_order_id: platformOrderId, receipt_img: receiptImg }).then(r => r.data),
+  submitPlatformOrderId: (id: number, platformOrderId: string, receiptImg?: string, forceModify = false) =>
+    client.post<{ ok: boolean; order: Order; message: string; error?: string }>(`/orders/${id}/submit-platform-id`, { platform_order_id: platformOrderId, receipt_img: receiptImg, force_modify: forceModify }).then(r => r.data),
+  cancelOrderSignup: (id: number) =>
+    client.post<{ ok: boolean; order: Order; message: string }>(`/orders/${id}/cancel-signup`, {}, { timeout: 30000 }).then(r => r.data),
   ocrOrderId: (id: number, imageBase64: string) =>
     client.post<{ ok: boolean; order_id_str: string; candidates?: string[]; message?: string }>(`/orders/${id}/ocr-order-id`, { image_base64: imageBase64 }, { timeout: 60000 }).then(r => r.data),
   delayOrderVoucher: (id: number, useDelayCard: boolean = false) =>
@@ -182,6 +230,10 @@ export const api = {
     client.get<{ ok: boolean; records: MediaVipRecord[]; error?: string }>(`/accounts/${key}/media-vip-records`, { timeout: 30000 }).then(r => r.data),
   deleteOrder: (id: number) => 
     client.delete<{ ok: boolean; message: string }>(`/orders/${id}`).then(r => r.data),
+  batchDeleteOrders: (ids: number[]) =>
+    client.post<{ ok: boolean; deleted: number[]; failed: { id: number; order_sn?: string; reason: string }[]; skipped: { id: number; reason: string }[]; message: string }>(
+      '/orders/batch-delete', { ids }, { timeout: 120000 }
+    ).then(r => r.data),
 
   // 日志与监控
   getJobs: (accountKey?: string, limit: number = 50) => client.get<{ ok: boolean; jobs: JobLog[] }>('/jobs', { params: { account_key: accountKey, limit } }).then(r => r.data),

@@ -242,32 +242,73 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 pass
 
         elif task_id == "group_lottery":
-            # 1. 查询转盘配置与当前状态
+            # 1. 查询官方任务状态 (LotteryInfo 单接口即返回全部任务完成标记 + 各类机会权重)
+            # day_num = 今日免费机会额度(可直接开奖的次数); lucky_times = 额外待抽次数
             lucky_times = 0
             day_num = 0
+            lot_info = {}
             try:
                 info_res = await client.get_lottery_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
-                linfo = info_res.get("lottery_info") or {}
-                lucky_times = int(linfo.get("lucky_times", 0))
-                day_num = int(linfo.get("day_num", 0))
-                log_output += f"[{time.strftime('%H:%M:%S')}] 免费开红包状态: 每日额度/可用次数 {day_num} 次，待抽奖次数: {lucky_times}\n"
+                lot_info = info_res.get("lottery_info") or {}
+                lucky_times = int(lot_info.get("lucky_times", 0))
+                day_num = int(lot_info.get("day_num", 0))
+                log_output += f"[{time.strftime('%H:%M:%S')}] 免费开红包状态: 今日机会额度 {day_num} 次，额外待抽 {lucky_times} 次\n"
+
+                # 官方任务完成状态清单 (直接来自官方接口, 非本地推测)
+                order_num = int(lot_info.get("order_num", 0) or 0)
+                task_state_rows = [
+                    ("每日签到", None),
+                    ("每日分享", "if_shared"),
+                    ("沾一沾", None),
+                    ("淘宝闪购红包", "is_get_eleme_redpack"),
+                    ("美团红包", "is_get_meituan_redpack"),
+                    ("浏览福利页", "is_view_welfare_page"),
+                    ("浏览霸王餐页", "is_view_bwc_page"),
+                    ("看视频广告", "is_view_tp_ad"),
+                    ("看商城优惠", "is_view_douyin_mall"),
+                ]
+                state_parts = []
+                for t_name, t_key in task_state_rows:
+                    if t_key is None:
+                        state_parts.append(f"{t_name}·待确认")
+                    else:
+                        state_parts.append(f"{t_name}·{'已完成' if lot_info.get(t_key) else '未完成'}")
+                log_output += f"[{time.strftime('%H:%M:%S')}] 官方任务状态: {' / '.join(state_parts)}\n"
+                log_output += f"[{time.strftime('%H:%M:%S')}] 下单得次数: {order_num}/10 (完成 1 单霸王餐/捡漏订单并核销 +1 次抽奖机会，每日上限 10 单；程序无法代下单)\n"
             except XiaoCanRPCError as e:
                 log_output += f"[{time.strftime('%H:%M:%S')}] 获取开红包状态: {format_rpc_error(e)}\n"
 
             # 2. 并发微错峰领取全量免费机会 (毫秒级错峰防频控，极速秒级并发)
+            # state_key: 官方 lottery_info 中对应的完成标记, 已完成则直接跳过不提交
             lottery_types = [
-                (1, "每日签到(+2次)"),
-                (2, "每日分享(+1次)"),
-                (4, "沾一沾(+1次)"),
-                (8, "淘宝闪购加赠(+1次)"),
-                (9, "美团加赠(+1次)"),
-                (10, "浏览福利中心(+1次)"),
-                (11, "浏览霸王餐页(+1次)")
+                (1, "每日签到(+2次)", None),
+                (2, "每日分享(+1次)", "if_shared"),
+                (4, "沾一沾(+1次)", None),
+                (8, "淘宝闪购加赠(+1次)", "is_get_eleme_redpack"),
+                (9, "美团加赠(+1次)", "is_get_meituan_redpack"),
+                (10, "浏览福利中心(+1次)", "is_view_welfare_page"),
+                (11, "浏览霸王餐页(+1次)", "is_view_bwc_page")
             ]
+            pending_types = []
+            for t_type, t_label, t_state_key in lottery_types:
+                if t_state_key and lot_info.get(t_state_key):
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 免费机会 [{t_label}]: 官方标记已完成，跳过\n"
+                else:
+                    pending_types.append((t_type, t_label))
+
             ad_tasks = [
-                (2, "视频激励广告(+1次)"),
-                (4, "商城优惠浏览(+1次)")
+                (2, "视频激励广告(+1次)", "ad_video", "is_view_tp_ad"),
+                (4, "商城优惠浏览(+1次)", "ad_mall", "is_view_douyin_mall")
             ]
+            # 优先按官方状态位判定, 再叠加本地当日幂等兜底
+            pending_ads = []
+            for b_type, b_label, b_key, b_state_key in ad_tasks:
+                if lot_info.get(b_state_key):
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 额外机会 [{b_label}]: 官方标记已完成，跳过\n"
+                elif db.has_lottery_claim(account_key, b_key):
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 额外机会 [{b_label}]: 今日已完成，跳过\n"
+                else:
+                    pending_ads.append((b_type, b_label, b_key))
 
             async def _claim_lottery_type(t_type: int, t_label: str, delay: float):
                 if delay > 0:
@@ -282,16 +323,37 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 except Exception:
                     return ""
 
-            async def _claim_ad_task(b_type: int, b_label: str, delay: float):
-                if delay > 0:
-                    await asyncio.sleep(delay)
+            async def _claim_ad_task(b_type: int, b_label: str, b_key: str, before: Optional[int]):
+                """
+                浏览类额外机会 (看视频广告 / 看商城优惠):
+                官方对此类任务有真实浏览行为校验, 纯接口调用虽返回 code=0 但可能不计入次数
+                (实测 10/27: 两项均 code=0 但额度仅 +1)。因此领取后必须核对官方额度,
+                仅在 day_num 确实 +1 时才记录当日幂等, 未计数则保留到下次任务重试。
+                """
+                await asyncio.sleep(0.05)
+                ts_fmt = time.strftime('%H:%M:%S')
                 try:
                     ad_res = await client.claim_ad_lottery_chance(bus_type=b_type, token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
-                    if ad_res:
-                        return f"[{time.strftime('%H:%M:%S')}] 额外机会 [{b_label}]: 领取成功\n"
-                except Exception:
-                    pass
-                return ""
+                    st_code = int((ad_res.get("status") or {}).get("code") or 0)
+                    st_msg = (ad_res.get("status") or {}).get("msg") or ""
+                    if st_code != 0:
+                        return f"[{ts_fmt}] 额外机会 [{b_label}]: 未领取成功 ({st_msg or 'code=' + str(st_code)})\n", False
+                    # 核对官方是否真实计数 (等待官方计数落库后重新拉取额度)
+                    await asyncio.sleep(0.4)
+                    verify_res = await client.get_lottery_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                    after = int((verify_res.get("lottery_info") or {}).get("day_num", 0))
+                    if before is None or after > before:
+                        db.record_lottery_claim(account_key, b_key)
+                        return f"[{ts_fmt}] 额外机会 [{b_label}]: 领取成功 (官方已计数 {after} 次)\n", True
+                    return f"[{ts_fmt}] 额外机会 [{b_label}]: 官方接口返回成功但未计入次数 (需真实浏览行为)，将保留到下次任务重试\n", False
+                except XiaoCanRPCError as e:
+                    if e.code in (40002, 40003, 40004, 40037, 40038, 40039, 40040) or "已" in (e.msg or ""):
+                        # 官方明确反馈已完成, 记录后当次不再重复提交
+                        db.record_lottery_claim(account_key, b_key)
+                        return f"[{ts_fmt}] 额外机会 [{b_label}]: 今日已完成或已领取\n", False
+                    return f"[{ts_fmt}] 额外机会 [{b_label}]: {format_rpc_error(e)}\n", False
+                except Exception as e:
+                    return f"[{ts_fmt}] 额外机会 [{b_label}]: 执行异常 {e}\n", False
 
             async def _send_redpack(delay: float):
                 if delay > 0:
@@ -302,14 +364,11 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                     pass
                 return ""
 
-            # 错峰并发执行（每项微间隔 40ms 错峰发射，总并发耗时约 0.4s）
+            # 错峰并发执行免费任务（每项微间隔 40ms 错峰发射，总并发耗时约 0.4s）
             claim_coros = []
             cur_delay = 0.0
-            for t_type, t_label in lottery_types:
+            for t_type, t_label in pending_types:
                 claim_coros.append(_claim_lottery_type(t_type, t_label, cur_delay))
-                cur_delay += 0.04
-            for b_type, b_label in ad_tasks:
-                claim_coros.append(_claim_ad_task(b_type, b_label, cur_delay))
                 cur_delay += 0.04
             claim_coros.append(_send_redpack(cur_delay))
 
@@ -318,18 +377,35 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 if res_text:
                     log_output += res_text
 
-            # 3. 重新同步服务端权威剩余次数
+            # 3. 同步服务端权威额度 (作为浏览类任务的计数基线)
+            base_lucky = None
             try:
                 sync_res = await client.get_lottery_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
                 s_linfo = sync_res.get("lottery_info") or {}
                 lucky_times = int(s_linfo.get("lucky_times", 0))
                 day_num = int(s_linfo.get("day_num", 0))
-                log_output += f"[{time.strftime('%H:%M:%S')}] 机会汇总: 官方每日额度/剩余次数 {day_num} 次，当前可用抽奖次数: {lucky_times}\n"
+                base_lucky = day_num
+                log_output += f"[{time.strftime('%H:%M:%S')}] 机会汇总: 今日机会额度 {day_num} 次，额外待抽 {lucky_times} 次\n"
             except Exception:
                 pass
 
+            # 4. 浏览类额外机会: 串行执行, 每项领取后核对官方额度 (以官方计数为准)
+            confirmed_cnt = 0
+            for b_type, b_label, b_key in pending_ads:
+                res_text, counted = await _claim_ad_task(b_type, b_label, b_key, base_lucky)
+                log_output += res_text
+                if counted:
+                    confirmed_cnt += 1
+                    if base_lucky is not None:
+                        base_lucky += 1
+
+            # 本次真正领取成功并经官方计数确认的机会数 (用于后续阶梯缺口提示与结果判定)
+            gained_cnt = confirmed_cnt + sum(1 for t in claim_results if t and "领取成功" in t)
+
             # 4. 连续自动开启红包 (极速流转防风控微抖动)
+            opened_count = 0
             effective_draw_times = lucky_times if lucky_times > 0 else day_num
+            log_output += f"[{time.strftime('%H:%M:%S')}] 本次计划开奖 {effective_draw_times} 次 (今日机会额度 {day_num} 次，额外待抽 {lucky_times} 次)\n"
             raw_gap = params.get("draw_sec")
             # 兼容历史 3.5s / 0.8s 默认值自动升级为 0.35s 极速模式，若用户明确设定了其他自定义值则尊重用户配置
             if raw_gap is None or raw_gap in (3.5, "3.5", 0.8, "0.8"):
@@ -374,10 +450,18 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 log_output += f"[{time.strftime('%H:%M:%S')}] 当前暂无待开启的红包次数 (今日免费次数均已消耗完毕)\n"
 
             # 5. 阶梯累计抽奖进度展示与即时自动领取
+            # 注意: 官方 lottery_count 为异步落库, 极速连开后立即查询会读到旧值, 需等待+重试核对
             try:
-                prog_res = await client.get_lottery_progress(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
-                prog = prog_res.get("lottery_progress") or {}
-                lottery_cnt = int(prog.get("lottery_count", 0))
+                lottery_cnt = -1
+                prog = {}
+                for attempt in range(4):
+                    await asyncio.sleep(1.2 if attempt == 0 else 1.5)
+                    prog_res = await client.get_lottery_progress(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                    prog = prog_res.get("lottery_progress") or {}
+                    lottery_cnt = int(prog.get("lottery_count", 0))
+                    # 与本次实际开出数对齐: 官方计数已不低于本次开出数则提前结束重试
+                    if opened_count and lottery_cnt >= opened_count:
+                        break
                 step1_cnt = int(prog.get("first_step_count", 3))
                 step2_cnt = int(prog.get("second_step_count", 9))
                 has_got1 = bool(prog.get("has_got_first_step_prize", False))
@@ -406,9 +490,23 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
 
                 step1_tag = "[已达成/已领取]" if has_got1 else f"[进行中 {lottery_cnt}/{step1_cnt}]"
                 step2_tag = "[已达成/已领取]" if has_got2 else f"[进行中 {lottery_cnt}/{step2_cnt}]"
-                log_output += f"[{time.strftime('%H:%M:%S')}] 阶梯累计进度: 今日累计完成 {lottery_cnt} 次开红包\n"
-                log_output += f"[{time.strftime('%H:%M:%S')}]   - 第一阶段({step1_cnt}次): {step1_tag}\n"
-                log_output += f"[{time.strftime('%H:%M:%S')}]   - 第二阶段({step2_cnt}次): {step2_tag}\n"
+                log_output += f"[{time.strftime('%H:%M:%S')}] 阶梯累计进度: 累计开红包 {lottery_cnt} 次\n"
+                log_output += f"[{time.strftime('%H:%M:%S')}]   - 第一阶段({step1_cnt}次 饭票): {step1_tag}\n"
+                log_output += f"[{time.strftime('%H:%M:%S')}]   - 第二阶段({step2_cnt}次 现金红包): {step2_tag}\n"
+                if not has_got2 and lottery_cnt < step2_cnt:
+                    gap_n = step2_cnt - lottery_cnt
+                    if gained_cnt >= gap_n:
+                        tip = f"本次已补入 {gained_cnt} 次机会，达标后自动领取"
+                        log_output += f"[{time.strftime('%H:%M:%S')}]   提示: 距最终现金红包还差 {gap_n} 次开奖 — {tip}\n"
+                    else:
+                        tip = (
+                            f"免费任务机会已全部使用，还差 {gap_n} 次必须靠「下单得次数」："
+                            f"完成 1 单霸王餐/捡漏订单并核销 +1 次（每日上限 10 单）。"
+                            f"今日理论上限为 8 次任务机会 + 10 次下单机会 = 18 次"
+                        )
+                        log_output += f"[{time.strftime('%H:%M:%S')}]   提示: 距最终现金红包还差 {gap_n} 次开奖 — {tip}\n"
+                        # 明确标记未完成, 供「执行结果」列识别 (调度状态可能仍是成功)
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 【免费开红包与抽奖】未完成: 距最终现金红包还差 {gap_n} 次开奖\n"
             except Exception:
                 pass
 
@@ -1252,7 +1350,8 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
             try:
                 info_res = await client.get_user_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
                 uinfo = info_res.get("user_info") or {}
-                balance = float(uinfo.get("silk") or 0)
+                # 官方 silk 字段单位为分 (如 6749 = ¥67.49), 与账号管理卡片口径一致需 ÷100
+                balance = float(uinfo.get("silk") or 0) / 100.0
             except XiaoCanRPCError as be:
                 log_output += f"[{time.strftime('%H:%M:%S')}] 余额查询失败: {format_rpc_error(be)}\n"
                 status = "error"
@@ -1262,7 +1361,12 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
 
             if balance >= 0:
                 log_output += f"[{time.strftime('%H:%M:%S')}] 当前钱包余额: {balance:g} 元\n"
-                if balance < min_balance:
+                # 官方限制: 单次提现金额必须在 1~200 元之间
+                if balance < 1:
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 当前余额低于单次最低提现金额 ¥1 (官方限制单次提现不能小于 1 元)，本次不提现\n"
+                elif balance > 200:
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 当前余额 ¥{balance:g} 超过单次最大提现金额 ¥200 (官方限制单次提现不能大于 200 元)，本次不发起提现，请前往小蚕 APP 内分次提现\n"
+                elif balance < min_balance:
                     log_output += f"[{time.strftime('%H:%M:%S')}] 余额未达到提现门槛 {min_balance:g} 元，本次不提现\n"
                 else:
                     money_cents = int(round(balance * 100))
@@ -1286,7 +1390,8 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                             level=NotificationLevel.SUCCESS
                         )
                     except XiaoCanRPCError as we:
-                        log_output += f"[{time.strftime('%H:%M:%S')}] 提现失败: {format_rpc_error(we)}\n"
+                        extra = " (官方限制: 单次提现金额需在 1~200 元之间，当前余额超限或不足)" if we.code == 3 else ""
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 提现失败: {format_rpc_error(we)}{extra}\n"
                         status = "error"
                     except Exception as we:
                         log_output += f"[{time.strftime('%H:%M:%S')}] 提现异常: {we}\n"

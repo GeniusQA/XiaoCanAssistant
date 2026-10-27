@@ -1,5 +1,5 @@
 ﻿import React from 'react';
-import { Nav, Select, Avatar, Space, Button, Tooltip, Dropdown, Tag } from '@douyinfe/semi-ui';
+import { Nav, Tooltip, Tag } from '@douyinfe/semi-ui';
 import {
   IconHome,
   IconUser,
@@ -8,7 +8,6 @@ import {
   IconOrderedList,
   IconFile,
   IconSetting,
-  IconPlus,
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
 
@@ -17,11 +16,6 @@ export const SideNav: React.FC = () => {
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const isSidebarCollapsed = useAppStore((s) => s.isSidebarCollapsed);
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed);
-  const accounts = useAppStore((s) => s.accounts);
-  const currentAccountKey = useAppStore((s) => s.currentAccountKey);
-  const setCurrentAccountKey = useAppStore((s) => s.setCurrentAccountKey);
-
-  const currentAccount = accounts.find((a) => a.key === currentAccountKey) || accounts[0];
 
   const navItems = [
     { itemKey: 'dashboard', text: '数据概览', icon: <IconHome size="large" /> },
@@ -34,7 +28,7 @@ export const SideNav: React.FC = () => {
   ];
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="side-nav-root h-full flex flex-col">
       <Nav
         mode="vertical"
         isCollapsed={isSidebarCollapsed}
@@ -85,93 +79,6 @@ export const SideNav: React.FC = () => {
           ),
         }}
         items={navItems}
-        footer={
-          isSidebarCollapsed ? (
-            <div className="w-full flex justify-center py-2.5 border-t border-semi-color-border/60">
-              <Dropdown
-                trigger="click"
-                position="rightBottom"
-                render={
-                  <Dropdown.Menu>
-                    {accounts.map((a) => (
-                      <Dropdown.Item
-                        key={a.key}
-                        active={a.key === currentAccountKey}
-                        onClick={() => setCurrentAccountKey(a.key)}
-                      >
-                        <div className="flex items-center gap-2 py-1">
-                          <Avatar size="extra-small" src={a.avatar || undefined} color="orange">
-                            {a.nickname?.[0] || '蚕'}
-                          </Avatar>
-                          <span className="font-medium text-xs max-w-[140px] truncate text-semi-color-text-0">{a.nickname}</span>
-                        </div>
-                      </Dropdown.Item>
-                    ))}
-                    {accounts.length > 0 && <Dropdown.Divider />}
-                    <Dropdown.Item onClick={() => setActiveTab('accounts')}>
-                      <div className="flex items-center gap-1.5 text-xs text-semi-color-primary py-0.5">
-                        <IconPlus size="small" /> 添加账号
-                      </div>
-                    </Dropdown.Item>
-                  </Dropdown.Menu>
-                }
-              >
-                <Tooltip content={currentAccount?.nickname || '未添加账号'} position="right">
-                  <div className="cursor-pointer p-1.5 rounded-xl hover:bg-semi-color-fill-0 transition-colors flex items-center justify-center">
-                    <Avatar size="small" src={currentAccount?.avatar || undefined} color="orange">
-                      {currentAccount?.nickname?.[0] || '蚕'}
-                    </Avatar>
-                  </div>
-                </Tooltip>
-              </Dropdown>
-            </div>
-          ) : (
-            <div className="w-full px-2.5 py-2.5 border-t border-semi-color-border/60">
-              {accounts.length > 0 ? (
-                <Select
-                  value={currentAccountKey}
-                  onChange={(val) => setCurrentAccountKey(String(val))}
-                  style={{ width: '100%' }}
-                  renderSelectedItem={(option: any) => {
-                    const acc = accounts.find((a) => a.key === option.value);
-                    return (
-                      <div className="flex items-center gap-2 overflow-hidden w-full">
-                        <Avatar size="extra-small" src={acc?.avatar || undefined} color="orange" className="shrink-0">
-                          {acc?.nickname?.[0] || '蚕'}
-                        </Avatar>
-                        <span className="truncate text-xs font-medium text-semi-color-text-0">
-                          {acc?.nickname}
-                        </span>
-                      </div>
-                    );
-                  }}
-                >
-                  {accounts.map((a) => (
-                    <Select.Option key={a.key} value={a.key}>
-                      <Space align="center">
-                        <Avatar size="extra-small" src={a.avatar || undefined} color="orange">
-                          {a.nickname?.[0] || '蚕'}
-                        </Avatar>
-                        <span className="font-medium text-xs text-semi-color-text-0">{a.nickname}</span>
-                      </Space>
-                    </Select.Option>
-                  ))}
-                </Select>
-              ) : (
-                <Button
-                  theme="light"
-                  type="primary"
-                  icon={<IconPlus />}
-                  block
-                  size="small"
-                  onClick={() => setActiveTab('accounts')}
-                >
-                  添加账号
-                </Button>
-              )}
-            </div>
-          )
-        }
       />
     </div>
   );

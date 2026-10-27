@@ -8,9 +8,11 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Dict, Optional
 import httpx
 from .signer import generate_headers
+from .rate_limiter import GLOBAL_LIMITER
 
 logger = logging.getLogger("xiaocan.protocol")
 
@@ -118,6 +120,8 @@ def short_rpc_error(e: "XiaoCanRPCError", max_msg_len: int = 40) -> str:
 
 # 官方腾讯云 WAF 熔断状态守护 (防止被封期间盲目重发延长黑名单时间)
 _waf_blocked_until: float = 0.0
+# 连续 403 次数, 用于指数退避 (避免缩短封禁)
+_waf_403_streak: int = 0
 
 
 def is_waf_blocked() -> bool:
@@ -134,8 +138,59 @@ def mark_waf_blocked(duration_seconds: int = 15):
 
 
 def clear_waf_block():
-    global _waf_blocked_until
+    global _waf_blocked_until, _waf_403_streak
     _waf_blocked_until = 0.0
+    _waf_403_streak = 0
+
+
+def parse_waf_cooldown(resp_text: str, resp_headers: Any) -> int:
+    """
+    精确解析官方 403 冷却秒数: 优先 Retry-After 响应头, 其次响应体中的「剩余约 N 秒」文案。
+    无法解析时回退默认 15 秒。
+    """
+    # 1) Retry-After (秒数 或 HTTP-date)
+    try:
+        ra = resp_headers.get("retry-after") if resp_headers else None
+        if ra:
+            ra = str(ra).strip()
+            if ra.isdigit():
+                return max(5, int(ra))
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(ra)
+                delta = (dt - datetime.now(dt.tzinfo)).total_seconds()
+                if delta > 0:
+                    return max(5, int(delta))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2) 响应体文案 (腾讯云 WAF / 网关自定义提示)
+    text = resp_text or ""
+    for pat in (r"剩余约?\s*(\d+)\s*秒", r"(\d+)\s*秒后", r"retry\s+after\s*:?\s*(\d+)", r"cooldown[^\d]{0,10}(\d+)"):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                return max(5, int(m.group(1)))
+            except Exception:
+                continue
+
+    return 15
+
+
+def next_waf_cooldown(base_seconds: int) -> int:
+    """连续 403 时指数退避 (15 → 30 → 60 → 120, 上限 300 秒)"""
+    global _waf_403_streak
+    _waf_403_streak += 1
+    if _waf_403_streak <= 1:
+        return base_seconds
+    return min(300, max(base_seconds, 15 * (2 ** (_waf_403_streak - 1))))
+
+
+def reset_waf_streak():
+    global _waf_403_streak
+    _waf_403_streak = 0
 
 
 class XiaoCanClient:
@@ -196,6 +251,12 @@ class XiaoCanClient:
             platform=plat
         )
 
+        # 全局令牌桶限速: 所有任务共享同一 RPS 上限, 防止多任务并发叠加触发 WAF
+        try:
+            await GLOBAL_LIMITER.acquire()
+        except Exception:
+            pass
+
         try:
             resp = await self.session.post(
                 GW_BASE_URL,
@@ -205,10 +266,23 @@ class XiaoCanClient:
             if resp.status_code == 403:
                 is_waf = "WAF" in resp.text or "stgw" in resp.headers.get("server", "").lower()
                 if is_waf:
-                    mark_waf_blocked(duration_seconds=15)
-                hint = "已被腾讯云 WAF 防火墙拦截 [403 Forbidden]，系统已进入 15 秒频次缓冲。通常原因是：开启了海外代理/VPN/TUN模式，或当前IP触发了频控防护。请关闭全局代理、切换手机热点或稍后重试" if is_waf else "请求被服务器拒绝 [403 Forbidden]"
+                    # 精确冷却: 解析官方 Retry-After / 「剩余约 N 秒」, 并做指数退避
+                    base_cool = parse_waf_cooldown(resp.text, resp.headers)
+                    cool_sec = next_waf_cooldown(base_cool)
+                    mark_waf_blocked(duration_seconds=cool_sec)
+                    GLOBAL_LIMITER.penalize(cool_sec)
+                    hint = (
+                        f"已被腾讯云 WAF 防火墙拦截 [403 Forbidden]，系统已进入 {cool_sec} 秒频次缓冲"
+                        "（连续触发将自动指数退避）。通常原因是：开启了海外代理/VPN/TUN模式，"
+                        "或当前IP触发了频控防护。请关闭全局代理、切换手机热点或稍后重试"
+                    )
+                else:
+                    hint = "请求被服务器拒绝 [403 Forbidden]"
                 logger.error(f"RPC {server_name}.{method_name} 访问受阻: {hint}")
                 raise XiaoCanRPCError(code=403, msg=hint, raw={"status_code": 403, "text": resp.text[:200]}, endpoint=f"{server_name}.{method_name}")
+
+            # 成功拿到响应: 重置连续 403 计数, 冷却退避回归基础值
+            reset_waf_streak()
 
             if resp.status_code != 200:
                 logger.error(f"RPC {server_name}.{method_name} HTTP {resp.status_code} 异常响应: {resp.text[:200]}")
@@ -445,6 +519,100 @@ class XiaoCanClient:
             user_id=user_id,
             silk_id=silk_id
         )
+
+    async def cancel_promotion_order(
+        self,
+        promotion_order_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        取消报名(放弃活动订单) — 官方真实参数 (抓包实测确认):
+          POST Silkworm.SilkwormService.CancelPromotionQuota
+          {"silk_id": 329114178, "promotion_order_id": 815163551, "app_id": 20}
+        成功返回 {"status": {"code": 0}}
+        """
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_order_id": int(promotion_order_id),
+            "app_id": 20,
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.CancelPromotionQuota",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="mini"
+        )
+
+    async def get_client_promotion_order(
+        self,
+        promotion_order_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        查询单个活动订单详情 (Silkworm.SilkwormService.GetClientPromotionOrder)
+        列表接口不返回已提交的平台单号, 详情接口才会返回 platform_order_id / platform_order_time / reason。
+        """
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 20,
+            "promotion_order_id": int(promotion_order_id)
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.GetClientPromotionOrder",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def delete_promotion_order(
+        self,
+        promotion_order_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        删除官方活动订单 (与小蚕 App 订单卡片「删除订单」同源):
+        Silkworm.SilkwormService.DeletePromotionOrder
+        官方参数体未公开, 按最可能形态依次尝试 (参数校验失败不会误删)。
+        """
+        base = {"silk_id": int(silk_id) if silk_id else 0, "app_id": 20}
+        candidates = [
+            {**base, "promotion_order_id": int(promotion_order_id)},
+            {**base, "order_id": int(promotion_order_id)},
+            {**base, "promotion_order_ids": [int(promotion_order_id)]},
+        ]
+        last_err: Optional[XiaoCanRPCError] = None
+        for body in candidates:
+            try:
+                return await self.invoke_rpc(
+                    server_name="Silkworm",
+                    method_name="SilkwormService.DeletePromotionOrder",
+                    body=body,
+                    city_code=city_code,
+                    token=token,
+                    user_id=user_id,
+                    silk_id=silk_id
+                )
+            except XiaoCanRPCError as e:
+                last_err = e
+                if e.code not in (1, 3, 500):
+                    raise
+        raise last_err if last_err else XiaoCanRPCError(500, "删除订单失败", raw={})
 
     async def ocr_promotion_order(
         self,
@@ -1710,35 +1878,27 @@ class XiaoCanClient:
         city_code: int = 440303
     ) -> Dict[str, Any]:
         """
-        使用延时券延长订单凭证提交时间 (SilkwormService.DelayPromotionQuota, 官方 App「选择使用延时券数量」同源)
-        官方参数体在插件内无法静态确认, 按最可能形态依次尝试; 服务端参数校验失败不会扣券。
+        使用延时券延长订单凭证提交时间 — 官方真实参数 (抓包实测确认):
+          POST Silkworm.SilkwormService.DelayPromotionQuota
+          {"silk_id": 329114178, "promotion_order_id": 815464824, "delay_card_number": 1, "app_id": 20}
+        成功返回 {"status": {"code": 0}}; 每张券延长 1 小时, 最长至次日早 6 点。
         """
-        base = {"silk_id": int(silk_id) if silk_id else 0, "app_id": 20}
-        candidates = [
-            {**base, "promotion_order_id": int(promotion_order_id), "num": int(num)},
-            {**base, "promotion_order_id": int(promotion_order_id), "card_num": int(num)},
-            {**base, "promotion_order_id": int(promotion_order_id), "delay_num": int(num)},
-            {**base, "order_id": int(promotion_order_id), "num": int(num)},
-        ]
-        last_err: Optional[XiaoCanRPCError] = None
-        for body in candidates:
-            try:
-                return await self.invoke_rpc(
-                    server_name="Silkworm",
-                    method_name="DelayPromotionQuota",
-                    body=body,
-                    city_code=city_code,
-                    token=token,
-                    silk_id=silk_id,
-                    user_id=user_id,
-                    platform="mini"
-                )
-            except XiaoCanRPCError as e:
-                last_err = e
-                # 参数形态不匹配 (参数错误/网关500) 时继续尝试下一形态; 其它业务错误直接抛出
-                if e.code not in (1, 3, 500):
-                    raise
-        raise last_err if last_err else XiaoCanRPCError(500, "延时券调用失败", raw={})
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_order_id": int(promotion_order_id),
+            "delay_card_number": int(num),
+            "app_id": 20,
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.DelayPromotionQuota",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="mini"
+        )
 
     async def vip_prizes_lottery(
         self,
