@@ -100,6 +100,8 @@ interface AppState {
   clearLocationHistory: () => void;
   /** 从服务端同步抢单位置 (多设备协同: 移动端与 PC 共享同一份定位配置) */
   hydrateLocation: () => Promise<void>;
+  /** 从服务端同步主控账号 (PC 与已配对移动端保持一致) */
+  hydrateCurrentAccount: () => Promise<void>;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapse: () => void;
   setPendingOrderStatus: (status: string | null) => void;
@@ -202,6 +204,26 @@ export const useAppStore = create<AppState>((set, get) => {
     api.saveAppLocation({ location_history: [] }).catch(() => {});
   },
 
+  hydrateCurrentAccount: async () => {
+    try {
+      const res = await api.getCurrentAccountKey();
+      const remoteKey = res?.current_account_key || '';
+      const localKey = get().currentAccountKey;
+      if (remoteKey) {
+        // 服务端已有主控 → 其它端以服务端为准 (PC 与移动端保持一致)
+        if (remoteKey !== localKey) {
+          try {
+            localStorage.setItem('xiaocan_current_account_key', remoteKey);
+          } catch (e) {}
+          set({ currentAccountKey: remoteKey });
+        }
+      } else if (localKey) {
+        // 服务端为空但本地有 → 上推一次完成初始化
+        api.saveCurrentAccountKey(localKey).catch(() => {});
+      }
+    } catch (e) {}
+  },
+
   hydrateLocation: async () => {
     try {
       const res = await api.getAppLocation();
@@ -252,6 +274,8 @@ export const useAppStore = create<AppState>((set, get) => {
       localStorage.setItem('xiaocan_current_account_key', key);
     } catch (e) {}
     set({ currentAccountKey: key });
+    // 主控账号上移到服务端, 已配对移动端与 PC 保持一致
+    api.saveCurrentAccountKey(key).catch(() => {});
   },
 
   loadAccounts: async () => {

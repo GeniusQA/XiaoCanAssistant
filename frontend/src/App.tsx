@@ -52,6 +52,7 @@ export const App: React.FC = () => {
   const loadAccounts = useAppStore((state) => state.loadAccounts);
   const loadUserInfo = useAppStore((state) => state.loadUserInfo);
   const hydrateLocation = useAppStore((state) => state.hydrateLocation);
+  const hydrateCurrentAccount = useAppStore((state) => state.hydrateCurrentAccount);
 
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set([activeTab]));
   const pageContainerRef = useRef<HTMLDivElement>(null);
@@ -62,7 +63,9 @@ export const App: React.FC = () => {
     loadUserInfo();
     // 多端协同: 拉取服务端抢单位置 (PC 端设置后, 已配对移动设备打开即同步)
     hydrateLocation();
-  }, [loadAccounts, loadUserInfo, hydrateLocation]);
+    // 多端协同: 主控账号双端保持一致
+    hydrateCurrentAccount();
+  }, [loadAccounts, loadUserInfo, hydrateLocation, hydrateCurrentAccount]);
 
   // 移动端屏幕方向自适应: 手机横置(倒过来)自动切横屏紧凑布局, 竖屏切回单列布局
   useEffect(() => {

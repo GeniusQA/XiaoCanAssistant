@@ -5188,6 +5188,21 @@ async def save_app_location(data: Dict[str, Any] = Body(...)):
     return {"ok": True}
 
 
+@router.get("/settings/current-account")
+async def get_current_account():
+    """获取全局主控账号 (跨设备同步, PC 与已配对移动端保持一致)"""
+    key = db.get_setting("app_current_account_key") or ""
+    return {"ok": True, "current_account_key": key}
+
+
+@router.post("/settings/current-account")
+async def save_current_account(data: Dict[str, Any] = Body(...)):
+    """保存全局主控账号"""
+    key = str(data.get("current_account_key") or "")
+    db.set_setting("app_current_account_key", key)
+    return {"ok": True}
+
+
 @router.post("/settings/test-tianditu")
 async def test_tianditu_endpoint(data: Dict[str, Any] = Body(...)):
     """测试天地图 Web API 服务 Token 连通性"""
