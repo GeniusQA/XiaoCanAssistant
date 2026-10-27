@@ -72,6 +72,14 @@ import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode
 
 const { Title, Text, Paragraph } = Typography;
 
+/**
+ * 是否为 PC 本机访问:
+ * 只有本机 (localhost / 127.0.0.1) 才能唤起电脑微信并抓取凭据,
+ * 移动端等远程设备访问时隐藏「电脑微信直连」入口, 默认进入「设备协同」。
+ */
+const IS_LOCAL_HOST = typeof window !== 'undefined'
+  && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(window.location.hostname);
+
 export const Accounts: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
   const loadAccounts = useAppStore((s) => s.loadAccounts);
@@ -497,7 +505,8 @@ export const Accounts: React.FC = () => {
 
   const handleOpenModal = () => {
     setModalVisible(true);
-    setActiveTab('wechat');
+    // 远程设备 (手机等) 无法唤起电脑微信抓取凭据 → 默认进入设备协同
+    setActiveTab(IS_LOCAL_HOST ? 'wechat' : 'device_pairing');
     setRawText('');
     setParsedInfo(null);
     setCustomNickname('');
@@ -1392,6 +1401,7 @@ export const Accounts: React.FC = () => {
       >
         <Tabs activeKey={activeTab} onChange={(k) => handleTabChange(String(k))}>
           {/* TAB 1: 电脑微信直连 (免配置·首选) */}
+        {IS_LOCAL_HOST && (
           <TabPane
             tab={
               <span className="flex items-center gap-1.5">
@@ -1489,6 +1499,7 @@ export const Accounts: React.FC = () => {
               </div>
             </div>
           </TabPane>
+        )}
 
           {/* TAB 2: 手动 Token 粘贴导入 */}
           <TabPane
