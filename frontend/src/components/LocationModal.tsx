@@ -46,6 +46,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
   const addLocationHistory = useAppStore((s) => s.addLocationHistory);
   const removeLocationHistory = useAppStore((s) => s.removeLocationHistory);
   const clearLocationHistory = useAppStore((s) => s.clearLocationHistory);
+  const hydrateLocation = useAppStore((s) => s.hydrateLocation);
 
   const [editLng, setEditLng] = useState<string>(activeLocation?.longitude || '');
   const [editLat, setEditLat] = useState<string>(activeLocation?.latitude || '');
@@ -77,6 +78,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
 
   useEffect(() => {
     if (visible) {
+      // 每次打开弹窗都从服务端拉取最新位置 (PC 端设置后, 已配对移动设备可立即取到)
+      hydrateLocation();
       setEditLng(activeLocation?.longitude || '');
       setEditLat(activeLocation?.latitude || '');
       setResolvedCityCode(activeLocation?.cityCode || 0);
@@ -209,7 +212,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
           Toast.error('获取定位失败，请尝试搜索地址');
         }
       } catch {
-        Toast.error('定位服务暂时不可用，请尝试搜索地址');
+        // 移动端通过 HTTP (非 localhost) 访问时, 浏览器安全策略禁止 Geolocation, IP 兜底也可能失败
+        Toast.error('本机定位不可用（http 访问时浏览器禁止定位），请用「搜索地址」或使用 PC 端已同步的抢单位置');
       } finally {
         setLocating(false);
       }
