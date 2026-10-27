@@ -45,6 +45,7 @@ import { TaskIcon } from '../components/TaskIcons';
 import { LogDetailModal } from '../components/LogDetailModal';
 import { useGSAP, animateStaggerEnter, gsap } from '../utils/animations';
 import { copyText } from '../utils/clipboard';
+import { TASK_LABELS } from '../constants/taskLabels';
 import { useOnActivated } from '../utils/useOnActivated';
 import type { JobLog, StoreAppointment, OrderStats, DashboardChartData, XiaoCanMessage, XiaoCanMessageChannel, Order, TaskItem } from '../types';
 
@@ -84,31 +85,7 @@ const formatRemainingTime = (remainingSec: number | null | undefined): string =>
   return `剩 ${Math.max(1, minutes)}分钟`;
 };
 
-const TASK_LABELS: Record<string, string> = {
-  // 霸王餐抢单与预约
-  store_grab: '霸王餐即时抢单',
-  store_appoint: '倒计时预约抢单',
-  store_monitor: '实时名额监听捡漏',
-  store_keyword: '商户定时搜索捡漏',
-  store_search: '商户定向搜索捡漏',
-  store_cancel: '霸王餐名额取消',
-  // 日常自动化任务
-  yb_task: '领天天赚元宝',
-  yb_sign: '天天赚元宝签到',
-  collect_points: '收取未收元宝',
-  daily: '元宝乐园综合打卡',
-  group_lottery: '免费开红包与抽奖',
-  redpack_rain: '整点红包雨',
-  flash_sale: '元宝秒杀抢券',
-  vip_expand: '会员每日签到',
-  brand_flash: '大牌畅享秒杀',
-  svip_rebate: 'SVIP高额返利券',
-  media_vip: '影音会员周卡',
-  free_order: '订单全额免单券',
-  expire_remind: '凭据/JWT到期预警',
-  coupon_remind: '卡券/红包到期提醒',
-  dual_rebate_monitor: '美团同店双返利监控',
-};
+// 任务名称映射统一维护在 constants/taskLabels.ts (与运行日志页共用)
 
 // 小蚕官方消息频道元数据 (对应微服务 SilkwormMessageCenter)
 const CHANNEL_META: Record<number, { name: string; color: 'blue' | 'green' | 'amber' | 'purple' | 'grey'; icon: React.ReactNode }> = {
