@@ -150,6 +150,8 @@ export const api = {
     client.get<{ ok: boolean; devices: { id: number; device_name: string; created_at: string; last_seen: string; revoked: number }[] }>('/pairing/devices', { timeout: 15000 }).then(r => r.data),
   revokePairingDevice: (id: number) =>
     client.delete<{ ok: boolean; message: string }>(`/pairing/devices/${id}`, { timeout: 15000 }).then(r => r.data),
+  purgePairingDevice: (id: number) =>
+    client.delete<{ ok: boolean; message: string }>(`/pairing/devices/${id}/purge`, { timeout: 15000 }).then(r => r.data),
   getFlashSaleGoods: (accountKey?: string) =>
     client.get<{ ok: boolean; items: { exchange_id: number; goods_name: string; community_silk: number; left: number; group: string; round_ts: number }[]; rounds?: string[]; round_ts_list?: number[]; error?: string }>(
       '/tasks/flash-sale-goods', { params: { account_key: accountKey }, timeout: 30000 }

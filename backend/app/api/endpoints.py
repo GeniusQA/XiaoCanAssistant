@@ -3551,6 +3551,15 @@ async def pairing_revoke(device_id: int):
     return {"ok": True, "message": "设备已吊销"}
 
 
+@router.delete("/pairing/devices/{device_id}/purge")
+async def pairing_purge(device_id: int):
+    """从配对列表彻底删除设备记录 (仅限已吊销设备)"""
+    from ..core.device_auth import purge_device
+    if not purge_device(device_id):
+        raise HTTPException(status_code=400, detail="仅可删除已吊销的设备，请先吊销再删除")
+    return {"ok": True, "message": "设备记录已删除"}
+
+
 @router.post("/store/appoint")
 async def create_appointment(data: Dict[str, Any] = Body(...)):
     """提交店铺抢单预约或名额监听任务"""

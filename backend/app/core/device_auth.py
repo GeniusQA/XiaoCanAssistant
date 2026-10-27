@@ -193,6 +193,15 @@ def revoke_device(device_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def purge_device(device_id: int) -> bool:
+    """从配对列表彻底删除设备记录 (仅允许删除已吊销设备)"""
+    ensure_device_table()
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM paired_devices WHERE id = ? AND revoked = 1", (device_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def export_state() -> str:
     """调试辅助: 返回模块状态概览 (不含敏感信息)"""
     return json.dumps({

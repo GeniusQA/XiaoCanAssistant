@@ -50,6 +50,16 @@ export const DevicePairingPanel: React.FC = () => {
     }
   };
 
+  const handlePurge = async (id: number) => {
+    try {
+      await api.purgePairingDevice(id);
+      Toast.success('设备记录已删除');
+      loadDevices();
+    } catch (e: any) {
+      Toast.error(e.response?.data?.detail || '删除失败');
+    }
+  };
+
   // 配对码倒计时
   useEffect(() => {
     if (!pairing || remainSec <= 0) return;
@@ -142,9 +152,13 @@ export const DevicePairingPanel: React.FC = () => {
                     配对于 {d.created_at || '-'} · 最后活跃 {d.last_seen || '-'}
                   </Text>
                 </div>
-                {!d.revoked && (
+                {!d.revoked ? (
                   <Popconfirm title="吊销后该设备将立即失去访问权限，确定吊销？" onConfirm={() => handleRevoke(d.id)}>
                     <Button size="small" type="danger" theme="light">吊销</Button>
+                  </Popconfirm>
+                ) : (
+                  <Popconfirm title="删除后该设备记录将从配对列表移除，确定删除？" onConfirm={() => handlePurge(d.id)}>
+                    <Button size="small" theme="borderless" type="tertiary">删除</Button>
                   </Popconfirm>
                 )}
               </div>
