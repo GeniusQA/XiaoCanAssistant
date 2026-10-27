@@ -29,6 +29,7 @@ export const TASK_LABELS: Record<string, string> = {
   dual_rebate_monitor: '美团同店双返利监控',
   meituan_coupon: '美团官方领券打卡',
   meituan_auth: '美团官方扫码授权',
+  clawbot_alert: '微信 ClawBot 会话提醒',
 
   // 历史日志兼容 (旧版键名, 避免历史记录显示原始 ID)
   user_sign: '每日签到打卡',

@@ -401,6 +401,33 @@ async def check_activation(timeout: float = 15.0) -> Dict[str, Any]:
         return {"ok": False, "activated": False, "message": f"网络通信异常: {str(e)}"}
 
 
+def _log_session_alert(detail: str) -> None:
+    """
+    会话失效提醒写入「运行日志」(task_id=clawbot_alert), 5 分钟内只记一条, 避免刷屏。
+    用户可在运行日志页看到该提醒并按提示在手机微信发消息重建会话。
+    """
+    try:
+        import time as _time
+        from ..models import database as db
+
+        now = _time.time()
+        last = float(db.get_setting("clawbot_alert_last_ts") or 0)
+        if now - last < 300:
+            return
+        db.set_setting("clawbot_alert_last_ts", now)
+
+        t = _time.strftime("%H:%M:%S")
+        text = (
+            f"[{t}] 微信 ClawBot 推送失败 - 会话未激活或上下文已过期\n"
+            f"[{t}] 原因: {detail}\n"
+            f"[{t}] 处理: 请在手机微信中向你的 ClawBot 机器人发送一条任意消息以重建会话, 之后推送将自动恢复\n"
+            f"[{t}] 提示: 该提醒 5 分钟内只记录一次, 避免重复刷屏"
+        )
+        db.add_job_log(f"job_clawbot_{int(now)}", "", "clawbot_alert", "error", text)
+    except Exception:
+        pass
+
+
 async def send_message(
     title: str,
     content: str,
@@ -451,6 +478,7 @@ async def send_message(
                 headers=_build_headers(token)
             )
             if resp.status_code in (401, 403):
+                _log_session_alert("凭据鉴权失败或已过期 (HTTP 401/403)")
                 return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭据鉴权失败或已过期 (HTTP 401/403)"}
             if resp.status_code != 200:
                 return {"ok": False, "channel": "clawbot", "message": f"ClawBot 接口 HTTP 异常: {resp.status_code}"}
@@ -462,6 +490,7 @@ async def send_message(
             elif ret == -14:
                 return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭据已过期，请在设置中重新扫码登录"}
             elif ret == -2:
+                _log_session_alert("会话尚未激活或上下文已过期 (ret=-2)")
                 return {
                     "ok": False,
                     "channel": "clawbot",
