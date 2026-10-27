@@ -45,11 +45,27 @@ export const PairingGate: React.FC = () => {
         setErrorMsg('配对失败，请确认配对码是否有效');
       }
     } catch (e: any) {
-      // 弹窗内联展示后端返回的具体原因 (手机端 Toast 长文案易被截断)
-      const detail = e.response?.data?.detail
-        || (e.code === 'ECONNABORTED' ? '请求超时，请确认手机与 PC 处于同一 WiFi 且服务正常运行'
-          : e.message === 'Network Error' ? '网络连接失败，请确认访问的是 PC 的局域网地址 (如 http://192.168.1.12:8690)'
-            : '配对失败，请确认配对码是否有效');
+      // 后端 detail 可能是字符串 (业务错误) 或数组/对象 (FastAPI 422 校验错误), 需归一化为文本
+      const raw = e.response?.data?.detail;
+      let detail = '';
+      if (typeof raw === 'string') {
+        detail = raw;
+      } else if (Array.isArray(raw)) {
+        detail = raw
+          .map((it: any) => (typeof it === 'string' ? it : `${(it?.loc || []).join('.')} ${it?.msg || ''}`.trim()))
+          .filter(Boolean)
+          .join('；');
+        if (detail) detail = `请求参数校验未通过：${detail}`;
+      } else if (raw && typeof raw === 'object') {
+        detail = JSON.stringify(raw);
+      }
+      if (!detail) {
+        detail = e.code === 'ECONNABORTED'
+          ? '请求超时，请确认手机与 PC 处于同一 WiFi 且服务正常运行'
+          : e.message === 'Network Error'
+            ? '网络连接失败，请确认访问的是 PC 的局域网地址 (如 http://192.168.1.12:8690)'
+            : '配对失败，请确认配对码是否有效';
+      }
       setErrorMsg(detail);
       Toast.error(detail);
     } finally {
