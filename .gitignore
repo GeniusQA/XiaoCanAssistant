@@ -84,3 +84,8 @@ Thumbs.db
 /healthcheck.sh
 /update.sh
 /watchdog.sh
+
+# 本地临时备份与脚本
+_node_modules_ci_bak/
+_*.py
+_*.log
