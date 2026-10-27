@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Banner, Button, Empty, Input, Modal, Popconfirm, Tag, Toast, Typography } from '@douyinfe/semi-ui';
-import { IconSmartphoneStroked } from '@douyinfe/semi-icons';
+import { IconRefresh, IconSmartphoneStroked } from '@douyinfe/semi-icons';
 import { api } from '../api';
 
 const { Text } = Typography;
@@ -119,9 +119,21 @@ export const DevicePairingPanel: React.FC = () => {
         <div className="flex items-center justify-between mb-2">
           <Text strong className="text-[14px]">第一步：生成配对码</Text>
           {pairing && remainSec > 0 && (
-            <Tag color="amber" size="small" shape="square" className="font-mono">
-              有效期 {mm}:{ss}
-            </Tag>
+            <div className="flex items-center gap-2">
+              <Tag color="amber" size="small" shape="square" className="font-mono">
+                有效期 {mm}:{ss}
+              </Tag>
+              <Button
+                size="small"
+                theme="borderless"
+                type="primary"
+                icon={<IconRefresh spin={creating} />}
+                loading={creating}
+                onClick={handleCreate}
+              >
+                刷新配对码
+              </Button>
+            </div>
           )}
         </div>
 
