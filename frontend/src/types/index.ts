@@ -532,6 +532,10 @@ export interface ClawBotStatus {
   account_id: string;
   has_context_token: boolean;
   saved_at: string;
+  /** 官方会话真实探测结果 (true=会话活跃, false=已失效, undefined=未探测) */
+  session_ok?: boolean | null;
+  session_message?: string;
+  probed_at?: string;
 }
 
 export interface ClawBotQrResponse {

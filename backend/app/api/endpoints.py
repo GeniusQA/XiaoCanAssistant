@@ -5200,10 +5200,50 @@ async def test_notify_endpoint(data: Dict[str, Any] = Body(...)):
 @router.get("/settings/clawbot/status")
 @router.get("/settings/clawbot-status")
 async def clawbot_status_endpoint(custom_path: Optional[str] = None):
-    """检测微信 ClawBot 凭证状态与会话活跃度"""
+    """
+    检测微信 ClawBot 凭证状态与会话活跃度。
+    本地凭据文件存在 ≠ 微信会话有效 (context_token 过期后本地文件仍在, 官方会静默拒收推送)。
+    因此这里额外做一次官方 getupdates 真实探测 (结果缓存 120 秒, 避免每次刷新都打官方接口)。
+    """
+    import json as _json
     auth, msg = clawbot_client.load_auth(custom_path)
     if not auth or not auth.get("token") or not auth.get("userId"):
         return {"ok": False, "ready": False, "message": msg}
+
+    # 读取上次真实探测结果 (120 秒内直接复用)
+    session_ok = None
+    session_message = ""
+    probed_at = ""
+    try:
+        cached = db.get_setting("clawbot_last_probe") or ""
+        if cached:
+            obj = _json.loads(cached)
+            probed_at = obj.get("probed_at", "")
+            age = time.time() - float(obj.get("ts") or 0)
+            if age <= 120:
+                session_ok = bool(obj.get("ok"))
+                session_message = obj.get("message", "")
+    except Exception:
+        pass
+
+    # 缓存过期或缺失 → 真实探测官方会话 (短超时, 不阻塞太久)
+    if session_ok is None:
+        try:
+            probe = await clawbot_client.check_activation(timeout=4.0)
+            session_ok = bool(probe.get("ok") and probe.get("has_context_token", probe.get("activated")))
+            session_message = probe.get("message", "")
+        except Exception as e:
+            session_ok = False
+            session_message = f"会话探测异常: {e}"
+        probed_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            db.set_setting("clawbot_last_probe", _json.dumps({
+                "ok": session_ok, "message": session_message,
+                "probed_at": probed_at, "ts": time.time()
+            }, ensure_ascii=False))
+        except Exception:
+            pass
+
     return {
         "ok": True,
         "ready": True,
@@ -5211,6 +5251,9 @@ async def clawbot_status_endpoint(custom_path: Optional[str] = None):
         "user_id": auth.get("userId", ""),
         "account_id": auth.get("accountId", ""),
         "has_context_token": bool(auth.get("contextToken")),
+        "session_ok": session_ok,
+        "session_message": session_message,
+        "probed_at": probed_at,
         "saved_at": auth.get("savedAt", "")
     }
 

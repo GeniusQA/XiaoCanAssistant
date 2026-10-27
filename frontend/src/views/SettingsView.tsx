@@ -601,6 +601,26 @@ export const SettingsView: React.FC = () => {
   const [clawbotStatus, setClawbotStatus] = useState<ClawBotStatus | null>(null);
   const [clawbotModalVisible, setClawbotModalVisible] = useState<boolean>(false);
   const [advancedClawbotOpen, setAdvancedClawbotOpen] = useState<boolean>(false);
+  const [clawbotChecking, setClawbotChecking] = useState<boolean>(false);
+
+  /** 重新探测微信 ClawBot 会话是否真实有效 (官方 getupdates 实测) */
+  const handleCheckClawBotActivation = async () => {
+    setClawbotChecking(true);
+    try {
+      const res = await api.checkClawBotActivation();
+      if (res?.ok && (res.activated || res.has_context_token)) {
+        Toast.success(res.message || '微信会话已激活');
+      } else {
+        Toast.warning(res?.message || '会话仍未激活，请在手机微信向 ClawBot 发送任意消息');
+      }
+      const fresh = await api.getClawBotStatus((initialValues.clawbot_auth_path as string) || undefined);
+      if (fresh?.ready) setClawbotStatus(fresh as any);
+    } catch {
+      Toast.error('会话检测失败，请检查网络或后端服务');
+    } finally {
+      setClawbotChecking(false);
+    }
+  };
   const [checkingActivation, setCheckingActivation] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState('channels');
   const [selectedChannelKey, setSelectedChannelKey] = useState<string>('clawbot');
@@ -1096,9 +1116,11 @@ export const SettingsView: React.FC = () => {
                                           <div className="flex items-center justify-between flex-wrap gap-2">
                                             <div className="flex items-center gap-2 flex-wrap">
                                               <Text strong>连接状态：</Text>
-                                              <Tag color="green" prefixIcon={<IconTick />}>已连接就绪</Tag>
-                                              {clawbotStatus.has_context_token ? (
+                                              <Tag color="green" prefixIcon={<IconTick />}>凭据已就绪</Tag>
+                                              {clawbotStatus.session_ok === true ? (
                                                 <Tag color="cyan" prefixIcon={<IconTick />}>微信会话活跃</Tag>
+                                              ) : clawbotStatus.session_ok === false ? (
+                                                <Tag color="red" prefixIcon={<IconAlertCircle />}>会话已失效</Tag>
                                               ) : (
                                                 <Tag color="amber" prefixIcon={<IconAlertCircle />}>待发信激活</Tag>
                                               )}
@@ -1136,7 +1158,28 @@ export const SettingsView: React.FC = () => {
                                             <div>凭据说明: {clawbotStatus.source}</div>
                                             {clawbotStatus.user_id && <div>用户 ID: <span className="font-mono">{clawbotStatus.user_id}</span></div>}
                                             {clawbotStatus.account_id && <div>授权账号: <span className="font-mono">{clawbotStatus.account_id}</span></div>}
+                                            {clawbotStatus.probed_at && (
+                                              <div>
+                                                会话检测: <span className="font-mono">{clawbotStatus.probed_at}</span>
+                                                {clawbotStatus.session_message ? ` · ${clawbotStatus.session_message}` : ''}
+                                              </div>
+                                            )}
                                           </div>
+
+                                          {clawbotStatus.session_ok === false && (
+                                            <div className="p-2.5 rounded-lg bg-semi-color-danger-light-default border border-semi-color-danger text-xs text-semi-color-text-1 flex items-center justify-between gap-2 flex-wrap">
+                                              <span>微信会话已失效（context 过期后官方会静默拒收推送）。请在手机微信向你的 ClawBot 机器人发送任意消息以重新建立会话。</span>
+                                              <Button
+                                                size="small"
+                                                theme="solid"
+                                                type="danger"
+                                                loading={clawbotChecking}
+                                                onClick={handleCheckClawBotActivation}
+                                              >
+                                                我已发送，重新检测
+                                              </Button>
+                                            </div>
+                                          )}
 
                                           {!clawbotStatus.has_context_token && (
                                             <div className="p-2.5 rounded-lg bg-semi-color-warning-light-default border border-semi-color-warning text-xs text-semi-color-text-1 flex items-center justify-between gap-2 flex-wrap">
