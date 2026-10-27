@@ -57,7 +57,12 @@ export const DevicePairingPanel: React.FC = () => {
     return () => clearInterval(timer);
   }, [pairing, remainSec]);
 
-  useEffect(() => { loadDevices(); }, [loadDevices]);
+  useEffect(() => {
+    loadDevices();
+    // 轮询刷新: 手机端配对成功后无需手动点刷新, 设备会自动出现在列表中
+    const timer = setInterval(loadDevices, 4000);
+    return () => clearInterval(timer);
+  }, [loadDevices]);
 
   const mm = String(Math.floor(remainSec / 60)).padStart(2, '0');
   const ss = String(remainSec % 60).padStart(2, '0');

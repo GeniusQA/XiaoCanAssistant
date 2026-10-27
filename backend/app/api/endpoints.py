@@ -5132,6 +5132,41 @@ async def save_settings(data: Dict[str, Any] = Body(...)):
     return {"ok": True, "message": "设置已保存"}
 
 
+@router.get("/settings/app-location")
+async def get_app_location():
+    """
+    获取全局抢单位置配置 (跨设备同步)
+    PC 端设置定位后写入服务端, 已配对移动设备打开时读取同一份数据, 避免各端 localStorage 不一致。
+    """
+    import json as _json
+    active = db.get_setting("app_active_location") or ""
+    history = db.get_setting("app_location_history") or ""
+    try:
+        active_obj = _json.loads(active) if active else None
+    except Exception:
+        active_obj = None
+    try:
+        history_arr = _json.loads(history) if history else []
+        if not isinstance(history_arr, list):
+            history_arr = []
+    except Exception:
+        history_arr = []
+    return {"ok": True, "active_location": active_obj, "location_history": history_arr}
+
+
+@router.post("/settings/app-location")
+async def save_app_location(data: Dict[str, Any] = Body(...)):
+    """保存全局抢单位置配置 (定位变更或历史增删时调用)"""
+    import json as _json
+    if "active_location" in data:
+        val = data.get("active_location")
+        db.set_setting("app_active_location", _json.dumps(val, ensure_ascii=False) if val else "")
+    if "location_history" in data:
+        arr = data.get("location_history") or []
+        db.set_setting("app_location_history", _json.dumps(arr, ensure_ascii=False))
+    return {"ok": True}
+
+
 @router.post("/settings/test-tianditu")
 async def test_tianditu_endpoint(data: Dict[str, Any] = Body(...)):
     """测试天地图 Web API 服务 Token 连通性"""

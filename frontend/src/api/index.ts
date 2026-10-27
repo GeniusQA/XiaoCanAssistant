@@ -138,6 +138,10 @@ export const api = {
   batchRunDaily: (accountKey?: string) => client.post<BatchDailyResult>('/tasks/batch-run-daily', { account_key: accountKey }, { timeout: 180000 }).then(r => r.data),
   updateNameMonitor: (id: number, data: Record<string, any>) =>
     client.put<{ ok: boolean; appointment: any; message: string }>(`/store/name-monitor/${id}`, data, { timeout: 30000 }).then(r => r.data),
+  getAppLocation: () =>
+    client.get<{ ok: boolean; active_location: any; location_history: any[] }>('/settings/app-location', { timeout: 15000 }).then(r => r.data),
+  saveAppLocation: (data: { active_location?: any; location_history?: any[] }) =>
+    client.post<{ ok: boolean }>('/settings/app-location', data, { timeout: 15000 }).then(r => r.data),
   createPairing: () =>
     client.post<{ ok: boolean; code: string; expires_in: number; lan_address: string }>('/pairing/create', {}, { timeout: 15000 }).then(r => r.data),
   redeemPairing: (code: string, deviceName: string) =>

@@ -51,6 +51,7 @@ export const App: React.FC = () => {
   const toggleSidebarCollapse = useAppStore((state) => state.toggleSidebarCollapse);
   const loadAccounts = useAppStore((state) => state.loadAccounts);
   const loadUserInfo = useAppStore((state) => state.loadUserInfo);
+  const hydrateLocation = useAppStore((state) => state.hydrateLocation);
 
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set([activeTab]));
   const pageContainerRef = useRef<HTMLDivElement>(null);
@@ -59,7 +60,9 @@ export const App: React.FC = () => {
     sessionStorage.removeItem('chunk_retry_reloaded');
     loadAccounts();
     loadUserInfo();
-  }, [loadAccounts, loadUserInfo]);
+    // 多端协同: 拉取服务端抢单位置 (PC 端设置后, 已配对移动设备打开即同步)
+    hydrateLocation();
+  }, [loadAccounts, loadUserInfo, hydrateLocation]);
 
   // 移动端屏幕方向自适应: 手机横置(倒过来)自动切横屏紧凑布局, 竖屏切回单列布局
   useEffect(() => {

@@ -98,6 +98,8 @@ interface AppState {
   addLocationHistory: (loc: ActiveLocation) => void;
   removeLocationHistory: (loc: { longitude: string; latitude: string }) => void;
   clearLocationHistory: () => void;
+  /** 从服务端同步抢单位置 (多设备协同: 移动端与 PC 共享同一份定位配置) */
+  hydrateLocation: () => Promise<void>;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapse: () => void;
   setPendingOrderStatus: (status: string | null) => void;
@@ -155,6 +157,7 @@ export const useAppStore = create<AppState>((set, get) => {
         localStorage.removeItem('xiaocan_active_location');
       } catch (e) {}
       set({ activeLocation: null });
+      api.saveAppLocation({ active_location: null }).catch(() => {});
       return;
     }
     const prev = get().activeLocation || {
@@ -169,6 +172,8 @@ export const useAppStore = create<AppState>((set, get) => {
       localStorage.setItem('xiaocan_active_location', JSON.stringify(updated));
     } catch (e) {}
     set({ activeLocation: updated });
+    // 同步至服务端, 供已配对的移动设备读取同一份定位
+    api.saveAppLocation({ active_location: updated }).catch(() => {});
   },
 
   addLocationHistory: (loc: ActiveLocation) => {
@@ -180,6 +185,7 @@ export const useAppStore = create<AppState>((set, get) => {
     ].slice(0, LOCATION_HISTORY_LIMIT);
     persistLocationHistory(next);
     set({ locationHistory: next });
+    api.saveAppLocation({ location_history: next }).catch(() => {});
   },
 
   removeLocationHistory: (loc: { longitude: string; latitude: string }) => {
@@ -187,11 +193,48 @@ export const useAppStore = create<AppState>((set, get) => {
     const next = get().locationHistory.filter((item) => locationHistoryKey(item) !== key);
     persistLocationHistory(next);
     set({ locationHistory: next });
+    api.saveAppLocation({ location_history: next }).catch(() => {});
   },
 
   clearLocationHistory: () => {
     persistLocationHistory([]);
     set({ locationHistory: [] });
+    api.saveAppLocation({ location_history: [] }).catch(() => {});
+  },
+
+  hydrateLocation: async () => {
+    try {
+      const res = await api.getAppLocation();
+      if (!res?.ok) return;
+      const remoteActive = res.active_location;
+      const remoteHistory = Array.isArray(res.location_history) ? res.location_history : [];
+      const localActive = get().activeLocation;
+      const localHistory = get().locationHistory;
+
+      // 服务端有定位数据 → 以服务端为准 (移动端首次打开即可拿到 PC 的抢单位置)
+      if (remoteActive && remoteActive.longitude && remoteActive.latitude) {
+        if (!localActive || JSON.stringify(localActive) !== JSON.stringify(remoteActive)) {
+          try {
+            localStorage.setItem('xiaocan_active_location', JSON.stringify(remoteActive));
+          } catch (e) {}
+          set({ activeLocation: remoteActive });
+        }
+      } else if (localActive) {
+        // 服务端为空但本地有 → 上推一次, 完成初始化同步
+        api.saveAppLocation({ active_location: localActive }).catch(() => {});
+      }
+
+      if (remoteHistory.length > 0) {
+        const remoteKey = remoteHistory.map((i: any) => locationHistoryKey(i)).join('|');
+        const localKey = localHistory.map((i) => locationHistoryKey(i)).join('|');
+        if (remoteKey !== localKey) {
+          persistLocationHistory(remoteHistory);
+          set({ locationHistory: remoteHistory });
+        }
+      } else if (localHistory.length > 0) {
+        api.saveAppLocation({ location_history: localHistory }).catch(() => {});
+      }
+    } catch (e) {}
   },
 
   setDarkMode: (dark: boolean) => {
