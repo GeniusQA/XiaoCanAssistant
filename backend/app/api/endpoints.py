@@ -3553,6 +3553,16 @@ async def pairing_revoke(device_id: int):
     return {"ok": True, "message": "设备已吊销"}
 
 
+@router.put("/pairing/devices/{device_id}")
+async def pairing_rename(device_id: int, data: Dict[str, Any] = Body(...)):
+    """重命名已配对设备 (配对时未填写名称, 可在此修改)"""
+    from ..core.device_auth import rename_device
+    ok, reason = rename_device(device_id, str(data.get("device_name") or ""))
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    return {"ok": True, "message": "设备名称已更新"}
+
+
 @router.delete("/pairing/devices/{device_id}/purge")
 async def pairing_purge(device_id: int):
     """从配对列表彻底删除设备记录 (仅限已吊销设备)"""

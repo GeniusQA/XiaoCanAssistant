@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Banner, Button, Empty, Popconfirm, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Empty, Input, Modal, Popconfirm, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import { IconSmartphoneStroked } from '@douyinfe/semi-icons';
 import { api } from '../api';
 
@@ -16,6 +16,10 @@ export const DevicePairingPanel: React.FC = () => {
   const [creating, setCreating] = useState(false);
   const [devices, setDevices] = useState<{ id: number; device_name: string; created_at: string; last_seen: string; ip?: string; revoked: number }[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
+  // 重命名弹窗 (配对时未填名称 → 未命名设备可在此修改)
+  const [renameTarget, setRenameTarget] = useState<{ id: number; name: string } | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameSubmitting, setRenameSubmitting] = useState(false);
 
   const loadDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -57,6 +61,31 @@ export const DevicePairingPanel: React.FC = () => {
       loadDevices();
     } catch (e: any) {
       Toast.error(e.response?.data?.detail || '删除失败');
+    }
+  };
+
+  const openRename = (id: number, currentName: string) => {
+    setRenameTarget({ id, name: currentName });
+    setRenameValue(currentName === '未命名设备' ? '' : currentName);
+  };
+
+  const handleRename = async () => {
+    if (!renameTarget) return;
+    const name = renameValue.trim();
+    if (!name) {
+      Toast.warning('请输入设备名称');
+      return;
+    }
+    setRenameSubmitting(true);
+    try {
+      await api.renamePairingDevice(renameTarget.id, name);
+      Toast.success(`设备名称已更新为「${name}」`);
+      setRenameTarget(null);
+      loadDevices();
+    } catch (e: any) {
+      Toast.error(e.response?.data?.detail || '重命名失败');
+    } finally {
+      setRenameSubmitting(false);
     }
   };
 
@@ -153,20 +182,51 @@ export const DevicePairingPanel: React.FC = () => {
                     {d.ip ? ` · IP ${d.ip}` : ''}
                   </Text>
                 </div>
-                {!d.revoked ? (
-                  <Popconfirm title="吊销后该设备将立即失去访问权限，确定吊销？" onConfirm={() => handleRevoke(d.id)}>
-                    <Button size="small" type="danger" theme="light">吊销</Button>
-                  </Popconfirm>
-                ) : (
-                  <Popconfirm title="删除后该设备记录将从配对列表移除，确定删除？" onConfirm={() => handlePurge(d.id)}>
-                    <Button size="small" theme="borderless" type="tertiary">删除</Button>
-                  </Popconfirm>
-                )}
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button size="small" theme="borderless" type="primary" onClick={() => openRename(d.id, d.device_name)}>
+                    编辑
+                  </Button>
+                  {!d.revoked ? (
+                    <Popconfirm title="吊销后该设备将立即失去访问权限，确定吊销？" onConfirm={() => handleRevoke(d.id)}>
+                      <Button size="small" type="danger" theme="light">吊销</Button>
+                    </Popconfirm>
+                  ) : (
+                    <Popconfirm title="删除后该设备记录将从配对列表移除，确定删除？" onConfirm={() => handlePurge(d.id)}>
+                      <Button size="small" theme="borderless" type="tertiary">删除</Button>
+                    </Popconfirm>
+                  )}
+                </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* 设备重命名弹窗 */}
+      <Modal
+        title="编辑设备名称"
+        visible={!!renameTarget}
+        onCancel={() => setRenameTarget(null)}
+        onOk={handleRename}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={renameSubmitting}
+        width={420}
+        centered
+        style={{ maxWidth: '92vw' }}
+      >
+        <div className="py-1">
+          <div className="text-xs text-semi-color-text-2 mb-1.5">设备名称（便于在配对列表识别，最多 24 个字符）</div>
+          <Input
+            value={renameValue}
+            onChange={(v) => setRenameValue(v || '')}
+            placeholder="例如 我的手机"
+            maxLength={24}
+            autoFocus
+            onEnterPress={handleRename}
+          />
+        </div>
+      </Modal>
     </div>
   );
 };

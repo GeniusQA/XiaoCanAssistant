@@ -208,6 +208,28 @@ def revoke_device(device_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def rename_device(device_id: int, new_name: str) -> tuple:
+    """重命名已配对设备 (返回 (成功, 原因))"""
+    name = (new_name or "").strip()
+    if not name:
+        return False, "设备名称不能为空"
+    if len(name) > 24:
+        return False, "设备名称最多 24 个字符"
+    ensure_device_table()
+    with get_conn() as conn:
+        exists = conn.execute("SELECT id FROM paired_devices WHERE id = ?", (device_id,)).fetchone()
+        if not exists:
+            return False, "设备不存在"
+        dup = conn.execute(
+            "SELECT id FROM paired_devices WHERE device_name = ? AND id != ?", (name, device_id)
+        ).fetchone()
+        if dup:
+            return False, f"已存在名为「{name}」的设备，请换一个名称"
+        conn.execute("UPDATE paired_devices SET device_name = ? WHERE id = ?", (name, device_id))
+        conn.commit()
+    return True, ""
+
+
 def purge_device(device_id: int) -> bool:
     """从配对列表彻底删除设备记录 (仅允许删除已吊销设备)"""
     ensure_device_table()
