@@ -773,10 +773,6 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
   /**
    * 通知通道连通性自动巡检:
    * 进入「系统配置」页即触发, 后端逐个实测已启用通道并写入运行日志,
@@ -801,6 +797,13 @@ export const SettingsView: React.FC = () => {
       /* 巡检失败静默处理, 不打扰用户 */
     }
   };
+
+  useEffect(() => {
+    loadData();
+    // 首次挂载即巡检 (刷新后直接点「系统配置」时 useOnActivated 不会触发, 需在此执行)
+    runNotifyHealthcheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useOnActivated('settings', () => {
     loadData();
