@@ -104,19 +104,31 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
     jti = uuid.uuid4().hex
     name = (device_name or "").strip() or "未命名设备"
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, revoked) VALUES (?, ?, ?, ?, 0)",
-            (name, jti, now, now)
-        )
+        # 同名设备复用原记录 (吊销后重新配对 → 恢复为在线凭证, 不重复创建记录)
+        existing = conn.execute(
+            "SELECT id FROM paired_devices WHERE device_name = ? ORDER BY id DESC LIMIT 1", (name,)
+        ).fetchone()
+        if existing:
+            dev_id = existing["id"]
+            conn.execute(
+                "UPDATE paired_devices SET jti = ?, created_at = ?, last_seen = ?, revoked = 0 WHERE id = ?",
+                (jti, now, now, dev_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, revoked) VALUES (?, ?, ?, ?, 0)",
+                (name, jti, now, now)
+            )
+            dev_id = conn.execute("SELECT id FROM paired_devices WHERE jti = ?", (jti,)).fetchone()["id"]
         conn.commit()
-        row = conn.execute("SELECT id FROM paired_devices WHERE jti = ?", (jti,)).fetchone()
 
+    # 旧 JWT (旧 jti) 因 jti 已替换而自动失效, 同设备仅保留最新有效凭证
     token = jwt.encode(
-        {"jti": jti, "device_id": row["id"], "device_name": name, "iat": int(time.time())},
+        {"jti": jti, "device_id": dev_id, "device_name": name, "iat": int(time.time())},
         _jwt_secret(),
         algorithm="HS256"
     )
-    result = {"token": token, "device_id": row["id"], "device_name": name, "expires_days": JWT_EXPIRE_DAYS}
+    result = {"token": token, "device_id": dev_id, "device_name": name, "expires_days": JWT_EXPIRE_DAYS}
     return (result, "") if return_reason else result
 
 
