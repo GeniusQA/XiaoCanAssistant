@@ -579,3 +579,21 @@ html.is-landscape .flex.flex-col.gap-3 {
 
 
 
+
+/* Tab 图标与文案垂直对齐 (Semi Tabs 内 SVG 默认基线偏移导致图标偏高/偏低) */
+.semi-tabs-tab {
+  display: inline-flex !important;
+  align-items: center !important;
+}
+.semi-tabs-tab .semi-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  vertical-align: middle;
+}
+.semi-tabs-tab > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
