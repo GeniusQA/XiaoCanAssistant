@@ -52,6 +52,9 @@ const clearLocalDeviceData = () => {
   } catch { /* ignore */ }
 };
 
+// 401 提示去重时间戳 (并发请求同时失效时只提示一次)
+let pairingNotifiedAt = 0;
+
 // 全局响应拦截器：统一网络异常与安全兜底
 client.interceptors.response.use(
   (response) => response,
@@ -62,9 +65,14 @@ client.interceptors.response.use(
     // 设备凭证失效 (被吊销/过期) → 清理本机缓存并触发全局配对门 (携带后端原因供弹窗展示)
     if (error.response?.status === 401 && typeof window !== 'undefined') {
       clearLocalDeviceData();
-      window.dispatchEvent(new CustomEvent('xc-pairing-required', {
-        detail: error.response?.data?.detail || '设备未配对或凭证已失效，请在 PC 端生成配对码重新登录'
-      }));
+      // 首页会并发多个接口, 全部 401 时不能重复弹窗/弹 Toast: 3 秒内只触发一次
+      const now = Date.now();
+      if (now - pairingNotifiedAt > 3000) {
+        pairingNotifiedAt = now;
+        window.dispatchEvent(new CustomEvent('xc-pairing-required', {
+          detail: error.response?.data?.detail || '设备未配对或凭证已失效，请在 PC 端生成配对码重新登录'
+        }));
+      }
     }
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
       Toast.error('请求超时，请检查后端服务是否正常响应');
