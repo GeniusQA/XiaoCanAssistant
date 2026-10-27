@@ -19,10 +19,8 @@ from ..models.database import get_conn, set_setting, get_setting
 logger = logging.getLogger("xiaocan.device_auth")
 
 JWT_EXPIRE_DAYS = 30
-PAIRING_TTL_SECONDS = 120
-
-# 内存态配对码: code -> {secret, created_at, used}
-_pairing_codes: Dict[str, Dict[str, Any]] = {}
+# 配对码有效期: 5 分钟 (给手机端输入留足时间; 一次性使用)
+PAIRING_TTL_SECONDS = 300
 
 
 def _jwt_secret() -> str:
@@ -47,40 +45,61 @@ def ensure_device_table():
             revoked INTEGER DEFAULT 0
         )
         """)
+        # 配对码持久化存储 (进程重启不丢; 一次性使用)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS pairing_codes (
+            code TEXT PRIMARY KEY,
+            created_ts INTEGER NOT NULL,
+            used INTEGER DEFAULT 0
+        )
+        """)
         conn.commit()
 
 
 def create_pairing_code() -> Dict[str, Any]:
-    """生成一次性配对码 (6位数字, 有效期 120 秒)"""
-    # 清理过期码
-    now = time.time()
-    for k in list(_pairing_codes.keys()):
-        if now - _pairing_codes[k]["created_at"] > PAIRING_TTL_SECONDS:
-            _pairing_codes.pop(k, None)
-
-    code = f"{secrets.randbelow(1000000):06d}"
-    secret = secrets.token_hex(16)
-    _pairing_codes[code] = {"secret": secret, "created_at": now, "used": False}
-    return {
-        "code": code,
-        "expires_in": PAIRING_TTL_SECONDS,
-        "created_at": int(now),
-    }
-
-
-def redeem_pairing_code(code: str, device_name: str) -> Optional[Dict[str, Any]]:
-    """校验配对码, 签发设备 JWT 并登记设备"""
-    entry = _pairing_codes.get(str(code).strip())
-    if not entry or entry["used"]:
-        return None
-    if time.time() - entry["created_at"] > PAIRING_TTL_SECONDS:
-        _pairing_codes.pop(str(code).strip(), None)
-        return None
-
-    entry["used"] = True
-    _pairing_codes.pop(str(code).strip(), None)
-
+    """生成一次性配对码 (6位数字, 有效期 5 分钟); 持久化存储, 后端重启后依然可用"""
     ensure_device_table()
+    now = int(time.time())
+    code = f"{secrets.randbelow(1000000):06d}"
+    with get_conn() as conn:
+        # 清理过期码, 避免表膨胀
+        conn.execute("DELETE FROM pairing_codes WHERE created_ts < ?", (now - PAIRING_TTL_SECONDS,))
+        conn.execute(
+            "INSERT OR REPLACE INTO pairing_codes (code, created_ts, used) VALUES (?, ?, 0)",
+            (code, now)
+        )
+        conn.commit()
+    return {"code": code, "expires_in": PAIRING_TTL_SECONDS, "created_at": now}
+
+
+def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False):
+    """
+    校验配对码, 签发设备 JWT 并登记设备。
+    return_reason=True 时返回 (result, reason) 便于前端展示具体失败原因。
+    """
+    code = str(code or "").strip()
+    ensure_device_table()
+    now = int(time.time())
+    with get_conn() as conn:
+        row = conn.execute("SELECT code, created_ts, used FROM pairing_codes WHERE code = ?", (code,)).fetchone()
+
+    reason = ""
+    if not row:
+        reason = "配对码不存在，请确认输入的是 PC 端最新生成的 6 位数字"
+    elif row["used"]:
+        reason = "该配对码已被使用过（一次性），请在 PC 端重新生成"
+    elif now - int(row["created_ts"]) > PAIRING_TTL_SECONDS:
+        reason = "配对码已过期（有效期 5 分钟），请在 PC 端重新生成"
+
+    if reason:
+        return (None, reason) if return_reason else None
+
+    # 标记已使用 (幂等: 只有仍为未使用状态才更新成功)
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE pairing_codes SET used = 1 WHERE code = ? AND used = 0", (code,))
+        conn.commit()
+        if cur.rowcount == 0:
+            return (None, "该配对码已被使用过（一次性），请在 PC 端重新生成") if return_reason else None
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     jti = uuid.uuid4().hex
     name = (device_name or "").strip() or "未命名设备"
@@ -97,7 +116,8 @@ def redeem_pairing_code(code: str, device_name: str) -> Optional[Dict[str, Any]]
         _jwt_secret(),
         algorithm="HS256"
     )
-    return {"token": token, "device_id": row["id"], "device_name": name, "expires_days": JWT_EXPIRE_DAYS}
+    result = {"token": token, "device_id": row["id"], "device_name": name, "expires_days": JWT_EXPIRE_DAYS}
+    return (result, "") if return_reason else result
 
 
 def verify_device_token(token: str) -> Optional[Dict[str, Any]]:

@@ -84,9 +84,9 @@ export const DevicePairingPanel: React.FC = () => {
         {!pairing || remainSec <= 0 ? (
           <div className="flex flex-col items-center gap-2 py-3">
             <Button theme="solid" type="primary" size="large" loading={creating} onClick={handleCreate}>
-              生成 6 位配对码 (2 分钟有效)
+              生成 6 位配对码 (5 分钟有效)
             </Button>
-            <Text type="tertiary" size="small">配对码为一次性使用，过期后可重新生成</Text>
+            <Text type="tertiary" size="small">配对码为一次性使用，5 分钟内有效，过期后可重新生成</Text>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-2 py-2">

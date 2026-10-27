@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastAPI RESTful 路由
 完全对齐前端调用，彻底废弃卡密、积分与到期限制（全免开放）
 """
@@ -3527,9 +3527,11 @@ async def pairing_create():
 async def pairing_redeem(data: Dict[str, Any] = Body(...)):
     """移动端提交配对码换取设备 JWT"""
     from ..core.device_auth import redeem_pairing_code
-    result = redeem_pairing_code(str(data.get("code") or ""), str(data.get("device_name") or ""))
+    result, reason = redeem_pairing_code(
+        str(data.get("code") or ""), str(data.get("device_name") or ""), return_reason=True
+    )
     if not result:
-        raise HTTPException(status_code=401, detail="配对码无效或已过期，请在 PC 端重新生成")
+        raise HTTPException(status_code=401, detail=reason or "配对码无效或已过期，请在 PC 端重新生成")
     return {"ok": True, **result}
 
 

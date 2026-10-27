@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 from ..models import database as db
 from ..protocol.client import XiaoCanClient, XiaoCanRPCError, is_waf_blocked, get_waf_cooldown_seconds
@@ -103,7 +103,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
     nickname = account.get("nickname") or account_key
     store_name = apt.get("store_name", "店铺活动")
     promotion_id = apt.get("promotion_id", "")
-    platform_name = "美团外卖" if apt.get("platform") == "meituan" else ("淘宝闪购" if apt.get("platform") == "eleme" else "京东外卖")
+    platform_name = "美团外卖" if apt.get("platform") == "meituan" else ("饿了么" if apt.get("platform") == "eleme" else "京东外卖")
     platform_code = int(apt.get("store_platform") or (3 if apt.get("platform") in ("jingdong", "jd") else (1 if apt.get("platform") == "meituan" else 2)))
 
     task_id = action_source if action_source in ("store_grab", "store_appoint", "store_monitor", "store_search", "store_cancel") else "store_grab"
@@ -495,7 +495,6 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             activity_requirement = apt.get("activity_requirement") or "all"
             only_grabbable = int(apt.get("only_grabbable") if apt.get("only_grabbable") is not None else 1)
             high_rebate_only = int(apt.get("high_rebate_only") if apt.get("high_rebate_only") is not None else 0)
-            no_comment_only = int(apt.get("no_comment_only") if apt.get("no_comment_only") is not None else 0)
             min_rebate_price = float(apt.get("min_rebate_price") or 0.0)
             min_rebate_rate = float(apt.get("min_rebate_rate") or 0.0)
             max_order_money = float(apt.get("max_order_money") or 0.0)
@@ -613,10 +612,6 @@ async def process_active_appointments() -> Tuple[bool, bool]:
 
                     # 3.6 高返利过滤 (官方类别标记 status==7, 与官方 App「高返利」tab 同源)
                     if high_rebate_only and not c.get("is_high_rebate"):
-                        continue
-
-                    # 3.7 无需评价过滤 (官方类别标记 status==1 或 rebate_condition==99)
-                    if no_comment_only and not c.get("no_comment_required"):
                         continue
 
                     # 4. 最低返利金额
@@ -790,7 +785,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     target_left = pdetail.get("left_number", 0)
 
                 t_now = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                step_str = f"[{t_now}] 第 {poll_cnt} 次名额检测: 美团余量 {mt_left or 0} 份 / 淘宝闪购余量 {ele_left or 0} 份，持续监听中..."
+                step_str = f"[{t_now}] 第 {poll_cnt} 次名额检测: 美团余量 {mt_left or 0} 份 / 饿了么余量 {ele_left or 0} 份，持续监听中..."
                 # 每轮巡检追加，且首轮或每 3 次或有名额变动时向数据库落盘一次
                 sync_needed = (poll_cnt == 1) or (poll_cnt % 3 == 0) or (target_left and int(target_left) > 0)
                 if linked_log_id > 0:
