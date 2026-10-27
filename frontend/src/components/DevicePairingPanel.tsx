@@ -5,6 +5,14 @@ import { api } from '../api';
 
 const { Text } = Typography;
 
+/** 判断设备凭证是否已过期 (后端 expires_at: 'YYYY-MM-DD HH:MM:SS') */
+const isExpired = (expiresAt?: string): boolean => {
+  if (!expiresAt) return false;
+  const ts = new Date(String(expiresAt).replace(' ', 'T')).getTime();
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() > ts;
+};
+
 /**
  * 设备协同面板 (添加小蚕账号弹窗 → 设备协同 Tab):
  * PC 生成一次性配对码 → 手机浏览器访问助手地址输入配对码 → 设备获得 30 天访问凭证,
@@ -14,7 +22,7 @@ export const DevicePairingPanel: React.FC = () => {
   const [pairing, setPairing] = useState<{ code: string; expires_in: number; lan_address: string } | null>(null);
   const [remainSec, setRemainSec] = useState(0);
   const [creating, setCreating] = useState(false);
-  const [devices, setDevices] = useState<{ id: number; device_name: string; created_at: string; last_seen: string; ip?: string; revoked: number }[]>([]);
+  const [devices, setDevices] = useState<{ id: number; device_name: string; created_at: string; last_seen: string; ip?: string; expires_at?: string; revoked: number }[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   // 重命名弹窗 (配对时未填名称 → 未命名设备可在此修改)
   const [renameTarget, setRenameTarget] = useState<{ id: number; name: string } | null>(null);
@@ -187,18 +195,25 @@ export const DevicePairingPanel: React.FC = () => {
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
                     <Text strong size="small">{d.device_name}</Text>
-                    {d.revoked ? <Tag color="grey" size="small">已吊销</Tag> : <Tag color="green" size="small">在线凭证</Tag>}
+                    {d.revoked ? (
+                      <Tag color="grey" size="small">已吊销</Tag>
+                    ) : isExpired(d.expires_at) ? (
+                      <Tag color="red" size="small">已过期</Tag>
+                    ) : (
+                      <Tag color="green" size="small">在线凭证</Tag>
+                    )}
                   </div>
                   <Text type="tertiary" size="small">
                     配对于 {d.created_at || '-'} · 最后活跃 {d.last_seen || '-'}
                     {d.ip ? ` · IP ${d.ip}` : ''}
+                    {d.expires_at ? ` · 有效期至 ${d.expires_at}` : ''}
                   </Text>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <Button size="small" theme="borderless" type="primary" onClick={() => openRename(d.id, d.device_name)}>
                     编辑
                   </Button>
-                  {!d.revoked ? (
+                  {!d.revoked && !isExpired(d.expires_at) ? (
                     <Popconfirm title="吊销后该设备将立即失去访问权限，确定吊销？" onConfirm={() => handleRevoke(d.id)}>
                       <Button size="small" type="danger" theme="light">吊销</Button>
                     </Popconfirm>

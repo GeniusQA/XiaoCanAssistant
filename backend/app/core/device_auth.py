@@ -43,14 +43,17 @@ def ensure_device_table():
             created_at TEXT,
             last_seen TEXT,
             ip TEXT,
+            expires_at TEXT,
             revoked INTEGER DEFAULT 0
         )
         """)
-        # 兼容旧表: 补充 ip 列
+        # 兼容旧表: 补充 ip / expires_at 列
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(paired_devices)").fetchall()]
             if "ip" not in cols:
                 conn.execute("ALTER TABLE paired_devices ADD COLUMN ip TEXT")
+            if "expires_at" not in cols:
+                conn.execute("ALTER TABLE paired_devices ADD COLUMN expires_at TEXT")
         except Exception:
             pass
         # 配对码持久化存储 (进程重启不丢; 一次性使用)
@@ -108,36 +111,52 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
         conn.commit()
         if cur.rowcount == 0:
             return (None, "该配对码已被使用过（一次性），请在 PC 端重新生成") if return_reason else None
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = time.time()
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now_ts))
+    expires_ts = now_ts + JWT_EXPIRE_DAYS * 86400
+    expires_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_ts))
     jti = uuid.uuid4().hex
     name = (device_name or "").strip() or "未命名设备"
     ip = (client_ip or "").strip()
     with get_conn() as conn:
-        # 同名设备复用原记录 (吊销后重新配对 → 恢复为在线凭证, 不重复创建记录)
+        # 同名设备复用原记录 (吊销/过期后重新配对 → 恢复为在线凭证, 不重复创建记录)
         existing = conn.execute(
             "SELECT id FROM paired_devices WHERE device_name = ? ORDER BY id DESC LIMIT 1", (name,)
         ).fetchone()
         if existing:
             dev_id = existing["id"]
             conn.execute(
-                "UPDATE paired_devices SET jti = ?, created_at = ?, last_seen = ?, ip = ?, revoked = 0 WHERE id = ?",
-                (jti, now, now, ip, dev_id)
+                "UPDATE paired_devices SET jti = ?, created_at = ?, last_seen = ?, ip = ?, expires_at = ?, revoked = 0 WHERE id = ?",
+                (jti, now, now, ip, expires_at, dev_id)
             )
         else:
             conn.execute(
-                "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, ip, revoked) VALUES (?, ?, ?, ?, ?, 0)",
-                (name, jti, now, now, ip)
+                "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, ip, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (name, jti, now, now, ip, expires_at)
             )
             dev_id = conn.execute("SELECT id FROM paired_devices WHERE jti = ?", (jti,)).fetchone()["id"]
         conn.commit()
 
     # 旧 JWT (旧 jti) 因 jti 已替换而自动失效, 同设备仅保留最新有效凭证
+    # exp: 真正写入过期时间 (此前缺失导致凭证永不过期)
     token = jwt.encode(
-        {"jti": jti, "device_id": dev_id, "device_name": name, "iat": int(time.time())},
+        {
+            "jti": jti,
+            "device_id": dev_id,
+            "device_name": name,
+            "iat": int(now_ts),
+            "exp": int(expires_ts),
+        },
         _jwt_secret(),
         algorithm="HS256"
     )
-    result = {"token": token, "device_id": dev_id, "device_name": name, "expires_days": JWT_EXPIRE_DAYS}
+    result = {
+        "token": token,
+        "device_id": dev_id,
+        "device_name": name,
+        "expires_days": JWT_EXPIRE_DAYS,
+        "expires_at": expires_at,
+    }
     return (result, "") if return_reason else result
 
 
@@ -154,11 +173,19 @@ def verify_device_token(token: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         with get_conn() as conn:
-            row = conn.execute("SELECT revoked FROM paired_devices WHERE jti = ?", (jti,)).fetchone()
+            row = conn.execute("SELECT revoked, expires_at FROM paired_devices WHERE jti = ?", (jti,)).fetchone()
     except Exception:
         return None
     if not row or row["revoked"]:
         return None
+    # 双保险: DB 侧过期校验 (老凭证无 exp 字段时也能按记录有效期失效)
+    expires_at = row["expires_at"]
+    if expires_at:
+        try:
+            if time.time() > time.mktime(time.strptime(str(expires_at), "%Y-%m-%d %H:%M:%S")):
+                return None
+        except Exception:
+            pass
     return payload
 
 
@@ -195,7 +222,7 @@ def list_devices() -> list:
     with get_conn() as conn:
         conn.row_factory = __import__("sqlite3").Row
         rows = conn.execute(
-            "SELECT id, device_name, created_at, last_seen, ip, revoked FROM paired_devices ORDER BY id DESC"
+            "SELECT id, device_name, created_at, last_seen, ip, expires_at, revoked FROM paired_devices ORDER BY id DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -231,10 +258,14 @@ def rename_device(device_id: int, new_name: str) -> tuple:
 
 
 def purge_device(device_id: int) -> bool:
-    """从配对列表彻底删除设备记录 (仅允许删除已吊销设备)"""
+    """从配对列表彻底删除设备记录 (仅允许删除已吊销或已过期的设备)"""
     ensure_device_table()
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
-        cur = conn.execute("DELETE FROM paired_devices WHERE id = ? AND revoked = 1", (device_id,))
+        cur = conn.execute(
+            "DELETE FROM paired_devices WHERE id = ? AND (revoked = 1 OR (expires_at IS NOT NULL AND expires_at < ?))",
+            (device_id, now_str)
+        )
         conn.commit()
         return cur.rowcount > 0
 
