@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Banner, Button, Empty, Input, Modal, Popconfirm, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Empty, Input, Modal, Popconfirm, Tag, Toast, Tooltip, Typography } from '@douyinfe/semi-ui';
 import { IconRefresh, IconSmartphoneStroked } from '@douyinfe/semi-icons';
 import { api } from '../api';
+import { copyText } from '../utils/clipboard';
 
 const { Text } = Typography;
 
@@ -156,10 +157,20 @@ export const DevicePairingPanel: React.FC = () => {
           </div>
         ) : (
           <div className="flex flex-col items-center gap-2 py-2">
-            <div className="font-mono font-bold text-semi-color-primary tracking-[0.3em] select-all" style={{ fontSize: 42, lineHeight: 1.2 }}>
-              {pairing.code}
-            </div>
-            <Text type="tertiary" size="small">手机访问下方地址 → 输入此配对码 → 完成配对</Text>
+            <Tooltip content="点击复制配对码" position="top">
+              <div
+                className="font-mono font-bold text-semi-color-primary tracking-[0.3em] cursor-pointer hover:opacity-80 transition-opacity select-all"
+                style={{ fontSize: 42, lineHeight: 1.2 }}
+                onClick={async () => {
+                  const ok = await copyText(pairing.code);
+                  if (ok) Toast.success(`配对码 ${pairing.code} 已复制到剪贴板`);
+                  else Toast.error('复制失败，请手动选择复制');
+                }}
+              >
+                {pairing.code}
+              </div>
+            </Tooltip>
+            <Text type="tertiary" size="small">点击配对码可复制 · 手机访问下方地址 → 输入此配对码 → 完成配对</Text>
             <div className="bg-semi-color-fill-0 rounded-lg px-3 py-1.5 font-mono text-xs text-semi-color-text-1 select-all">
               {pairing.lan_address}
             </div>
