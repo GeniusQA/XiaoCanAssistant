@@ -106,6 +106,8 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         run: |
           before_tree=$(git rev-parse 'HEAD^{tree}')
+          # 上游若带回独立同步工作流文件, 统一清理 (避免与本工作流重复)
+          git rm -f --ignore-unmatch .github/workflows/sync-upstream.yml || true
           # --squash: 上游变更压缩为单个提交 (作者=github-actions[bot]), 不引入上游提交历史与作者信息
           # -X ours: 内容冲突时保留本仓库版本
           if git merge -X ours --squash --allow-unrelated-histories upstream/main; then
