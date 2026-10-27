@@ -5232,16 +5232,21 @@ async def notify_healthcheck_endpoint(data: Dict[str, Any] = Body(default={})):
             pass
     db.set_setting("notify_healthcheck_last_ts", now)
 
+    # 与前端「通道目录」完全一致的 13 个通道
     enabled_map = [
         ("clawbot", "微信官方 ClawBot", db.get_setting("clawbot_enabled", True)),
-        ("serverchan", "Server酱", db.get_setting("serverchan_enabled", False)),
-        ("wxpusher", "WxPusher", db.get_setting("wxpusher_enabled", False)),
-        ("wecom", "企业微信机器人", db.get_setting("wecom_enabled", False)),
-        ("dingtalk", "钉钉机器人", db.get_setting("dingtalk_enabled", False)),
-        ("feishu", "飞书机器人", db.get_setting("feishu_enabled", False)),
-        ("bark", "iOS Bark", db.get_setting("bark_enabled", False)),
-        ("telegram", "Telegram Bot", db.get_setting("telegram_enabled", False)),
-        ("qq_bot", "QQ 机器人", db.get_setting("qq_bot_enabled", False)),
+        ("serverchan", "Server酱 (Turbo / 3)", db.get_setting("serverchan_enabled", False)),
+        ("wxpusher", "WxPusher 微信推送", db.get_setting("wxpusher_enabled", False)),
+        ("wecom", "企业微信群机器人", db.get_setting("wecom_enabled", False)),
+        ("dingtalk", "钉钉群机器人", db.get_setting("dingtalk_enabled", False)),
+        ("feishu", "飞书群机器人", db.get_setting("feishu_enabled", False)),
+        ("bark", "iOS Bark 推送", db.get_setting("bark_enabled", False)),
+        ("telegram", "Telegram 机器人", db.get_setting("telegram_enabled", False)),
+        ("gotify", "Gotify 自建推送", db.get_setting("gotify_enabled", False)),
+        ("discord", "Discord 频道 Webhook", db.get_setting("discord_enabled", False)),
+        ("webhook", "通用自定义 HTTP Webhook", db.get_setting("webhook_enabled", False)),
+        ("email", "SMTP 邮件服务", db.get_setting("email_enabled", False)),
+        ("qq_bot", "QQ 机器人 (OneBot V11)", db.get_setting("qq_bot_enabled", False)),
     ]
 
     results = []
