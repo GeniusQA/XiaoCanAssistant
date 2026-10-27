@@ -118,14 +118,16 @@ export const DevicePairingPanel: React.FC = () => {
 
   return (
     <div className="flex flex-col gap-3 py-1">
-      <Banner type="info" closeIcon={null}>
-        将手机浏览器访问下方局域网地址（需与 PC 同一 WiFi），在「设备配对」中输入本页生成的配对码，即可让手机同步使用 PC 端已绑定的全部小蚕账号、任务与配置。小蚕凭据仅保存在 PC 端，不会下发到手机。
-      </Banner>
+      <Banner
+        type="info"
+        closeIcon={null}
+        description="将手机浏览器访问下方局域网地址（需与 PC 同一 WiFi），在「设备配对」中输入本页生成的配对码，即可让手机同步使用 PC 端已绑定的全部小蚕账号、任务与配置。小蚕凭据仅保存在 PC 端，不会下发到手机。"
+      />
 
       {/* 生成配对码 */}
       <div className="border border-semi-color-border rounded-xl p-4 bg-semi-color-bg-0">
         <div className="flex items-center justify-between mb-2">
-          <Text strong className="text-[14px]">第一步：生成配对码</Text>
+          <Text strong className="text-[14px]">生成配对码</Text>
           {pairing && remainSec > 0 && (
             <div className="flex items-center gap-2">
               <Tag color="amber" size="small" shape="square" className="font-mono">
