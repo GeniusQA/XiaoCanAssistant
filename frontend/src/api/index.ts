@@ -164,6 +164,8 @@ export const api = {
   batchRunDaily: (accountKey?: string) => client.post<BatchDailyResult>('/tasks/batch-run-daily', { account_key: accountKey }, { timeout: 180000 }).then(r => r.data),
   updateNameMonitor: (id: number, data: Record<string, any>) =>
     client.put<{ ok: boolean; appointment: any; message: string }>(`/store/name-monitor/${id}`, data, { timeout: 30000 }).then(r => r.data),
+  notifyHealthcheck: (force = false) =>
+    client.post<{ ok: boolean; cached?: boolean; enabled_count: number; ok_count: number; failed_count: number; results: { channel: string; label: string; ok: boolean; message: string }[] }>('/settings/notify-healthcheck', { force }, { timeout: 60000 }).then(r => r.data),
   getCurrentAccountKey: () =>
     client.get<{ ok: boolean; current_account_key: string }>('/settings/current-account', { timeout: 15000 }).then(r => r.data),
   saveCurrentAccountKey: (key: string) =>

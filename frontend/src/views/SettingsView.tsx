@@ -777,8 +777,29 @@ export const SettingsView: React.FC = () => {
     loadData();
   }, []);
 
+  /**
+   * 通知通道连通性自动巡检:
+   * 进入「系统配置」页即触发, 后端逐个实测已启用通道并写入运行日志,
+   * 有异常时前端弹一次提醒, 用户可直接去运行日志查看处理指引。
+   */
+  const runNotifyHealthcheck = async () => {
+    try {
+      const res = await api.notifyHealthcheck();
+      if (res?.failed_count > 0) {
+        const badLabels = (res.results || []).filter((r) => !r.ok).map((r) => r.label).join('、');
+        Toast.warning({
+          content: `通知通道连通异常：${badLabels || '存在阻塞通道'}，详情与处理建议见运行日志`,
+          duration: 6,
+        });
+      }
+    } catch {
+      /* 巡检失败静默处理, 不打扰用户 */
+    }
+  };
+
   useOnActivated('settings', () => {
     loadData();
+    runNotifyHealthcheck();
   }, { throttleMs: 3000 });
 
   const handleRefreshClawBot = async () => {

@@ -5210,6 +5210,88 @@ async def save_current_account(data: Dict[str, Any] = Body(...)):
     return {"ok": True}
 
 
+@router.post("/settings/notify-healthcheck")
+async def notify_healthcheck_endpoint(data: Dict[str, Any] = Body(default={})):
+    """
+    通知通道一键连通性巡检 (进入「系统配置」页自动触发):
+    逐个测试已启用的通知通道, 结果写入运行日志 (task_id=notify_health), 异常通道给出处理指引。
+    默认 5 分钟内复用上次结果, force=true 可强制重新巡检。
+    """
+    from ..core.notifier import test_single_channel
+
+    force = bool(data.get("force"))
+    now = time.time()
+    if not force:
+        try:
+            last = float(db.get_setting("notify_healthcheck_last_ts") or 0)
+            if now - last < 300:
+                cached = json.loads(db.get_setting("notify_healthcheck_last") or "{}")
+                if cached:
+                    return {"ok": True, "cached": True, **cached}
+        except Exception:
+            pass
+    db.set_setting("notify_healthcheck_last_ts", now)
+
+    enabled_map = [
+        ("clawbot", "微信官方 ClawBot", db.get_setting("clawbot_enabled", True)),
+        ("serverchan", "Server酱", db.get_setting("serverchan_enabled", False)),
+        ("wxpusher", "WxPusher", db.get_setting("wxpusher_enabled", False)),
+        ("wecom", "企业微信机器人", db.get_setting("wecom_enabled", False)),
+        ("dingtalk", "钉钉机器人", db.get_setting("dingtalk_enabled", False)),
+        ("feishu", "飞书机器人", db.get_setting("feishu_enabled", False)),
+        ("bark", "iOS Bark", db.get_setting("bark_enabled", False)),
+        ("telegram", "Telegram Bot", db.get_setting("telegram_enabled", False)),
+        ("qq_bot", "QQ 机器人", db.get_setting("qq_bot_enabled", False)),
+    ]
+
+    results = []
+    for chan, label, enabled in enabled_map:
+        if not enabled:
+            continue
+        try:
+            r = await test_single_channel(chan, {})
+        except Exception as e:
+            r = {"ok": False, "channel": chan, "message": str(e)}
+        results.append({
+            "channel": chan,
+            "label": label,
+            "ok": bool(r.get("ok")),
+            "message": str(r.get("message") or "")
+        })
+
+    ok_list = [x for x in results if x["ok"]]
+    bad_list = [x for x in results if not x["ok"]]
+
+    # 写入运行日志, 用户可在运行日志页看到阻塞通道与处理指引
+    t = time.strftime("%H:%M:%S")
+    lines = [f"[{t}] 通知通道连通性巡检: 已启用 {len(results)} 个 · 正常 {len(ok_list)} 个 · 异常 {len(bad_list)} 个"]
+    for x in ok_list:
+        lines.append(f"[{t}] 正常 {x['label']}: 连通成功")
+    for x in bad_list:
+        lines.append(f"[{t}] 异常 {x['label']}: {x['message'] or '连通失败'}")
+    if bad_list:
+        lines.append(f"[{t}] 处理建议: 进入「系统配置 → 通知渠道」重新校验或更新对应通道的凭据 / Webhook / 会话状态")
+    db.add_job_log(
+        f"job_notify_health_{int(now)}",
+        "",
+        "notify_health",
+        "error" if bad_list else "success",
+        "\n".join(lines)
+    )
+
+    payload = {
+        "enabled_count": len(results),
+        "ok_count": len(ok_list),
+        "failed_count": len(bad_list),
+        "results": results,
+    }
+    try:
+        db.set_setting("notify_healthcheck_last", json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+    return {"ok": True, "cached": False, **payload}
+
+
 @router.post("/settings/test-tianditu")
 async def test_tianditu_endpoint(data: Dict[str, Any] = Body(...)):
     """测试天地图 Web API 服务 Token 连通性"""
