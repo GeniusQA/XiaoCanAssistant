@@ -1424,7 +1424,7 @@ export const Accounts: React.FC = () => {
             tab={
               <span className="flex items-center gap-1.5">
                 <IconDesktop />
-                <span>电脑微信直连</span>
+                <span>PC直连</span>
               </span>
             }
             itemKey="wechat"
@@ -1524,7 +1524,7 @@ export const Accounts: React.FC = () => {
             tab={
               <span className="flex items-center gap-1.5">
                 <IconFile />
-                <span>手动粘贴导入</span>
+                <span>报文分析</span>
               </span>
             }
             itemKey="token"
@@ -1618,7 +1618,7 @@ export const Accounts: React.FC = () => {
             tab={
               <span className="flex items-center gap-1.5">
                 <IconHelpCircle />
-                <span>抓包图文指引</span>
+                <span>图文指引</span>
               </span>
             }
             itemKey="guide"
@@ -1640,7 +1640,7 @@ export const Accounts: React.FC = () => {
                 </Paragraph>
                 <div className="bg-semi-color-fill-0 rounded-lg p-2.5 text-xs text-semi-color-text-1 space-y-1">
                   <div>1. 在电脑端微信中打开一次<b>【小蚕霸王餐】</b>小程序；</div>
-                  <div>2. 返回本系统，在「电脑微信直连」标签下点击<b>「立即一键提取」</b>；</div>
+                  <div>2. 返回本系统，在「PC直连」标签下点击<b>「立即一键提取」</b>；</div>
                   <div>3. 提取成功后自动载入昵称、VIP等级及会员资产。</div>
                 </div>
               </div>
@@ -1670,7 +1670,7 @@ export const Accounts: React.FC = () => {
                     <b>3. 复制凭证：</b>选中任意请求，在 Request Headers 中找到 <code>x-Sivir</code> 或 <code>token</code> 字段并复制完整字符串；
                   </div>
                   <div>
-                    <b>4. 录入系统：</b>切换至「手动粘贴导入」标签，直接粘贴并点击保存。
+                    <b>4. 录入系统：</b>切换至「报文分析」标签，直接粘贴并点击保存。
                   </div>
                 </div>
               </div>

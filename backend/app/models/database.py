@@ -208,18 +208,6 @@ def init_db():
     )
     """)
 
-    # 7.0.1 已删除订单黑名单 (本地删除后, 防止官方「全部」列表同步时重新重建)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS hidden_orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        account_key TEXT NOT NULL,
-        order_sn TEXT NOT NULL,
-        promotion_order_id INTEGER DEFAULT 0,
-        created_at TEXT,
-        UNIQUE(account_key, order_sn)
-    )
-    """)
-
     # 7.0 抽奖机会领取记录 (当日幂等去重, 已完成的任务不再二次提交)
     c.execute("""
     CREATE TABLE IF NOT EXISTS lottery_claims (
@@ -284,9 +272,6 @@ def init_db():
         c.execute("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''")
     if "delay_used" not in cols:
         c.execute("ALTER TABLE orders ADD COLUMN delay_used INTEGER DEFAULT 0")
-    # 官方软删除标记: 官方接口返回 if_user_deleted=true 表示用户已删除该订单(官方 UI 不再展示)
-    if "if_user_deleted" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN if_user_deleted INTEGER DEFAULT 0")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -1075,12 +1060,36 @@ def deduplicate_orders() -> int:
 
 def auto_cancel_expired_orders(account_key: Optional[str] = None) -> int:
     """
-    订单状态一律以官方订单接口返回的 order_status / cancel_time 为准, 不做本地超时推断。
-    (历史版本会在这里把超时的 pending 单本地标记为 cancelled, 导致「已取消」数量与官方对不上, 已停用)
-    仅保留历史重复记录去重。
+    自动检测并批量更新所有已超时的待处理订单为已取消 (cancelled)。
+    判定规则：
+    1. status == 'pending' 且 (timeout_time > 0 且 timeout_time < 当前时间戳)
+    2. 或 status == 'pending' 且 (expire_time != '' 且 expire_time < 当前日期时间)
+    3. 或未设置 timeout_time / expire_time 但已超过 2 小时未同步且未绑定单号的待处理记录
     """
     deduplicate_orders()
-    return 0
+
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = int(time.time())
+    sql = """
+        UPDATE orders
+        SET status = 'cancelled', updated_at = :now_str
+        WHERE status = 'pending' AND (
+            (timeout_time > 0 AND timeout_time < :now_ts) OR
+            (expire_time != '' AND expire_time < :now_str) OR
+            ((timeout_time <= 0 OR timeout_time IS NULL) AND (expire_time = '' OR expire_time IS NULL) AND platform_order_id = '' AND order_time > 0 AND (:now_ts - order_time) > 7200)
+        )
+    """
+    params: Dict[str, Any] = {"now_str": now_str, "now_ts": now_ts}
+    if account_key:
+        sql += " AND account_key = :account_key"
+        params["account_key"] = account_key
+    try:
+        with get_conn() as conn:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+    except Exception:
+        return 0
 
 
 def get_orders(
@@ -1099,8 +1108,6 @@ def get_orders(
     if account_key:
         sql += " AND account_key = :account_key"
         params["account_key"] = account_key
-    # 完全以官方为准: 仅隐藏官方标记为已删除(if_user_deleted)的订单, 不使用本地黑名单
-    sql += " AND (if_user_deleted IS NULL OR if_user_deleted = 0)"
     if status and status != "all":
         sql += " AND status = :status"
         params["status"] = status
@@ -1180,7 +1187,6 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 rebate_ratio = :rebate_ratio,
                 platform_total_price = :platform_total_price,
                 remark = :remark,
-                if_user_deleted = COALESCE(:if_user_deleted, if_user_deleted),
                 updated_at = :updated_at
             WHERE id = :id
             """, {
@@ -1207,8 +1213,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "order_type": int(data.get("order_type") or 0),
                 "rebate_ratio": float(data.get("rebate_ratio") or 0),
                 "platform_total_price": float(data.get("platform_total_price") or 0),
-                "remark": data.get("remark", ""),
-                "if_user_deleted": (None if data.get("if_user_deleted") is None else int(data.get("if_user_deleted") or 0))
+                "remark": data.get("remark", "")
             })
             if promo_id > 0:
                 conn.execute(
@@ -1219,8 +1224,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return get_order_by_id(target_id)
 
         cursor = conn.execute("""
-        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, order_type, rebate_ratio, platform_total_price, remark, if_user_deleted)
-        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :order_type, :rebate_ratio, :platform_total_price, :remark, :if_user_deleted)
+        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, order_type, rebate_ratio, platform_total_price, remark)
+        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :order_type, :rebate_ratio, :platform_total_price, :remark)
         ON CONFLICT(order_sn) DO UPDATE SET
             promotion_order_id = excluded.promotion_order_id,
             platform_order_id = excluded.platform_order_id,
@@ -1241,7 +1246,6 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             rebate_ratio = excluded.rebate_ratio,
             platform_total_price = excluded.platform_total_price,
             remark = excluded.remark,
-            if_user_deleted = COALESCE(excluded.if_user_deleted, orders.if_user_deleted),
             created_at = excluded.created_at,
             updated_at = excluded.updated_at
         """, {
@@ -1269,8 +1273,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "order_type": int(data.get("order_type") or 0),
             "rebate_ratio": float(data.get("rebate_ratio") or 0),
             "platform_total_price": float(data.get("platform_total_price") or 0),
-            "remark": data.get("remark", ""),
-            "if_user_deleted": int(data.get("if_user_deleted") or 0)
+            "remark": data.get("remark", "")
         })
         conn.commit()
         last_id = cursor.lastrowid
@@ -1308,7 +1311,7 @@ def delete_order(order_id: int) -> bool:
 def get_order_stats(account_key: Optional[str] = None) -> Dict[str, Any]:
     auto_cancel_expired_orders(account_key=account_key)
     with get_conn() as conn:
-        sql = "SELECT status, order_money, rebate_money, original_user_rebate, redpack_reward_num FROM orders WHERE (if_user_deleted IS NULL OR if_user_deleted = 0)"
+        sql = "SELECT status, order_money, rebate_money, original_user_rebate, redpack_reward_num FROM orders WHERE 1=1"
         params: Dict[str, Any] = {}
         if account_key:
             sql += " AND account_key = :account_key"
@@ -1732,29 +1735,6 @@ def unbind_meituan_from_account(account_key: str) -> bool:
 # ---------------- 美团多账号槽位 (每账号最多 2 个保留槽, 与当前使用凭证合计 3 个) ----------------
 
 MEITUAN_SLOT_CAP = 2
-
-
-def hide_order(account_key: str, order_sn: str, promotion_order_id: int = 0) -> None:
-    """把订单加入已删除黑名单 (防止官方同步时重新创建该记录)"""
-    if not order_sn:
-        return
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO hidden_orders (account_key, order_sn, promotion_order_id, created_at) VALUES (?, ?, ?, ?)",
-            (account_key, order_sn, int(promotion_order_id or 0), time.strftime("%Y-%m-%d %H:%M:%S"))
-        )
-
-
-def is_order_hidden(account_key: str, order_sn: str) -> bool:
-    """判断订单是否已被用户本地删除 (黑名单命中则同步时跳过)"""
-    if not order_sn:
-        return False
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM hidden_orders WHERE account_key = ? AND order_sn = ?",
-            (account_key, order_sn)
-        ).fetchone()
-        return row is not None
 
 
 def has_lottery_claim(account_key: str, claim_type: str) -> bool:

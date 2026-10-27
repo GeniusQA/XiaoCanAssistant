@@ -186,9 +186,9 @@ export const DevicePairingPanel: React.FC = () => {
             ) : (
               <>
                 <Button theme="solid" type="primary" size="large" loading={creating} onClick={handleCreate}>
-                  生成 6 位配对码 (3 分钟有效)
+                  生成 6 位配对码 (10 分钟有效)
                 </Button>
-                <Text type="tertiary" size="small">配对码为一次性使用，3 分钟内有效，过期后可重新生成</Text>
+                <Text type="tertiary" size="small">配对码为一次性使用，10 分钟内有效，过期后可重新生成</Text>
               </>
             )}
           </div>

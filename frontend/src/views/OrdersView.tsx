@@ -660,12 +660,9 @@ export const OrdersView: React.FC = () => {
           .replace(/[（(].*?需含字含图.*?[）)]/g, '')
           .replace(/[（(]需含字含图[）)]/g, '')
           .trim() || '无需评价';
-        const label = normalizeConditionText(cleanCond);
-        // 颜色区分: 无需评价=绿色(免操作), 图文反馈=橙色(需写图文好评)
-        const color = label === '无需评价' ? 'green' : 'orange';
         return (
-          <Tag color={color} size="small">
-            {label}
+          <Tag color="grey" size="small">
+            {normalizeConditionText(cleanCond)}
           </Tag>
         );
       },

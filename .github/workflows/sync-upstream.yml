@@ -1,0 +1,70 @@
+name: Sync Upstream (检测上游更新并合并)
+
+# 每天北京时间 11:00 (UTC 03:00) 自动检测; 也可在 Actions 页手动触发
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/AkiSeele/xiaocan-assistant.git || true
+          git fetch upstream --tags || echo "::warning::上游仓库拉取失败"
+
+      - name: Check upstream updates
+        id: check
+        run: |
+          COUNT=$(git rev-list --count HEAD..upstream/main 2>/dev/null || echo 0)
+          echo "上游领先提交数: $COUNT"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+            git log HEAD..upstream/main --oneline | head -20
+          else
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "上游无新提交"
+          fi
+
+      - name: Merge upstream (冲突保留本仓库代码)
+        id: merge
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          before_tree=$(git rev-parse 'HEAD^{tree}')
+          # -X ours: 内容冲突时保留本仓库版本; 上游新增文件/非冲突改动正常合入
+          if git merge upstream/main -X ours --no-edit --allow-unrelated-histories; then
+            after_tree=$(git rev-parse 'HEAD^{tree}')
+            if [ "$before_tree" = "$after_tree" ]; then
+              # 合并后文件树无实质变化 (上游改动已被本仓库包含), 回退合并提交避免空提交噪音
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              git reset --hard 'HEAD@{1}'
+              echo "上游无实质内容变化，跳过推送"
+            else
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              git --no-pager diff --stat 'HEAD@{1}' HEAD | tail -5
+            fi
+          else
+            git merge --abort || true
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::上游合并存在无法自动解决的冲突，已中止，请手动处理"
+          fi
+
+      - name: Push
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin main
