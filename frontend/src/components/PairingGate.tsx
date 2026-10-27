@@ -12,6 +12,7 @@ export const PairingGate: React.FC = () => {
   const [code, setCode] = useState('');
   const [deviceName, setDeviceName] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
     const handler = () => setVisible(true);
@@ -20,7 +21,9 @@ export const PairingGate: React.FC = () => {
   }, []);
 
   const handleRedeem = async () => {
+    setErrorMsg('');
     if (!/^\d{6}$/.test(code.trim())) {
+      setErrorMsg('请输入 PC 端生成的 6 位数字配对码');
       Toast.warning('请输入 PC 端生成的 6 位配对码');
       return;
     }
@@ -35,10 +38,16 @@ export const PairingGate: React.FC = () => {
         // 配对成功后整页刷新, 重新拉取全部数据
         window.location.reload();
       } else {
-        Toast.error('配对失败，请确认配对码是否有效');
+        setErrorMsg('配对失败，请确认配对码是否有效');
       }
     } catch (e: any) {
-      Toast.error(e.response?.data?.detail || '配对失败，请确认配对码是否有效');
+      // 弹窗内联展示后端返回的具体原因 (手机端 Toast 长文案易被截断)
+      const detail = e.response?.data?.detail
+        || (e.code === 'ECONNABORTED' ? '请求超时，请确认手机与 PC 处于同一 WiFi 且服务正常运行'
+          : e.message === 'Network Error' ? '网络连接失败，请确认访问的是 PC 的局域网地址 (如 http://192.168.1.12:8690)'
+            : '配对失败，请确认配对码是否有效');
+      setErrorMsg(detail);
+      Toast.error(detail);
     } finally {
       setSubmitting(false);
     }
@@ -60,6 +69,14 @@ export const PairingGate: React.FC = () => {
         className="rounded-lg mb-3"
         description="本设备尚未与助手 PC 端配对。请在 PC 端「添加小蚕账号 → 设备协同」生成 6 位配对码，输入后即可同步使用全部账号、任务与配置。"
       />
+      {errorMsg && (
+        <Banner
+          type="danger"
+          closeIcon={null}
+          className="rounded-lg mb-3"
+          description={errorMsg}
+        />
+      )}
       <PairingForm
         code={code} setCode={setCode}
         deviceName={deviceName} setDeviceName={setDeviceName}

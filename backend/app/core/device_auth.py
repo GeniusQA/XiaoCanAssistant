@@ -19,8 +19,8 @@ from ..models.database import get_conn, set_setting, get_setting
 logger = logging.getLogger("xiaocan.device_auth")
 
 JWT_EXPIRE_DAYS = 30
-# 配对码有效期: 5 分钟 (给手机端输入留足时间; 一次性使用)
-PAIRING_TTL_SECONDS = 300
+# 配对码有效期: 10 分钟 (跨设备输入 + 可能的中途切换 App, 给足操作时间; 一次性使用)
+PAIRING_TTL_SECONDS = 600
 
 
 def _jwt_secret() -> str:
@@ -97,7 +97,7 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
     elif row["used"]:
         reason = "该配对码已被使用过（一次性），请在 PC 端重新生成"
     elif now - int(row["created_ts"]) > PAIRING_TTL_SECONDS:
-        reason = "配对码已过期（有效期 5 分钟），请在 PC 端重新生成"
+        reason = "配对码已过期（有效期 10 分钟），请在 PC 端重新生成"
 
     if reason:
         return (None, reason) if return_reason else None
