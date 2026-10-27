@@ -5262,6 +5262,19 @@ async def notify_healthcheck_endpoint(data: Dict[str, Any] = Body(default={})):
     ok_list = [x for x in results if x["ok"]]
     bad_list = [x for x in results if not x["ok"]]
 
+    # 巡检同时刷新 ClawBot 会话探测缓存, 使设置页「连接状态」同步更新
+    claw_res = next((x for x in results if x["channel"] == "clawbot"), None)
+    if claw_res is not None:
+        try:
+            db.set_setting("clawbot_last_probe", json.dumps({
+                "ok": claw_res["ok"],
+                "message": claw_res["message"],
+                "probed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "ts": time.time(),
+            }, ensure_ascii=False))
+        except Exception:
+            pass
+
     # 写入运行日志, 用户可在运行日志页看到阻塞通道与处理指引
     t = time.strftime("%H:%M:%S")
     lines = [f"[{t}] 通知通道连通性巡检: 已启用 {len(results)} 个 · 正常 {len(ok_list)} 个 · 异常 {len(bad_list)} 个"]
@@ -5284,6 +5297,9 @@ async def notify_healthcheck_endpoint(data: Dict[str, Any] = Body(default={})):
         "ok_count": len(ok_list),
         "failed_count": len(bad_list),
         "results": results,
+        "clawbot_session_ok": (claw_res["ok"] if claw_res is not None else None),
+        "clawbot_session_message": (claw_res["message"] if claw_res is not None else ""),
+        "probed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     try:
         db.set_setting("notify_healthcheck_last", json.dumps(payload, ensure_ascii=False))

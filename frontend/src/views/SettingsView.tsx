@@ -785,6 +785,11 @@ export const SettingsView: React.FC = () => {
   const runNotifyHealthcheck = async () => {
     try {
       const res = await api.notifyHealthcheck();
+      // 巡检完成后拉取一次权威状态 (后端已回写探测缓存), 让「连接状态」即时刷新
+      try {
+        const st = await api.getClawBotStatus((initialValues.clawbot_auth_path as string) || undefined);
+        if (st?.ready) setClawbotStatus(st as any);
+      } catch { /* ignore */ }
       if (res?.failed_count > 0) {
         const badLabels = (res.results || []).filter((r) => !r.ok).map((r) => r.label).join('、');
         Toast.warning({
