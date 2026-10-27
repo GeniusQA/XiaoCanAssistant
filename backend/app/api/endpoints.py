@@ -3524,11 +3524,13 @@ async def pairing_create():
 
 
 @router.post("/pairing/redeem")
-async def pairing_redeem(data: Dict[str, Any] = Body(...)):
+async def pairing_redeem(request: Request, data: Dict[str, Any] = Body(...)):
     """移动端提交配对码换取设备 JWT"""
     from ..core.device_auth import redeem_pairing_code
+    client_ip = request.client.host if request.client else ""
     result, reason = redeem_pairing_code(
-        str(data.get("code") or ""), str(data.get("device_name") or ""), return_reason=True
+        str(data.get("code") or ""), str(data.get("device_name") or ""),
+        return_reason=True, client_ip=client_ip
     )
     if not result:
         raise HTTPException(status_code=401, detail=reason or "配对码无效或已过期，请在 PC 端重新生成")

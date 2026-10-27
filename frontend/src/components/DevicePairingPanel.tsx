@@ -14,7 +14,7 @@ export const DevicePairingPanel: React.FC = () => {
   const [pairing, setPairing] = useState<{ code: string; expires_in: number; lan_address: string } | null>(null);
   const [remainSec, setRemainSec] = useState(0);
   const [creating, setCreating] = useState(false);
-  const [devices, setDevices] = useState<{ id: number; device_name: string; created_at: string; last_seen: string; revoked: number }[]>([]);
+  const [devices, setDevices] = useState<{ id: number; device_name: string; created_at: string; last_seen: string; ip?: string; revoked: number }[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
 
   const loadDevices = useCallback(async () => {
@@ -150,6 +150,7 @@ export const DevicePairingPanel: React.FC = () => {
                   </div>
                   <Text type="tertiary" size="small">
                     配对于 {d.created_at || '-'} · 最后活跃 {d.last_seen || '-'}
+                    {d.ip ? ` · IP ${d.ip}` : ''}
                   </Text>
                 </div>
                 {!d.revoked ? (

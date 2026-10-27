@@ -100,7 +100,7 @@ async def device_auth_middleware(request: Request, call_next):
             status_code=401,
             content={"ok": False, "detail": "设备未配对或凭证已失效，请在 PC 端生成配对码重新登录"}
         )
-    mark_device_seen(payload)
+    mark_device_seen(payload, client_host)
     request.state.device_id = payload.get("device_id")
     return await call_next(request)
 

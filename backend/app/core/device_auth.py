@@ -42,9 +42,17 @@ def ensure_device_table():
             jti TEXT NOT NULL UNIQUE,
             created_at TEXT,
             last_seen TEXT,
+            ip TEXT,
             revoked INTEGER DEFAULT 0
         )
         """)
+        # 兼容旧表: 补充 ip 列
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(paired_devices)").fetchall()]
+            if "ip" not in cols:
+                conn.execute("ALTER TABLE paired_devices ADD COLUMN ip TEXT")
+        except Exception:
+            pass
         # 配对码持久化存储 (进程重启不丢; 一次性使用)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS pairing_codes (
@@ -72,7 +80,7 @@ def create_pairing_code() -> Dict[str, Any]:
     return {"code": code, "expires_in": PAIRING_TTL_SECONDS, "created_at": now}
 
 
-def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False):
+def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False, client_ip: str = ""):
     """
     校验配对码, 签发设备 JWT 并登记设备。
     return_reason=True 时返回 (result, reason) 便于前端展示具体失败原因。
@@ -103,6 +111,7 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     jti = uuid.uuid4().hex
     name = (device_name or "").strip() or "未命名设备"
+    ip = (client_ip or "").strip()
     with get_conn() as conn:
         # 同名设备复用原记录 (吊销后重新配对 → 恢复为在线凭证, 不重复创建记录)
         existing = conn.execute(
@@ -111,13 +120,13 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
         if existing:
             dev_id = existing["id"]
             conn.execute(
-                "UPDATE paired_devices SET jti = ?, created_at = ?, last_seen = ?, revoked = 0 WHERE id = ?",
-                (jti, now, now, dev_id)
+                "UPDATE paired_devices SET jti = ?, created_at = ?, last_seen = ?, ip = ?, revoked = 0 WHERE id = ?",
+                (jti, now, now, ip, dev_id)
             )
         else:
             conn.execute(
-                "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, revoked) VALUES (?, ?, ?, ?, 0)",
-                (name, jti, now, now)
+                "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, ip, revoked) VALUES (?, ?, ?, ?, ?, 0)",
+                (name, jti, now, now, ip)
             )
             dev_id = conn.execute("SELECT id FROM paired_devices WHERE jti = ?", (jti,)).fetchone()["id"]
         conn.commit()
@@ -153,8 +162,8 @@ def verify_device_token(token: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def mark_device_seen(payload: Dict[str, Any]):
-    """节流更新设备最后活跃时间 (每设备每 60 秒最多写一次)"""
+def mark_device_seen(payload: Dict[str, Any], client_ip: str = ""):
+    """节流更新设备最后活跃时间与 IP (每设备每 60 秒最多写一次)"""
     device_id = payload.get("device_id")
     if not device_id:
         return
@@ -166,10 +175,16 @@ def mark_device_seen(payload: Dict[str, Any]):
     globals()[cache_key] = now
     try:
         with get_conn() as conn:
-            conn.execute(
-                "UPDATE paired_devices SET last_seen = ? WHERE id = ?",
-                (time.strftime("%Y-%m-%d %H:%M:%S"), device_id)
-            )
+            if client_ip:
+                conn.execute(
+                    "UPDATE paired_devices SET last_seen = ?, ip = ? WHERE id = ?",
+                    (time.strftime("%Y-%m-%d %H:%M:%S"), client_ip, device_id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE paired_devices SET last_seen = ? WHERE id = ?",
+                    (time.strftime("%Y-%m-%d %H:%M:%S"), device_id)
+                )
             conn.commit()
     except Exception:
         pass
@@ -180,7 +195,7 @@ def list_devices() -> list:
     with get_conn() as conn:
         conn.row_factory = __import__("sqlite3").Row
         rows = conn.execute(
-            "SELECT id, device_name, created_at, last_seen, revoked FROM paired_devices ORDER BY id DESC"
+            "SELECT id, device_name, created_at, last_seen, ip, revoked FROM paired_devices ORDER BY id DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
