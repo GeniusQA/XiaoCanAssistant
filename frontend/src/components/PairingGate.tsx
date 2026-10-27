@@ -12,12 +12,17 @@ export const PairingGate: React.FC = () => {
   const [code, setCode] = useState('');
   const [deviceName, setDeviceName] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent)?.detail;
-      setErrorMsg(typeof detail === 'string' ? detail : '设备未配对或凭证已失效，请在 PC 端生成配对码重新登录');
+      // 直接以 Toast 弹出后端返回的具体原因
+      Toast.error({
+        content: typeof detail === 'string' && detail
+          ? detail
+          : '设备未配对或凭证已失效，请在 PC 端生成配对码重新登录',
+        duration: 6,
+      });
       setVisible(true);
     };
     window.addEventListener('xc-pairing-required', handler);
@@ -25,10 +30,8 @@ export const PairingGate: React.FC = () => {
   }, []);
 
   const handleRedeem = async () => {
-    setErrorMsg('');
     if (!/^\d{6}$/.test(code.trim())) {
-      setErrorMsg('请输入 PC 端生成的 6 位数字配对码');
-      Toast.warning('请输入 PC 端生成的 6 位配对码');
+      Toast.warning({ content: '请输入 PC 端生成的 6 位数字配对码', duration: 4 });
       return;
     }
     setSubmitting(true);
@@ -42,7 +45,7 @@ export const PairingGate: React.FC = () => {
         // 配对成功后整页刷新, 重新拉取全部数据
         window.location.reload();
       } else {
-        setErrorMsg('配对失败，请确认配对码是否有效');
+        Toast.error({ content: '配对失败，请确认配对码是否有效', duration: 6 });
       }
     } catch (e: any) {
       // 后端 detail 可能是字符串 (业务错误) 或数组/对象 (FastAPI 422 校验错误), 需归一化为文本
@@ -66,8 +69,7 @@ export const PairingGate: React.FC = () => {
             ? '网络连接失败，请确认访问的是 PC 的局域网地址 (如 http://192.168.1.12:8690)'
             : '配对失败，请确认配对码是否有效';
       }
-      setErrorMsg(detail);
-      Toast.error(detail);
+      Toast.error({ content: detail, duration: 6 });
     } finally {
       setSubmitting(false);
     }
@@ -89,14 +91,6 @@ export const PairingGate: React.FC = () => {
         className="rounded-lg mb-3"
         description="本设备尚未与助手 PC 端配对。请在 PC 端「添加小蚕账号 → 设备协同」生成 6 位配对码，输入后即可同步使用全部账号、任务与配置。"
       />
-      {errorMsg && (
-        <Banner
-          type="danger"
-          closeIcon={null}
-          className="rounded-lg mb-3"
-          description={errorMsg}
-        />
-      )}
       <PairingForm
         code={code} setCode={setCode}
         deviceName={deviceName} setDeviceName={setDeviceName}
