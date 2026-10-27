@@ -77,3 +77,10 @@ Thumbs.db
 .cursor/
 .gemini/
 .trae/
+/start.sh
+/stop.sh
+/backup.sh
+/rollback.sh
+/healthcheck.sh
+/update.sh
+/watchdog.sh

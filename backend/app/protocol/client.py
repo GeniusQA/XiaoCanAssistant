@@ -1021,7 +1021,8 @@ class XiaoCanClient:
         """获取天天赚元宝签到历史记录与连续签到天数 (ActivityTaskMobileService.SignInHistory)"""
         body = {
             "silk_id": int(silk_id) if silk_id else 0,
-            "app_id": 10
+            "user_id": int(user_id) if user_id else 0,
+        "app_id": 10
         }
         return await self.invoke_rpc(
             server_name="ActivityTask",
