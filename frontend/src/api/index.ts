@@ -37,6 +37,21 @@ client.interceptors.request.use((config) => {
   return config;
 });
 
+/**
+ * 设备凭证失效时清理本机残留数据:
+ * 吊销/失效后, 本机浏览器缓存中的账号列表、抢单位置等副本不应继续留存, 统一清除。
+ * (重配对后账号由服务端重新下发, 位置从服务端同步拉回, 无数据损失)
+ */
+const clearLocalDeviceData = () => {
+  try {
+    localStorage.removeItem(DEVICE_JWT_KEY);
+    localStorage.removeItem('xiaocan_cached_accounts');
+    localStorage.removeItem('xiaocan_current_account_key');
+    localStorage.removeItem('xiaocan_active_location');
+    localStorage.removeItem('xiaocan_location_history');
+  } catch { /* ignore */ }
+};
+
 // 全局响应拦截器：统一网络异常与安全兜底
 client.interceptors.response.use(
   (response) => response,
@@ -44,8 +59,9 @@ client.interceptors.response.use(
     if (axios.isCancel(error)) {
       return Promise.reject(error);
     }
-    // 远程设备凭证失效 → 触发全局配对门
+    // 设备凭证失效 (被吊销/过期) → 清理本机缓存并触发全局配对门
     if (error.response?.status === 401 && typeof window !== 'undefined') {
+      clearLocalDeviceData();
       window.dispatchEvent(new CustomEvent('xc-pairing-required'));
     }
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
