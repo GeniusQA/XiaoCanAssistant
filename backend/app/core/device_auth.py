@@ -116,23 +116,33 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
     expires_ts = now_ts + JWT_EXPIRE_DAYS * 86400
     expires_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_ts))
     jti = uuid.uuid4().hex
-    name = (device_name or "").strip() or "未命名设备"
+    raw_name = (device_name or "").strip()
     ip = (client_ip or "").strip()
     with get_conn() as conn:
-        # 同名设备复用原记录 (吊销/过期后重新配对 → 恢复为在线凭证, 不重复创建记录)
-        existing = conn.execute(
-            "SELECT id FROM paired_devices WHERE device_name = ? ORDER BY id DESC LIMIT 1", (name,)
-        ).fetchone()
+        # 复用原记录: 优先同名, 其次同 IP (同一局域网设备; 名称可能被改过或留空, IP 更稳定)
+        existing = None
+        if raw_name:
+            existing = conn.execute(
+                "SELECT id, device_name FROM paired_devices WHERE device_name = ? ORDER BY id DESC LIMIT 1", (raw_name,)
+            ).fetchone()
+        if not existing and ip and ip not in ("127.0.0.1", "::1"):
+            existing = conn.execute(
+                "SELECT id, device_name FROM paired_devices WHERE ip = ? ORDER BY id DESC LIMIT 1", (ip,)
+            ).fetchone()
+
         if existing:
             dev_id = existing["id"]
+            # 本次未填名称 → 保留用户此前编辑过的名称, 不覆盖为"未命名设备"
+            final_name = raw_name or existing["device_name"] or "未命名设备"
             conn.execute(
-                "UPDATE paired_devices SET jti = ?, created_at = ?, last_seen = ?, ip = ?, expires_at = ?, revoked = 0 WHERE id = ?",
-                (jti, now, now, ip, expires_at, dev_id)
+                "UPDATE paired_devices SET device_name = ?, jti = ?, created_at = ?, last_seen = ?, ip = ?, expires_at = ?, revoked = 0 WHERE id = ?",
+                (final_name, jti, now, now, ip or None, expires_at, dev_id)
             )
         else:
+            final_name = raw_name or "未命名设备"
             conn.execute(
                 "INSERT INTO paired_devices (device_name, jti, created_at, last_seen, ip, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (name, jti, now, now, ip, expires_at)
+                (final_name, jti, now, now, ip or None, expires_at)
             )
             dev_id = conn.execute("SELECT id FROM paired_devices WHERE jti = ?", (jti,)).fetchone()["id"]
         conn.commit()
@@ -143,7 +153,7 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
         {
             "jti": jti,
             "device_id": dev_id,
-            "device_name": name,
+            "device_name": final_name,
             "iat": int(now_ts),
             "exp": int(expires_ts),
         },
@@ -153,7 +163,7 @@ def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False
     result = {
         "token": token,
         "device_id": dev_id,
-        "device_name": name,
+        "device_name": final_name,
         "expires_days": JWT_EXPIRE_DAYS,
         "expires_at": expires_at,
     }
