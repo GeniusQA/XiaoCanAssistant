@@ -1,4 +1,4 @@
-name: Sync Upstream (检测上游更新并合并)
+name: Sync Upstream
 
 # 每天北京时间 11:00 (UTC 03:00) 自动检测; 也可在 Actions 页手动触发
 on:
