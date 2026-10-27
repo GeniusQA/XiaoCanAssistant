@@ -66,6 +66,7 @@ import {
 import { useAppStore } from '../store/useAppStore';
 import { api } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
+import { copyText } from '../utils/clipboard';
 import { DevicePairingPanel } from '../components/DevicePairingPanel';
 import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode, ClawBotStatus, MeituanSlot, MediaVipRecord } from '../types';
 
@@ -466,10 +467,10 @@ export const Accounts: React.FC = () => {
   };
 
   const copyCdkToClipboard = async (cdk: string) => {
-    try {
-      await navigator.clipboard.writeText(cdk);
+    const ok = await copyText(cdk);
+    if (ok) {
       Toast.success('兑换码已复制，请前往网易云音乐 App 或官网兑换');
-    } catch {
+    } else {
       Toast.error('复制失败，请手动选择复制');
     }
   };
@@ -733,9 +734,10 @@ export const Accounts: React.FC = () => {
   };
 
   // 复制 Token
-  const handleCopyToken = (token: string) => {
-    navigator.clipboard.writeText(token);
-    Toast.success('Token 已复制到剪贴板');
+  const handleCopyToken = async (token: string) => {
+    const ok = await copyText(token);
+    if (ok) Toast.success('Token 已复制到剪贴板');
+    else Toast.error('复制失败，请手动选择复制');
   };
 
   const stopMeituanPolling = () => {

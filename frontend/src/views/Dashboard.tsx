@@ -44,6 +44,7 @@ import { api } from '../api';
 import { TaskIcon } from '../components/TaskIcons';
 import { LogDetailModal } from '../components/LogDetailModal';
 import { useGSAP, animateStaggerEnter, gsap } from '../utils/animations';
+import { copyText } from '../utils/clipboard';
 import { useOnActivated } from '../utils/useOnActivated';
 import type { JobLog, StoreAppointment, OrderStats, DashboardChartData, XiaoCanMessage, XiaoCanMessageChannel, Order, TaskItem } from '../types';
 
@@ -699,9 +700,10 @@ export const Dashboard: React.FC = () => {
   };
 
   // 复制文本辅助
-  const handleCopy = (text: string, label: string = '文本') => {
-    navigator.clipboard.writeText(text);
-    Toast.success(`${label}已成功复制到剪贴板`);
+  const handleCopy = async (text: string, label: string = '文本') => {
+    const ok = await copyText(text);
+    if (ok) Toast.success(`${label}已成功复制到剪贴板`);
+    else Toast.error('复制失败，请手动选择复制');
   };
 
   return (
@@ -1024,11 +1026,12 @@ export const Dashboard: React.FC = () => {
                             <Tooltip content={`点击复制: ${cleanEmoji(order.store_name)}`} position="top" showArrow>
                               <span
                                 className="font-bold text-sm text-semi-color-text-0 truncate max-w-[200px] cursor-pointer hover:text-semi-color-primary transition-colors"
-                                onClick={() => {
+                                onClick={async () => {
                                   const sname = cleanEmoji(order.store_name);
                                   if (sname) {
-                                    navigator.clipboard.writeText(sname);
-                                    Toast.success(`已复制店铺名称: ${sname}`);
+                                    const ok = await copyText(sname);
+                                    if (ok) Toast.success(`已复制店铺名称: ${sname}`);
+                                    else Toast.error('复制失败，请手动选择复制');
                                   }
                                 }}
                               >

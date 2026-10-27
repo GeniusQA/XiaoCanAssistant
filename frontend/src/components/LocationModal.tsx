@@ -57,6 +57,12 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
   const [resolving, setResolving] = useState<boolean>(false);
   const [locating, setLocating] = useState<boolean>(false);
 
+  // 浏览器定位仅在安全上下文 (HTTPS 或 localhost) 可用; 手机通过局域网 http 访问时按钮直接隐藏
+  const geoAvailable = typeof window !== 'undefined'
+    && window.isSecureContext
+    && typeof navigator !== 'undefined'
+    && !!navigator.geolocation;
+
   // 搜索关键词与浮层下拉状态
   const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [searching, setSearching] = useState<boolean>(false);
@@ -315,17 +321,19 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
                   {resolvedCityName ? formatCityTag(resolvedCityName) : '未设置'}
                 </Tag>
               </Space>
-              <Button
-                theme="solid"
-                type="primary"
-                icon={<IconDesktop />}
-                loading={locating}
-                onClick={handleGetDeviceLocation}
-                onMouseDown={(e) => e.preventDefault()}
-                size="small"
-              >
-                获取本机定位
-              </Button>
+              {geoAvailable && (
+                <Button
+                  theme="solid"
+                  type="primary"
+                  icon={<IconDesktop />}
+                  loading={locating}
+                  onClick={handleGetDeviceLocation}
+                  onMouseDown={(e) => e.preventDefault()}
+                  size="small"
+                >
+                  获取本机定位
+                </Button>
+              )}
             </div>
           }
           headerStyle={{ padding: '10px 14px 6px', borderBottom: 'none' }}
@@ -333,7 +341,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
           style={{ backgroundColor: 'var(--semi-color-fill-0)', borderRadius: 'var(--semi-border-radius-medium)' }}
         >
           <Typography.Title heading={6} ellipsis={{ showTooltip: true }} style={{ margin: '0 0 4px' }}>
-            {resolvedAddress || '未获取位置，请点击右上角「获取本机定位」或在下方搜索地址'}
+            {resolvedAddress || (geoAvailable
+              ? '未获取位置，请点击右上角「获取本机定位」或在下方搜索地址'
+              : '未获取位置，请直接在下方搜索地址')}
           </Typography.Title>
           <Typography.Text code size="small" type="secondary">
             {editLng && editLat ? `坐标: ${editLng}, ${editLat}` : '经纬度未配置'}
