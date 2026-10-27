@@ -83,6 +83,18 @@ def create_pairing_code() -> Dict[str, Any]:
     return {"code": code, "expires_in": PAIRING_TTL_SECONDS, "created_at": now}
 
 
+def get_pairing_code_status(code: str) -> Dict[str, Any]:
+    """查询配对码当前状态 (PC 端用于配对成功后立即遮罩失效)"""
+    ensure_device_table()
+    code = str(code or "").strip()
+    with get_conn() as conn:
+        row = conn.execute("SELECT created_ts, used FROM pairing_codes WHERE code = ?", (code,)).fetchone()
+    if not row:
+        return {"exists": False, "used": False, "expired": True}
+    expired = int(time.time()) - int(row["created_ts"]) > PAIRING_TTL_SECONDS
+    return {"exists": True, "used": bool(row["used"]), "expired": expired}
+
+
 def redeem_pairing_code(code: str, device_name: str, return_reason: bool = False, client_ip: str = ""):
     """
     校验配对码, 签发设备 JWT 并登记设备。

@@ -22,6 +22,8 @@ const isExpired = (expiresAt?: string): boolean => {
 export const DevicePairingPanel: React.FC = () => {
   const [pairing, setPairing] = useState<{ code: string; expires_in: number; lan_address: string } | null>(null);
   const [remainSec, setRemainSec] = useState(0);
+  // 配对码是否已被使用 (配对成功后遮罩失效, 避免继续对外展示有效数字)
+  const [pairingUsed, setPairingUsed] = useState(false);
   const [creating, setCreating] = useState(false);
   const [devices, setDevices] = useState<{ id: number; device_name: string; created_at: string; last_seen: string; ip?: string; expires_at?: string; revoked: number }[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
@@ -35,6 +37,15 @@ export const DevicePairingPanel: React.FC = () => {
     try {
       const res = await api.getPairingDevices();
       setDevices(res.devices || []);
+      // 顺带核对当前配对码是否已被使用 (手机配对成功后立即遮罩失效)
+      setPairing((cur) => {
+        if (cur?.code) {
+          api.getPairingCodeStatus(cur.code).then((st) => {
+            if (st?.used) setPairingUsed(true);
+          }).catch(() => {});
+        }
+        return cur;
+      });
     } catch { /* ignore */ } finally {
       setDevicesLoading(false);
     }
@@ -45,6 +56,7 @@ export const DevicePairingPanel: React.FC = () => {
     try {
       const res = await api.createPairing();
       setPairing(res);
+      setPairingUsed(false);
       setRemainSec(res.expires_in);
     } catch (e: any) {
       Toast.error(e.response?.data?.detail || '生成配对码失败');
@@ -129,7 +141,7 @@ export const DevicePairingPanel: React.FC = () => {
       <div className="border border-semi-color-border rounded-xl p-4 bg-semi-color-bg-0">
         <div className="flex items-center justify-between mb-2">
           <Text strong className="text-[14px]">生成配对码</Text>
-          {pairing && remainSec > 0 && (
+          {pairing && remainSec > 0 && !pairingUsed && (
             <div className="flex items-center gap-2">
               <Tag color="amber" size="small" shape="square" className="font-mono">
                 有效期 {mm}:{ss}
@@ -148,12 +160,37 @@ export const DevicePairingPanel: React.FC = () => {
           )}
         </div>
 
-        {!pairing || remainSec <= 0 ? (
+        {!pairing || remainSec <= 0 || pairingUsed ? (
           <div className="flex flex-col items-center gap-2 py-3">
-            <Button theme="solid" type="primary" size="large" loading={creating} onClick={handleCreate}>
-              生成 6 位配对码 (10 分钟有效)
-            </Button>
-            <Text type="tertiary" size="small">配对码为一次性使用，10 分钟内有效，过期后可重新生成</Text>
+            {pairingUsed ? (
+              <div className="flex flex-col items-center gap-2 py-2">
+                <div className="relative">
+                  {/* 码被遮罩, 不对外展示 */}
+                  <div
+                    className="font-mono font-bold text-semi-color-text-2 tracking-[0.3em] select-none blur-[6px]"
+                    style={{ fontSize: 42, lineHeight: 1.2 }}
+                  >
+                    {pairing?.code}
+                  </div>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <Tag color="grey" size="large" shape="square" className="font-semibold">
+                      该配对码已被使用，已失效
+                    </Tag>
+                  </div>
+                </div>
+                <Text type="tertiary" size="small">一台设备使用后配对码即失效，如需继续配对请重新生成</Text>
+                <Button theme="solid" type="primary" size="large" loading={creating} onClick={handleCreate}>
+                  重新生成配对码
+                </Button>
+              </div>
+            ) : (
+              <>
+                <Button theme="solid" type="primary" size="large" loading={creating} onClick={handleCreate}>
+                  生成 6 位配对码 (10 分钟有效)
+                </Button>
+                <Text type="tertiary" size="small">配对码为一次性使用，10 分钟内有效，过期后可重新生成</Text>
+              </>
+            )}
           </div>
         ) : (
           <div className="flex flex-col items-center gap-2 py-2">
