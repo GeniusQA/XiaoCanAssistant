@@ -59,10 +59,12 @@ client.interceptors.response.use(
     if (axios.isCancel(error)) {
       return Promise.reject(error);
     }
-    // 设备凭证失效 (被吊销/过期) → 清理本机缓存并触发全局配对门
+    // 设备凭证失效 (被吊销/过期) → 清理本机缓存并触发全局配对门 (携带后端原因供弹窗展示)
     if (error.response?.status === 401 && typeof window !== 'undefined') {
       clearLocalDeviceData();
-      window.dispatchEvent(new CustomEvent('xc-pairing-required'));
+      window.dispatchEvent(new CustomEvent('xc-pairing-required', {
+        detail: error.response?.data?.detail || '设备未配对或凭证已失效，请在 PC 端生成配对码重新登录'
+      }));
     }
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
       Toast.error('请求超时，请检查后端服务是否正常响应');

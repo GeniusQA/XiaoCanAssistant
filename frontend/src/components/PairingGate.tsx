@@ -15,7 +15,11 @@ export const PairingGate: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
-    const handler = () => setVisible(true);
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      setErrorMsg(typeof detail === 'string' ? detail : '设备未配对或凭证已失效，请在 PC 端生成配对码重新登录');
+      setVisible(true);
+    };
     window.addEventListener('xc-pairing-required', handler);
     return () => window.removeEventListener('xc-pairing-required', handler);
   }, []);
