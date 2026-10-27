@@ -503,6 +503,21 @@ export const Accounts: React.FC = () => {
     return Array.from(map.values());
   }, [detailData?.cards]);
 
+  // 设备协同 Tab (移动端放在首位替代电脑微信直连; PC 本机时保持在末尾)
+  const devicePairingTab = (
+    <TabPane
+      tab={
+        <span className="flex items-center gap-1.5">
+          <IconSmartphoneStroked />
+          <span>设备协同</span>
+        </span>
+      }
+      itemKey="device_pairing"
+    >
+      <DevicePairingPanel />
+    </TabPane>
+  );
+
   const handleOpenModal = () => {
     setModalVisible(true);
     // 远程设备 (手机等) 无法唤起电脑微信抓取凭据 → 默认进入设备协同
@@ -1400,7 +1415,10 @@ export const Accounts: React.FC = () => {
         }}
       >
         <Tabs activeKey={activeTab} onChange={(k) => handleTabChange(String(k))}>
-          {/* TAB 1: 电脑微信直连 (免配置·首选) */}
+          {/* 移动端: 设备协同置于首位 (手机无法唤起电脑微信抓取凭据) */}
+          {!IS_LOCAL_HOST && devicePairingTab}
+
+          {/* TAB 1: 电脑微信直连 (免配置·首选, 仅 PC 本机可用) */}
         {IS_LOCAL_HOST && (
           <TabPane
             tab={
@@ -1693,18 +1711,8 @@ export const Accounts: React.FC = () => {
             </div>
           </TabPane>
 
-          {/* TAB 4: 设备协同 (移动端配对) */}
-          <TabPane
-            tab={
-              <span className="flex items-center gap-1.5">
-                <IconSmartphoneStroked />
-                <span>设备协同</span>
-              </span>
-            }
-            itemKey="device_pairing"
-          >
-            <DevicePairingPanel />
-          </TabPane>
+          {/* TAB 4: 设备协同 (PC 本机时置于末尾; 移动端已置于首位) */}
+          {IS_LOCAL_HOST && devicePairingTab}
         </Tabs>
       </Modal>
 
