@@ -1366,9 +1366,16 @@ def _build_daily_inspection_report(account_key: str) -> tuple:
     - 免费开红包输出真实抽奖次数
     """
     acc = db.get_account_by_key(account_key) or {}
-    # 昵称可能是空或不可见字符, 兜底用手机号 / 账号标识
-    raw_nick = str(acc.get("nickname") or "").replace("\u00a0", " ").replace("\u200b", "").strip()
-    nick = raw_nick or str(acc.get("phone") or "").strip() or account_key
+    # 标题后缀优先展示小蚕账号昵称; 昵称为空/不可见字符时退化为脱敏手机号; 再不行用账号标识
+    def _clean(s: str) -> str:
+        return str(s or "").replace("\u00a0", " ").replace("\u200b", "").strip()
+    nick = _clean(acc.get("nickname")) or _clean(acc.get("account_name")) or _clean(acc.get("meituan_nickname"))
+    if not nick:
+        phone = _clean(acc.get("phone"))
+        # 防御: 若手机号未脱敏则现场脱敏, 避免直接暴露完整号码
+        if phone and "*" not in phone and len(phone) >= 7:
+            phone = phone[:3] + "****" + phone[-4:]
+        nick = phone or account_key
     today = datetime.now().strftime("%Y-%m-%d")
 
     lines = []
@@ -5184,7 +5191,28 @@ def _extract_job_result_summary(status: str, output: str) -> str:
     3. 兜底按调度状态返回 执行成功/执行失败。
     """
     lines = [l.strip() for l in (output or "").splitlines() if l.strip()]
-    fail_keywords = ["未抢到", "领取上限", "兑换失败", "抢券失败", "领取失败", "抢券未成功", "提现失败", "执行异常", "未找到符合条件的", "全部401", "自动提现失败", "WAF", "熔断", "403", "拦截"]
+
+    # 调度状态失败: 优先从文本提取具体失败原因 (取冒号后的内容, 跳过末尾汇总行), 不允许兜底为"处理完毕"
+    if status in ("error", "failed"):
+        for line in reversed(lines):
+            if "执行结果判定为失败" in line:
+                continue  # 跳过末尾汇总行, 定位更具体的业务失败原因
+            for kw in ("失败", "异常", "错误", "超时", "超限", "拒绝"):
+                if kw in line:
+                    # 取关键词之后的冒号后内容 (避免命中时间戳里的冒号)
+                    after = line[line.find(kw) + len(kw):]
+                    m = re.match(r"\s*[：:]\s*(.+)$", after)
+                    if m and len(m.group(1).strip()) > 6:
+                        detail = m.group(1).strip()
+                        # 长原因优先截取主体部分 (去掉尾部补充说明的括号)
+                        if len(detail) > 40:
+                            main = detail.split("（")[0].split("(")[0].strip()
+                            detail = main if len(main) >= 8 else detail[:40]
+                        return detail
+                    return _shorten(line, kw)
+        return "执行失败"
+
+    fail_keywords = ["未抢到", "领取上限", "兑换失败", "抢券失败", "领取失败", "领取异常", "抢券未成功", "提现失败", "执行异常", "未找到符合条件的", "全部401", "自动提现失败", "WAF", "熔断", "403", "拦截"]
     # 部分完成 / 留有未达成目标: 调度成功但业务未完全达成, 不能显示"处理完毕"
     partial_keywords = ["未完成", "还差", "未补齐", "待补齐", "未能领取", "未达标"]
     ok_keywords = ["兑换成功", "抢券成功", "领券成功", "斩获", "提现成功", "已启动", "已完成", "今日无在架商品", "处理完毕"]
@@ -5214,14 +5242,6 @@ def _extract_job_result_summary(status: str, output: str) -> str:
                 if core.startswith("["):
                     return core
                 return "未完成" if kw == "未完成" else f"未完成: {kw}"
-
-    # 调度状态失败时, 不允许兜底为"处理完毕"等成功文案: 优先从文本提取失败原因, 否则统一"执行失败"
-    if status in ("error", "failed"):
-        for line in reversed(lines):
-            for kw in ("失败", "异常", "错误", "超时", "超限", "拒绝"):
-                if kw in line:
-                    return _shorten(line, kw)
-        return "执行失败"
 
     for line in reversed(lines):
         for kw in ok_keywords:

@@ -451,13 +451,22 @@ async def send_message(
     text = f"【小蚕助手】{title}\n\n{content}"
     client_id = f"openclaw-weixin-{uuid.uuid4().hex}"
 
+    # iLink 单条 text_item 在微信端会把 \n 折叠为空格, 导致多项挤在一行。
+    # 按行拆成多条 text_item, 保证逐项独立成行 (空行保留为段落间距)。
+    item_list: list = []
+    for ln in text.split("\n"):
+        # 空行用单个空格占位: 保留标题与正文间的段落间距, 同时避免发送空字符串被 iLink 拒绝
+        item_list.append({"type": 1, "text_item": {"text": ln if ln != "" else " "}})
+    if not item_list:
+        item_list = [{"type": 1, "text_item": {"text": text}}]
+
     msg_body: Dict[str, Any] = {
         "from_user_id": "",
         "to_user_id": user_id,
         "client_id": client_id,
         "message_type": 2,
         "message_state": 2,
-        "item_list": [{"type": 1, "text_item": {"text": text}}]
+        "item_list": item_list
     }
     if context_token:
         msg_body["context_token"] = context_token
