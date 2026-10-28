@@ -148,6 +148,11 @@ export const OrdersView: React.FC = () => {
     return { threshold, rebate, shoudao, subsidy, symbol };
   };
   const [platformOrderIdInput, setPlatformOrderIdInput] = useState<string>('');
+  // 订单分页大小 (记忆用户选择, 默认20; 未受控时刷新数据会被默认值打回)
+  const [ordersPageSize, setOrdersPageSize] = useState<number>(() => {
+    try { const v = Number(localStorage.getItem('orders_page_size')); return [10, 20, 50, 100].includes(v) ? v : 20; } catch { return 20; }
+  });
+  const [currentOrderPage, setCurrentOrderPage] = useState<number>(1);
   // 订单删除 (仅已完成/已取消, 走官方接口)
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [deletingOrders, setDeletingOrders] = useState(false);
@@ -1018,9 +1023,17 @@ export const OrdersView: React.FC = () => {
             }
             loading={loading}
             pagination={{
-              pageSize: 20,
+              pageSize: ordersPageSize,
+              currentPage: currentOrderPage,
               showSizeChanger: true,
               pageSizeOpts: [10, 20, 50, 100],
+              onPageChange: (page: number) => setCurrentOrderPage(page),
+              onChange: (_page: number, pageSize: number) => {
+                // 分页大小切换后回到第1页并记忆用户选择, 避免刷新数据后被默认值20打回
+                setOrdersPageSize(pageSize);
+                setCurrentOrderPage(1);
+                try { localStorage.setItem('orders_page_size', String(pageSize)); } catch { /* ignore */ }
+              },
             }}
             scroll={{ y: tableScrollY, x: 1000 }}
             size="middle"
