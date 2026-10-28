@@ -1308,6 +1308,224 @@ async def batch_run_daily_tasks(data: Optional[Dict[str, Any]] = Body(None)):
     }
 
 
+# ── 日常巡检报告 (手动测试通知) ──────────────────────────────────────
+
+_DAILY_INSPECT_TASKS = [
+    ("yb_sign", "元宝签到"),
+    ("yb_task", "元宝任务"),
+    ("vip_expand", "会员签到抽奖"),
+    ("group_lottery", "免费开红包"),
+    ("redpack_rain", "红包雨"),
+    ("collect_points", "收取待领元宝"),
+    ("flash_sale", "元宝秒杀"),
+]
+
+
+def _daily_item_result(tid: str, status: str, output: str) -> str:
+    """从任务日志中提取单行结果文案 (优先业务语义, 兜底走通用摘要)"""
+    txt = output or ""
+    if tid == "yb_sign":
+        m = re.search(r"每日签到:\s*([^\n]+)", txt)
+        if m:
+            seg = m.group(1).split("(")[0].strip()
+            if seg:
+                return seg
+    if tid == "vip_expand":
+        m = re.search(r"VIP专属每日签到抽奖:\s*([^\n]+)", txt)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r"会员签到打卡:\s*([^\n]+)", txt)
+        if m:
+            return m.group(1).strip()
+    if tid == "redpack_rain":
+        if "暂无生效" in txt:
+            return "今日无可参与场次"
+        m = re.search(r"场次\s*#?(\d+)", txt)
+        if m:
+            return f"已接入场次 #{m.group(1)}"
+    if tid == "collect_points":
+        m = re.search(r"成功入账\s*\+(\d+)\s*元宝", txt)
+        if m:
+            return f"成功入账 +{m.group(1)} 元宝"
+        if "无待收取" in txt:
+            return "无可收取元宝"
+    if tid == "flash_sale":
+        if "暂无在架商品" in txt or "无在架" in txt:
+            return "今日无在架商品"
+        if "抢券成功" in txt:
+            return "抢券成功"
+    return _extract_job_result_summary(status, txt)
+
+
+def _build_daily_inspection_report(account_key: str) -> tuple:
+    """
+    生成「日常巡检」报告 (标题, 正文):
+    - 不含「成功 N 项」统计行
+    - 每个子项只输出一行 (成功/失败不重复)
+    - 元宝任务使用官方任务全名 (元宝任务·加入官方社群 等)
+    - 免费开红包输出真实抽奖次数
+    """
+    acc = db.get_account_by_key(account_key) or {}
+    # 昵称可能是空或不可见字符, 兜底用手机号 / 账号标识
+    raw_nick = str(acc.get("nickname") or "").replace("\u00a0", " ").replace("\u200b", "").strip()
+    nick = raw_nick or str(acc.get("phone") or "").strip() or account_key
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    lines = []
+    for tid, label in _DAILY_INSPECT_TASKS:
+        # 取该任务今日最近一条日志; 今日无记录则回退最近一次历史执行 (便于测试时查看格式)
+        row = None
+        try:
+            with db.get_conn() as conn:
+                conn.row_factory = __import__("sqlite3").Row
+                r = conn.execute(
+                    "SELECT status, output, created_at FROM job_logs WHERE task_id = ? AND created_at LIKE ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (tid, f"{today}%")
+                ).fetchone()
+                if not r:
+                    r = conn.execute(
+                        "SELECT status, output, created_at FROM job_logs WHERE task_id = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (tid,)
+                    ).fetchone()
+                row = dict(r) if r else None
+        except Exception:
+            row = None
+
+        if not row:
+            lines.append(f"{label}: 今日未执行")
+            continue
+
+        status_txt = str(row.get("status") or "")
+        output = str(row.get("output") or "")
+
+        if tid == "group_lottery":
+            # 抽奖次数口径 (官方今日机会额度)
+            m = re.search(r"今日机会额度\s*(\d+)\s*次", output)
+            if m:
+                lines.append(f"{label}: 抽奖机会 {m.group(1)} 次")
+            else:
+                lines.append(f"{label}: {_daily_item_result(tid, status_txt, output)}")
+            continue
+
+        if tid == "yb_task":
+            # 元宝任务逐项展开为官方任务全名 (只保留一条结果)
+            found = False
+            for tname, ok_word in (
+                ("加入官方社群", None), ("抖音电商浏览30s", None), ("天天赚元宝打卡", None),
+            ):
+                pat = re.compile(rf"任务\s*\[{re.escape(tname)}\][^\n]*")
+                hit = pat.search(output)
+                if not hit:
+                    continue
+                seg = hit.group(0)
+                if "成功" in seg or "斩获" in seg:
+                    res = "成功"
+                elif "已完成" in seg:
+                    res = "今日已完成"
+                else:
+                    res = _extract_job_result_summary("error", seg)
+                lines.append(f"{label}·{tname}: {res}")
+                found = True
+            if not found:
+                lines.append(f"{label}: {_daily_item_result(tid, status_txt, output)}")
+            continue
+
+        lines.append(f"{label}: {_daily_item_result(tid, status_txt, output)}")
+
+    title = f"小蚕—日常巡检—{nick}"
+    content = "\n".join(lines)
+    return title, content
+
+
+@router.post("/tasks/daily-inspection-notify")
+async def daily_inspection_notify(data: Optional[Dict[str, Any]] = Body(None)):
+    """
+    手动触发「日常巡检」通知 (日常任务列表「测试通知」按钮):
+    汇总该账号今日各日常任务的执行结果, 按「推送通道设置」中已启用的通道逐个发送,
+    并返回每个通道的真实结果 (含未启用通道的 skipped 状态)。
+    """
+    if hasattr(data, "default"):
+        data = None
+    data = data or {}
+    account_key = str(data.get("account_key") or "").strip()
+    if not account_key:
+        account_key = db.get_setting("app_current_account_key") or ""
+    if not account_key:
+        accounts = db.get_all_accounts()
+        account_key = accounts[0].get("key") if accounts else ""
+    if not account_key:
+        raise HTTPException(status_code=400, detail="尚未绑定任何小蚕账号")
+
+    title, content = _build_daily_inspection_report(account_key)
+
+    from ..core.notifier import ALL_NOTIFIERS
+    from ..core.notification.models import NotificationData, NotificationEvent, NotificationLevel
+
+    acc = db.get_account_by_key(account_key) or {}
+    payload = NotificationData(
+        title=title,
+        content=content,
+        event=NotificationEvent.SYSTEM_TEST,
+        level=NotificationLevel.INFO,
+        account_key=account_key,
+        account_name=acc.get("nickname") or account_key,
+        metadata={},
+    )
+
+    results = []
+    sent_any = False
+    for key, nt in ALL_NOTIFIERS.items():
+        name = getattr(nt, "display_name", key)
+        try:
+            r = await nt.send(payload)
+            ok = bool(r.get("ok"))
+            skipped = bool(r.get("skipped"))
+            if ok:
+                sent_any = True
+            results.append({
+                "channel": key,
+                "name": name,
+                "ok": ok,
+                "skipped": skipped,
+                "message": str(r.get("message") or "")
+            })
+        except Exception as e:
+            results.append({
+                "channel": key, "name": name, "ok": False,
+                "skipped": False, "message": f"发送异常: {e}"
+            })
+
+    # 结果同步写入运行日志, 便于事后核对
+    try:
+        t = time.strftime("%H:%M:%S")
+        log_lines = [f"[{t}] 手动触发日常巡检通知: {title}"]
+        for r in results:
+            if r["ok"]:
+                log_lines.append(f"[{t}] 推送成功 {r['name']}")
+            elif r["skipped"]:
+                log_lines.append(f"[{t}] 已跳过 {r['name']}: {r['message'] or '通道未启用'}")
+            else:
+                log_lines.append(f"[{t}] 推送失败 {r['name']}: {r['message'] or '未知错误'}")
+        log_lines.append(f"[{t}] 巡检内容:\n{content}")
+        db.add_job_log(
+            f"job_daily_inspect_{int(time.time())}", account_key, "notify_health",
+            "success" if sent_any else "error", "\n".join(log_lines)
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": sent_any,
+        "title": title,
+        "content": content,
+        "results": results,
+        "sent_count": sum(1 for r in results if r["ok"]),
+        "skipped_count": sum(1 for r in results if r["skipped"]),
+    }
+
+
 # ── 美团账号管理与扫码登录接口 ──────────────────────────────────────
 
 @router.get("/meituan/accounts")

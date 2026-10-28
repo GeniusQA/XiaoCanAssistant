@@ -31,6 +31,7 @@ import {
   IconCheckCircleStroked,
   IconAlertCircle,
   IconCalendarClockStroked,
+  IconBell,
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
 import { api } from '../api';
@@ -344,6 +345,31 @@ export const Automation: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [batchRunning, setBatchRunning] = useState<boolean>(false);
+  // 测试通知: 手动触发「日常巡检」报告推送 (按已启用通道发送)
+  const [notifyTesting, setNotifyTesting] = useState<boolean>(false);
+  const [notifyResult, setNotifyResult] = useState<{
+    title: string; content: string; sent_count: number; skipped_count: number;
+    results: { channel: string; name: string; ok: boolean; skipped: boolean; message: string }[];
+  } | null>(null);
+  const [notifyModalVisible, setNotifyModalVisible] = useState<boolean>(false);
+
+  const handleTestDailyNotify = async () => {
+    setNotifyTesting(true);
+    try {
+      const res = await api.dailyInspectionNotify(currentAccount?.key);
+      setNotifyResult(res);
+      setNotifyModalVisible(true);
+      if (res.sent_count > 0) {
+        Toast.success(`日常巡检通知已发送 (${res.sent_count} 个通道)`);
+      } else {
+        Toast.warning('未发送到任何通道，请先在「系统配置 → 推送通道」启用通道');
+      }
+    } catch (e: any) {
+      Toast.error(e.response?.data?.detail || '测试通知发送失败');
+    } finally {
+      setNotifyTesting(false);
+    }
+  };
 
   // 日志回显弹窗
   const [execResultModal, setExecResultModal] = useState<boolean>(false);
@@ -881,6 +907,15 @@ export const Automation: React.FC = () => {
             onClick={handleBatchRunDaily}
           >
             一键日常打卡
+          </Button>
+          <Button
+            theme="light"
+            type="primary"
+            icon={<IconBell />}
+            loading={notifyTesting}
+            onClick={handleTestDailyNotify}
+          >
+            测试通知
           </Button>
           <Button
             theme="light"
@@ -1615,6 +1650,46 @@ export const Automation: React.FC = () => {
         customStatus={execTitle.includes('成功') ? 'success' : 'error'}
         customOutput={execOutput}
       />
+
+      {/* 日常巡检测试通知结果弹窗 */}
+      <Modal
+        title={`日常巡检通知 · 已发送 ${notifyResult?.sent_count ?? 0} 个通道`}
+        visible={notifyModalVisible}
+        onCancel={() => setNotifyModalVisible(false)}
+        footer={<Button onClick={() => setNotifyModalVisible(false)}>关闭</Button>}
+        width={620}
+        style={{ maxWidth: '94vw' }}
+        centered
+        bodyStyle={{ maxHeight: '68vh', overflowY: 'auto' }}
+      >
+        {notifyResult && (
+          <div className="flex flex-col gap-3">
+            <div>
+              <Text strong className="text-[13px]">{notifyResult.title}</Text>
+              <pre className="mt-1.5 p-2.5 rounded-lg bg-semi-color-fill-0 text-xs leading-5 whitespace-pre-wrap font-mono">
+                {notifyResult.content}
+              </pre>
+            </div>
+            <div>
+              <Text strong className="text-[13px]">通道发送结果</Text>
+              <div className="mt-1.5 flex flex-col gap-1">
+                {notifyResult.results.map((r) => (
+                  <div key={r.channel} className="flex items-start justify-between gap-2 text-xs py-0.5">
+                    <span className="text-semi-color-text-1">{r.name}</span>
+                    {r.ok ? (
+                      <Tag color="green" size="small" shape="square">已发送</Tag>
+                    ) : r.skipped ? (
+                      <Tag color="grey" size="small" shape="square">已跳过 · {r.message || '通道未启用'}</Tag>
+                    ) : (
+                      <Tag color="red" size="small" shape="square">{r.message || '发送失败'}</Tag>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };
