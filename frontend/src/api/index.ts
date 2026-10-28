@@ -268,6 +268,10 @@ export const api = {
     client.post<{ ok: boolean; order: Order; message: string }>(`/orders/${id}/cancel-signup`, {}, { timeout: 30000 }).then(r => r.data),
   ocrOrderId: (id: number, imageBase64: string) =>
     client.post<{ ok: boolean; order_id_str: string; candidates?: string[]; message?: string }>(`/orders/${id}/ocr-order-id`, { image_base64: imageBase64 }, { timeout: 60000 }).then(r => r.data),
+  hotkeyCaptureStatus: () =>
+    client.get<{ ok: boolean; stage: 'idle' | 'capturing' | 'found' | 'not_found' | 'error'; message: string; order_id_str: string; target_order_id: number; target_store: string; frame: number; seq: number; ts: number }>(`/orders/hotkey-capture/status`, { timeout: 10000 }).then(r => r.data),
+  hotkeyCaptureTrigger: () =>
+    client.post<{ ok: boolean; stage: string; message: string }>(`/orders/hotkey-capture/trigger`, {}, { timeout: 10000 }).then(r => r.data),
   delayOrderVoucher: (id: number, useDelayCard: boolean = false) =>
     client.post<{ ok: boolean; is_delayed: boolean; delay_time: number; message: string; use_delay_card?: boolean }>(`/orders/${id}/delay-voucher`, { use_delay_card: useDelayCard }).then(r => r.data),
   getMediaVipRecords: (key: string) =>

@@ -47,8 +47,21 @@ async def lifespan(app: FastAPI):
         ensure_meituan_assets()
     except Exception as e:
         logger.warning(f"美团运行环境自愈检查提示: {e}")
+    # Alt+Q 全局热键截屏识别 (滚动多帧 OCR, 服务「下单流程」弹窗自动回填单号)
+    try:
+        import asyncio
+        from app.core.hotkey_capture import set_event_loop, start_hotkey_listener, stop_hotkey_listener
+        set_event_loop(asyncio.get_running_loop())
+        start_hotkey_listener()
+    except Exception as e:
+        logger.warning(f"Alt+Q 截屏识别热键启用失败: {e}")
     yield
     logger.info("正在关闭小蚕助手系统...")
+    try:
+        from app.core.hotkey_capture import stop_hotkey_listener
+        stop_hotkey_listener()
+    except Exception:
+        pass
     shutdown_scheduler()
 
 

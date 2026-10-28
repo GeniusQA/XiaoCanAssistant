@@ -255,11 +255,37 @@ export const OrdersView: React.FC = () => {
 
   // 打开回填单号弹窗: 未绑定为「提交单号」, 已绑定为「修改单号」(对应官方订单详情「修改」)
   const [modifyMode, setModifyMode] = useState(false);
+  const lastHotkeySeqRef = useRef(-1);
   const handleOpenUploadModal = (order: Order) => {
     setModifyMode(Boolean(order.platform_order_id));
     setUploadModalOrder(order);
     setPlatformOrderIdInput(order.platform_order_id || '');
+    // 基线取当前最新结果, 避免把历史识别结果当成新结果回填
+    api.hotkeyCaptureStatus().then((s) => { lastHotkeySeqRef.current = s.seq ?? -1; }).catch(() => {});
   };
+
+  // Alt+Q 全局热键截屏识别: 后端滚动多帧 OCR, 弹窗打开期间轮询结果自动回填
+  useEffect(() => {
+    if (!uploadModalOrder) return;
+    const timer = setInterval(async () => {
+      try {
+        const s = await api.hotkeyCaptureStatus();
+        if (!s || s.seq === lastHotkeySeqRef.current) return;
+        lastHotkeySeqRef.current = s.seq;
+        if (s.stage === 'found' && s.order_id_str) {
+          if (s.target_order_id === uploadModalOrder.id) {
+            setPlatformOrderIdInput(s.order_id_str);
+            Toast.success(`已通过 Alt+Q 截屏识别外卖单号: ${s.order_id_str}，请核对后提交`);
+          } else {
+            Toast.info(`截屏识别到单号 ${s.order_id_str}，但它属于其他待反馈订单（${s.target_store || '订单' + s.target_order_id}），请打开对应订单核对`);
+          }
+        } else if (s.stage === 'not_found' || s.stage === 'error') {
+          Toast.warning(`Alt+Q 截屏识别未成功: ${s.message || '请手动输入'}`);
+        }
+      } catch { /* 轮询失败忽略 */ }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [uploadModalOrder]);
 
   // OCR 自动识别: 粘贴外卖订单截图 -> 官方 OCR 提取单号自动回填 (手动输入的兜底)
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -1063,7 +1089,7 @@ export const OrdersView: React.FC = () => {
               description={
                 ocrLoading
                   ? '正在识别截图中的单号...'
-                  : '省事技巧：在美团/淘宝闪购 App 截图订单页后，直接在本弹窗按 Ctrl+V 粘贴截图，可自动识别单号（识别失败再手动输入）'
+                  : '一键识别：将鼠标停在订单详情页上按 Alt+Q，系统自动截屏识别并滚动翻页（识别不到会自动滚屏重试）；也可截图后按 Ctrl+V 粘贴识别，或手动输入'
               }
               closeIcon={null}
             />
@@ -1142,8 +1168,8 @@ export const OrdersView: React.FC = () => {
               <div className="flex-1">
                 <Text strong size="small">取号并回填</Text>
                 <div className="text-xs text-semi-color-text-2 mt-0.5 leading-4">
-                  在订单详情页复制单号填入上方输入框；或直接截图订单页，回到本弹窗按
-                  <Text code size="small">Ctrl+V</Text> 自动识别。
+                  鼠标停在订单详情页按 <Text code size="small">Alt+Q</Text> 一键截屏识别（自动滚动翻页）；
+                  或复制单号填入上方输入框；或截图后回本弹窗按 <Text code size="small">Ctrl+V</Text> 自动识别。
                 </div>
               </div>
             </div>

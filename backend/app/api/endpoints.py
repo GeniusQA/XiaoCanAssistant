@@ -5111,6 +5111,22 @@ async def ocr_order_id_endpoint(order_id: int, data: Dict[str, Any] = Body(...))
     return {"ok": True, "order_id_str": best, "candidates": sorted({v for _, v in candidates}, reverse=True)[:5], "raw": res}
 
 
+@router.get("/orders/hotkey-capture/status")
+async def hotkey_capture_status_endpoint():
+    """Alt+Q 全局热键截屏识别状态 (前端「下单流程」弹窗轮询回填)"""
+    from app.core.hotkey_capture import get_state
+    return {"ok": True, **get_state()}
+
+
+@router.post("/orders/hotkey-capture/trigger")
+async def hotkey_capture_trigger_endpoint():
+    """手动触发一次全屏截屏识别 (与 Alt+Q 热键等效, 供前端按钮兜底)"""
+    from app.core.hotkey_capture import trigger_from_async, get_state
+    await trigger_from_async()
+    await asyncio.sleep(0.2)
+    return {"ok": True, **get_state()}
+
+
 @router.post("/orders/{order_id}/use-free-card")
 async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default={})):
     """
