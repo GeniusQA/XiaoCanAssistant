@@ -1105,8 +1105,10 @@ export const OrdersView: React.FC = () => {
               <div className="flex-1">
                 <Text strong size="small">进入外卖小程序订单页</Text>
                 <div className="text-xs text-semi-color-text-2 mt-0.5 leading-4">
-                  点击下方按钮唤起 PC 微信，美团外卖将尝试直达订单页；若未直达，在小程序面板搜索
-                  <Text strong size="small">{uploadModalOrder?.platform === 'eleme' ? '「淘宝闪购」' : '「美团外卖」'}</Text>
+                  点击下方按钮唤起 PC 微信并直达对应外卖小程序；若未直达，在小程序面板搜索
+                  <Text strong size="small">
+                    {uploadModalOrder?.platform === 'eleme' ? '「淘宝闪购」' : uploadModalOrder?.platform === 'jingdong' ? '「京东外卖」' : '「美团外卖」'}
+                  </Text>
                   打开【订单】列表找到这笔订单。
                 </div>
                 <Button
@@ -1115,15 +1117,24 @@ export const OrdersView: React.FC = () => {
                   type="primary"
                   className="mt-1.5"
                   onClick={() => {
-                    const isMeituan = (uploadModalOrder?.platform || 'meituan') === 'meituan';
-                    // 美团外卖小程序 (appid 见微信开放社区) 订单页直达; PC 微信不支持 dl/business 时仍会唤起微信主窗
-                    window.location.href = isMeituan
-                      ? 'weixin://dl/business/?appid=wx2c348cf579062e56&path=pages%2Forder%2Forder'
-                      : 'weixin://';
+                    const platform = uploadModalOrder?.platform || 'meituan';
+                    // 各平台微信小程序 appid:
+                    //   美团外卖 wx2c348cf579062e56 (订单页 pages/order/order, 见微信开放社区)
+                    //   饿了么/淘宝闪购 wxece3a9a4c82f58c9 (公开可查; 订单页 path 无公开可靠来源, 落首页后点底部订单)
+                    //   京东外卖/京东秒送: 2026-02 上线微信但 appid 无公开渠道, 暂走主窗兜底
+                    // PC 微信不支持 dl/business 时仍会唤起微信主窗
+                    let url = 'weixin://';
+                    let tip = '请打开 PC 微信 → 小程序面板 → 搜索「京东外卖」→ 订单';
+                    if (platform === 'meituan') {
+                      url = 'weixin://dl/business/?appid=wx2c348cf579062e56&path=pages%2Forder%2Forder';
+                      tip = '若未直达订单页：PC 微信 → 小程序面板 → 搜索「美团外卖」→ 订单';
+                    } else if (platform === 'eleme') {
+                      url = 'weixin://dl/business/?appid=wxece3a9a4c82f58c9';
+                      tip = '若未直达：PC 微信 → 小程序面板 → 搜索「淘宝闪购」→ 底部「订单」→ 进入该笔订单';
+                    }
+                    window.location.href = url;
                     setTimeout(() => {
-                      Toast.info(isMeituan
-                        ? '若未直达订单页：PC 微信 → 小程序面板 → 搜索「美团外卖」→ 订单'
-                        : '请打开 PC 微信 → 小程序面板 → 搜索「淘宝闪购」→ 订单');
+                      Toast.info(tip);
                     }, 1500);
                   }}
                 >
