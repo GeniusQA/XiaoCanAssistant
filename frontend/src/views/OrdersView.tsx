@@ -72,8 +72,6 @@ export const OrdersView: React.FC = () => {
   const [uploadModalOrder, setUploadModalOrder] = useState<Order | null>(null);
   const [rebateRuleVisible, setRebateRuleVisible] = useState(false);
   const [platformOrderIdInput, setPlatformOrderIdInput] = useState<string>('');
-  // 取单号引导弹窗 (仿官方小程序跳转流程的分步引导)
-  const [pickGuideVisible, setPickGuideVisible] = useState(false);
   // 订单删除 (仅已完成/已取消, 走官方接口)
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [deletingOrders, setDeletingOrders] = useState(false);
@@ -1080,15 +1078,75 @@ export const OrdersView: React.FC = () => {
               }
               closeIcon={null}
             />
-            <Button
-              size="small"
-              theme="light"
-              type="primary"
-              className="mt-2"
-              onClick={() => setPickGuideVisible(true)}
-            >
-              去外卖平台取单号（分步引导）
-            </Button>
+          </div>
+
+          {/* 取号三步引导 (内嵌展示, 不再单独弹窗) */}
+          <div className="pt-1 border-t border-semi-color-border-subtle flex flex-col gap-2.5">
+            <Text strong size="small">取号三步 (30 秒搞定)</Text>
+            <div className="flex gap-2.5 items-start">
+              <Tag color="blue" size="small" shape="circle" className="!mt-0.5 flex-shrink-0">1</Tag>
+              <div className="flex-1">
+                <Text strong size="small">复制对照信息</Text>
+                <div className="text-xs text-semi-color-text-2 mt-0.5 leading-4">
+                  复制店铺名与门槛金额，在美团/淘宝闪购订单列表按这两项快速定位这笔订单。
+                </div>
+                <Button
+                  size="small"
+                  theme="light"
+                  className="mt-1.5"
+                  onClick={() => {
+                    const info = `${uploadModalOrder?.store_name || ''} ¥${uploadModalOrder?.order_money || 0}`;
+                    navigator.clipboard.writeText(info).then(
+                      () => Toast.success(`已复制: ${info}`),
+                      () => Toast.error('复制失败，请手动记录')
+                    );
+                  }}
+                >
+                  复制店铺名与金额
+                </Button>
+              </div>
+            </div>
+            <div className="flex gap-2.5 items-start">
+              <Tag color="blue" size="small" shape="circle" className="!mt-0.5 flex-shrink-0">2</Tag>
+              <div className="flex-1">
+                <Text strong size="small">进入外卖小程序订单页</Text>
+                <div className="text-xs text-semi-color-text-2 mt-0.5 leading-4">
+                  点击下方按钮唤起 PC 微信，美团外卖将尝试直达订单页；若未直达，在小程序面板搜索
+                  <Text strong size="small">{uploadModalOrder?.platform === 'eleme' ? '「淘宝闪购」' : '「美团外卖」'}</Text>
+                  打开【订单】列表找到这笔订单。
+                </div>
+                <Button
+                  size="small"
+                  theme="light"
+                  type="primary"
+                  className="mt-1.5"
+                  onClick={() => {
+                    const isMeituan = (uploadModalOrder?.platform || 'meituan') === 'meituan';
+                    // 美团外卖小程序 (appid 见微信开放社区) 订单页直达; PC 微信不支持 dl/business 时仍会唤起微信主窗
+                    window.location.href = isMeituan
+                      ? 'weixin://dl/business/?appid=wx2c348cf579062e56&path=pages%2Forder%2Forder'
+                      : 'weixin://';
+                    setTimeout(() => {
+                      Toast.info(isMeituan
+                        ? '若未直达订单页：PC 微信 → 小程序面板 → 搜索「美团外卖」→ 订单'
+                        : '请打开 PC 微信 → 小程序面板 → 搜索「淘宝闪购」→ 订单');
+                    }, 1500);
+                  }}
+                >
+                  进入外卖小程序
+                </Button>
+              </div>
+            </div>
+            <div className="flex gap-2.5 items-start">
+              <Tag color="blue" size="small" shape="circle" className="!mt-0.5 flex-shrink-0">3</Tag>
+              <div className="flex-1">
+                <Text strong size="small">取号并回填</Text>
+                <div className="text-xs text-semi-color-text-2 mt-0.5 leading-4">
+                  在订单详情页复制单号填入上方输入框；或直接截图订单页，回到本弹窗按
+                  <Text code size="small">Ctrl+V</Text> 自动识别。
+                </div>
+              </div>
+            </div>
           </div>
           <Banner
             type="warning"
@@ -1107,102 +1165,6 @@ export const OrdersView: React.FC = () => {
               closeIcon={null}
             />
           )}
-        </div>
-      </Modal>
-
-      {/* 取单号分步引导弹窗 (PC 端无法直接跳转小程序, 提供等效引导) */}
-      <Modal
-        title="去外卖平台取订单号"
-        visible={pickGuideVisible}
-        onCancel={() => setPickGuideVisible(false)}
-        footer={null}
-        width={480}
-        centered
-      >
-        <div className="py-1 flex flex-col gap-3">
-          <Banner
-            type="info"
-            className="rounded-lg text-xs"
-            description="PC 助手无法直接跳转微信小程序。按下面三步操作，30 秒即可拿到订单号，取号后回来粘贴截图或直接填号。"
-            closeIcon={null}
-          />
-
-          <div className="flex gap-3 items-start">
-            <Tag color="blue" size="small" shape="circle" className="!mt-0.5">1</Tag>
-            <div className="flex-1">
-              <Text strong className="text-sm">复制订单对照信息</Text>
-              <div className="text-xs text-semi-color-text-2 mt-1">
-                复制后在美团/淘宝闪购订单列表按店铺名和金额对照，快速找到这笔订单。
-              </div>
-              <Button
-                size="small"
-                theme="light"
-                className="mt-2"
-                onClick={() => {
-                  const info = `${uploadModalOrder?.store_name || ''} ¥${uploadModalOrder?.order_money || 0}`;
-                  navigator.clipboard.writeText(info).then(
-                    () => Toast.success(`已复制: ${info}`),
-                    () => Toast.error('复制失败，请手动记录')
-                  );
-                }}
-              >
-                复制店铺名与金额
-              </Button>
-            </div>
-          </div>
-
-          <div className="flex gap-3 items-start">
-            <Tag color="blue" size="small" shape="circle" className="!mt-0.5">2</Tag>
-            <div className="flex-1">
-              <Text strong className="text-sm">打开 PC 微信的外卖小程序</Text>
-              <div className="text-xs text-semi-color-text-2 mt-1">
-                点击「打开微信」后在侧边栏小程序面板搜索
-                <Text strong size="small">{uploadModalOrder?.platform === 'eleme' ? '「淘宝闪购」' : '「美团外卖」'}</Text>
-                ，进入【订单】列表找到刚才那笔订单。
-              </div>
-              <Button
-                size="small"
-                theme="light"
-                type="primary"
-                className="mt-2"
-                onClick={() => {
-                  // 唤起 PC 微信主窗口 (无法直接定位小程序, 仅省一步)
-                  window.location.href = 'weixin://';
-                  setTimeout(() => Toast.info('若微信未唤起，请手动打开 PC 微信 → 小程序面板'), 1200);
-                }}
-              >
-                打开微信
-              </Button>
-            </div>
-          </div>
-
-          <div className="flex gap-3 items-start">
-            <Tag color="blue" size="small" shape="circle" className="!mt-0.5">3</Tag>
-            <div className="flex-1">
-              <Text strong className="text-sm">取号并回填</Text>
-              <div className="text-xs text-semi-color-text-2 mt-1">
-                在小程序订单详情页复制订单号，回到回填弹窗粘贴；或直接截图订单页 → 回填弹窗按
-                <Text code size="small">Ctrl+V</Text> 自动识别单号。
-              </div>
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-2 pt-2 border-t border-semi-color-border-subtle">
-            <Button size="small" theme="light" onClick={() => setPickGuideVisible(false)}>
-              完成
-            </Button>
-            <Button
-              size="small"
-              theme="solid"
-              type="primary"
-              onClick={() => {
-                setPickGuideVisible(false);
-                Toast.info('请回到回填弹窗，粘贴截图或输入单号');
-              }}
-            >
-              回到回填弹窗
-            </Button>
-          </div>
         </div>
       </Modal>
     </div>
