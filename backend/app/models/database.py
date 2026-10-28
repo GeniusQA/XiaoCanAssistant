@@ -272,6 +272,10 @@ def init_db():
         c.execute("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''")
     if "delay_used" not in cols:
         c.execute("ALTER TABLE orders ADD COLUMN delay_used INTEGER DEFAULT 0")
+    if "free_order_at" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN free_order_at INTEGER DEFAULT 0")
+    if "free_subsidy" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN free_subsidy REAL DEFAULT 0")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -1284,7 +1288,8 @@ def update_order(order_id: int, data: Dict[str, Any]) -> Optional[Dict[str, Any]
     allowed = [
         "platform_order_id", "status", "receipt_img", "reject_reason",
         "order_money", "rebate_money", "original_user_rebate",
-        "redpack_reward_num", "timeout_time", "store_icon"
+        "redpack_reward_num", "timeout_time", "store_icon",
+        "free_order_at", "free_subsidy"
     ]
     updates = []
     params: Dict[str, Any] = {"id": order_id, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}

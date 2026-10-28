@@ -606,3 +606,27 @@ html.is-landscape .flex.flex-col.gap-3 {
 .detail-drawer-tabs .semi-tabs-tab > span {
   gap: 4px;
 }
+
+/* 会员专属订单免单弹窗: 补贴计算步骤逐条浮现 + 免单印章盖入 + 红包弹出 */
+.free-step {
+  opacity: 0;
+  transform: translateY(10px);
+  animation: freeStepIn 0.45s ease-out forwards;
+}
+@keyframes freeStepIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+.free-stamp {
+  animation: freeStampIn 0.5s cubic-bezier(0.22, 1.2, 0.36, 1) 1.35s both;
+}
+@keyframes freeStampIn {
+  from { opacity: 0; transform: rotate(-12deg) scale(2.2); }
+  to { opacity: 0.85; transform: rotate(-12deg) scale(1); }
+}
+.free-pop {
+  animation: freePopIn 0.5s cubic-bezier(0.22, 1.4, 0.36, 1) both;
+}
+@keyframes freePopIn {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}

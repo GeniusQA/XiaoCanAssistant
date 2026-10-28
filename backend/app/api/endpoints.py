@@ -5127,6 +5127,75 @@ async def hotkey_capture_trigger_endpoint():
     return {"ok": True, **get_state()}
 
 
+@router.get("/orders/free-order/panel")
+async def free_order_panel():
+    """
+    会员专属订单免单面板数据:
+    - 只读遍历各账号免单券状态 (VipRightsService.UserFreeOrderInfo);
+    - 持有未用券的账号: 补贴金额直接采用官方 red_pack_value (分→元), 不做本地计算;
+    - 资格订单: 该账号最近48小时内已完成、已绑外卖单号、未免单、且平台与券适用平台匹配。
+    """
+    biz_to_platform = {1: "meituan", 2: "eleme", 3: "jingdong"}
+    now = time.time()
+    cards = []
+    for acc in db.get_all_accounts():
+        if not acc.get("token"):
+            continue
+        try:
+            res = await client.get_user_free_order_info(
+                token=acc["token"], silk_id=acc.get("silk_id"), user_id=acc.get("user_id"),
+                city_code=acc.get("city_code") or 440303
+            )
+        except XiaoCanRPCError:
+            continue
+        info = res.get("info") or res
+        if not info.get("had") or info.get("used"):
+            continue
+        values = info.get("red_pack_value") or []
+        raw_amount = values[0] if isinstance(values, list) and values else (values if isinstance(values, (int, float)) else 0)
+        amount_yuan = round(float(raw_amount or 0) / 100.0, 2)
+        biz_list = info.get("order_business") or []
+        platforms = [biz_to_platform.get(int(b)) for b in biz_list if str(b).isdigit()] or ["meituan"]
+        rows = db.get_orders(account_key=acc.get("key"), status="completed", limit=100) or []
+        eligible = []
+        for r in rows:
+            if r.get("free_order_at"):
+                continue
+            if not r.get("platform_order_id"):
+                continue
+            if (r.get("platform") or "").lower() not in platforms:
+                continue
+            # 完成时间以本地 updated_at (同步完成态的时间) 估算
+            try:
+                done_ts = time.mktime(time.strptime(r["updated_at"], "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                continue
+            if now - done_ts > 48 * 3600:
+                continue
+            eligible.append({
+                "order_id": r["id"],
+                "store_name": r.get("store_name"),
+                "store_icon": r.get("store_icon") or "",
+                "platform": r.get("platform"),
+                "platform_order_id": r.get("platform_order_id"),
+                "order_sn": r.get("order_sn"),
+                "completed_time": r.get("updated_at"),
+                "order_money": r.get("order_money"),
+                "rebate_money": r.get("rebate_money"),
+                "redpack_reward_num": r.get("redpack_reward_num"),
+                "subsidy_amount": amount_yuan,
+            })
+        cards.append({
+            "account_key": acc.get("key"),
+            "nickname": acc.get("nickname") or acc.get("key"),
+            "card_id": info.get("user_free_card_id") or info.get("id") or 0,
+            "amount_yuan": amount_yuan,
+            "platforms": platforms,
+            "orders": eligible,
+        })
+    return {"ok": True, "cards": cards, "has_card": any(c["orders"] for c in cards)}
+
+
 @router.post("/orders/{order_id}/use-free-card")
 async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default={})):
     """
@@ -5151,6 +5220,7 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
 
     # 获取用户免单券 ID
     user_free_card_id = data.get("user_free_card_id")
+    free_subsidy_amount = 0.0
     if not user_free_card_id:
         try:
             f_info_res = await client.get_user_free_order_info(
@@ -5165,6 +5235,10 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
             if info_data.get("used"):
                 raise HTTPException(status_code=400, detail="当前账号本月免单券已使用，每月限使用 1 次")
             user_free_card_id = info_data.get("user_free_card_id") or info_data.get("id")
+            # 补贴金额直接取官方 red_pack_value (分→元), 与官方 APP 展示一致
+            _rpv = info_data.get("red_pack_value") or []
+            _raw = _rpv[0] if isinstance(_rpv, list) and _rpv else (_rpv if isinstance(_rpv, (int, float)) else 0)
+            free_subsidy_amount = round(float(_raw or 0) / 100.0, 2)
         except HTTPException:
             raise
         except Exception as ex:
@@ -5183,6 +5257,14 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
             user_id=acc.get("user_id"),
             city_code=acc.get("city_code") or 440303
         )
+        # 核销成功: 本地记录免单时间与补贴金额 (官方列表接口不返回免单横幅字段)
+        try:
+            db.update_order(order_id, {
+                "free_order_at": int(time.time()),
+                "free_subsidy": free_subsidy_amount or (target_order.get("rebate_money") or 0)
+            })
+        except Exception as ex:
+            logger.warning(f"免单结果本地记录失败: {ex}")
         return {
             "ok": True,
             "message": "免单券核销使用成功！该笔订单已享全额免单返现",

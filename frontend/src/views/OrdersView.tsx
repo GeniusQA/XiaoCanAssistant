@@ -71,6 +71,68 @@ export const OrdersView: React.FC = () => {
   const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [uploadModalOrder, setUploadModalOrder] = useState<Order | null>(null);
   const [rebateRuleVisible, setRebateRuleVisible] = useState(false);
+  // 会员专属订单免单 (对齐官方「会员专区-订单免单」: 券状态与补贴金额来自官方 UserFreeOrderInfo)
+  type FreeOrderItem = {
+    order_id: number; store_name: string; store_icon: string; platform: string;
+    platform_order_id: string; order_sn: string; completed_time: string;
+    order_money: number; rebate_money: number; redpack_reward_num: number; subsidy_amount: number;
+  };
+  type FreeOrderCard = {
+    account_key: string; nickname: string; card_id: number; amount_yuan: number;
+    platforms: string[]; orders: FreeOrderItem[];
+  };
+  const [freeOrderVisible, setFreeOrderVisible] = useState(false);
+  const [freeCards, setFreeCards] = useState<FreeOrderCard[]>([]);
+  const [freeLoading, setFreeLoading] = useState(false);
+  const [freeConfirm, setFreeConfirm] = useState<{ card: FreeOrderCard; order: FreeOrderItem } | null>(null);
+  const [freeDone, setFreeDone] = useState<{ amount: number; expire: string } | null>(null);
+  const [freeSubmitting, setFreeSubmitting] = useState(false);
+  const openFreeOrderModal = async () => {
+    setFreeOrderVisible(true);
+    setFreeConfirm(null);
+    setFreeDone(null);
+    setFreeLoading(true);
+    try {
+      const res = await api.freeOrderPanel();
+      setFreeCards(res.cards || []);
+      if (!res.cards?.some((c) => c.orders.length)) {
+        const held = res.cards?.filter((c) => c.amount_yuan > 0);
+        Toast.info(held?.length
+          ? '免单券可用，但没有符合条件的订单（需最近48小时内完成且已绑定外卖单号）'
+          : '当前所有账号均未持有可用免单券（每月 14:00 秒杀获取）');
+      }
+    } catch (e: unknown) {
+      Toast.error(`获取免单信息失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setFreeLoading(false);
+    }
+  };
+  const handleFreeOrderUse = async () => {
+    if (!freeConfirm) return;
+    setFreeSubmitting(true);
+    try {
+      await api.useFreeCard(freeConfirm.order.order_id, freeConfirm.order.platform_order_id);
+      const expire = new Date(Date.now() + 24 * 3600 * 1000);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      setFreeDone({
+        amount: freeConfirm.card.amount_yuan,
+        expire: `${expire.getFullYear()}年${expire.getMonth() + 1}月${expire.getDate()}日 ${pad(expire.getHours())}:${pad(expire.getMinutes())}:${pad(expire.getSeconds())}`,
+      });
+      Toast.success(`免单成功！${freeConfirm.card.amount_yuan.toFixed(2)}元无门槛小蚕红包已发放`);
+      fetchOrders(undefined, true);
+    } catch (e: unknown) {
+      Toast.error(`免单失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setFreeSubmitting(false);
+    }
+  };
+  /** 订单卡上的返利描述: 满23返11.92 (返利 = 官方返利 + 红包奖励) */
+  const freeOrderRebateDesc = (o: FreeOrderItem): string => {
+    const redpackRaw = Number(o.redpack_reward_num || 0);
+    const redpackYuan = redpackRaw > 5 ? redpackRaw / 100 : redpackRaw;
+    const total = Number(((o.rebate_money || 0) + redpackYuan).toFixed(2));
+    return `满${(o.order_money || 0).toFixed(0)}返${total.toFixed(2)}`;
+  };
   const [platformOrderIdInput, setPlatformOrderIdInput] = useState<string>('');
   // 订单删除 (仅已完成/已取消, 走官方接口)
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
@@ -620,6 +682,15 @@ export const OrdersView: React.FC = () => {
 
         return (
           <div className="max-w-[270px]">
+            {row?.free_order_at ? (
+              <div
+                className="mb-1.5 rounded-md border border-[#ffd591] bg-[#fff7e6] px-2 py-1 text-[11px] leading-4 text-[#d46b08] flex items-center gap-1"
+                title={`免单时间: ${new Date(row.free_order_at * 1000).toLocaleString('zh-CN')}`}
+              >
+                <span>🎟️</span>
+                <span>已享会员专属免单权益，{Number(row.free_subsidy || 0).toFixed(2)}元红包免单已到账</span>
+              </div>
+            ) : null}
             <Space spacing="tight">
               <Tag color={badgeColor} size="small">
                 {statusText}
@@ -848,6 +919,12 @@ export const OrdersView: React.FC = () => {
             </Button>
           )}
           <Button
+            icon={<span className="text-base leading-none">🎟️</span>}
+            onClick={openFreeOrderModal}
+          >
+            订单免单
+          </Button>
+          <Button
             icon={<IconRefresh spin={loading} />}
             loading={loading}
             onClick={() => fetchOrders(undefined, true)}
@@ -952,6 +1029,131 @@ export const OrdersView: React.FC = () => {
           />
         </div>
       </Card>
+
+      {/* 会员专属订单免单弹窗 (对齐官方: 券列表 → 补贴计算确认 → 发放红包) */}
+      <Modal
+        title={
+          <div className="flex items-center justify-between w-full pr-2">
+            <span>会员专属订单免单</span>
+            <Button theme="borderless" icon={<IconRefresh spin={freeLoading} />} size="small" onClick={openFreeOrderModal} />
+          </div>
+        }
+        visible={freeOrderVisible}
+        onCancel={() => { setFreeOrderVisible(false); setFreeConfirm(null); setFreeDone(null); }}
+        footer={null}
+        width={440}
+        bodyStyle={{ maxHeight: '65vh', overflowY: 'auto' }}
+      >
+        {/* 步骤一: 券与资格订单列表 (官方图二) */}
+        {!freeConfirm && !freeDone && (
+          <div className="space-y-3">
+            <div className="rounded-lg bg-[#fff7e6] border border-[#ffd591] px-3 py-2 text-xs text-[#8c5a00] leading-5">
+              <div>· 最近48小时内的完成的订单可参与免单活动</div>
+              <div>· 额外补贴至免单，上限补贴15元无门槛小蚕红包</div>
+            </div>
+            {freeLoading && <div className="text-center text-semi-color-text-2 text-sm py-6">正在获取免单券与订单数据...</div>}
+            {!freeLoading && freeCards.filter((c) => c.orders.length > 0).length === 0 && (
+              <Empty description="没有可参与免单的订单" style={{ padding: 24 }} />
+            )}
+            {freeCards.filter((c) => c.orders.length > 0).map((card) => (
+              <div key={card.account_key} className="space-y-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <Text strong>{card.nickname}</Text>
+                  <Tag color="red" size="small">免单券 ¥{card.amount_yuan.toFixed(2)}</Tag>
+                </div>
+                {card.orders.map((o) => (
+                  <div key={o.order_id} className="rounded-xl border border-semi-color-border p-3 flex items-start gap-2.5">
+                    {o.store_icon ? (
+                      <img src={o.store_icon} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                    ) : null}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <Text strong ellipsis={{ showTooltip: true }} style={{ maxWidth: 180 }}>{o.store_name}</Text>
+                        <Tag color="orange" size="small">{o.platform === 'eleme' ? '饿了么' : o.platform === 'jingdong' ? '京东' : '外卖'}</Tag>
+                      </div>
+                      <div className="mt-1 text-xs">
+                        <span className="rounded bg-[#fde3e3] text-[#e03e3e] px-1.5 py-0.5 text-[11px]">
+                          活动返利 {freeOrderRebateDesc(o)}·可得补贴 {o.subsidy_amount.toFixed(2)}元
+                        </span>
+                      </div>
+                      <div className="mt-1.5 text-[11px] text-semi-color-text-2 leading-4">
+                        <div>订单号: <span className="font-mono">{o.platform_order_id || o.order_sn}</span></div>
+                        <div>完单时间: {o.completed_time}</div>
+                      </div>
+                    </div>
+                    <Button theme="solid" type="danger" size="small" className="flex-shrink-0" onClick={() => setFreeConfirm({ card, order: o })}>
+                      选择免单
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 步骤二: 补贴计算确认 (官方图三动态交互) */}
+        {freeConfirm && !freeDone && (
+          <div className="relative">
+            <div className="absolute right-0 top-8 w-20 h-20 rounded-full border-[3px] border-[#43a047] text-[#43a047] flex items-center justify-center text-2xl font-bold -rotate-12 opacity-80 free-stamp">
+              免单
+            </div>
+            <div className="rounded-xl bg-[#fdf6ec] border border-[#f5d9a8] px-3 py-2 text-xs text-semi-color-text-1 mb-3 flex items-center gap-1.5">
+              <span>📦</span>
+              <Text strong ellipsis={{ showTooltip: true }} style={{ maxWidth: 300 }}>{freeConfirm.order.store_name}</Text>
+            </div>
+            <div className="space-y-0">
+              {[
+                {
+                  key: 'info', title: '订单信息',
+                  desc: `${freeOrderRebateDesc(freeConfirm.order)} = 到手${freeConfirm.card.amount_yuan.toFixed(2)}元`,
+                },
+                {
+                  key: 'calc', title: '补贴计算',
+                  desc: `订单免单额 > 补${freeConfirm.card.amount_yuan.toFixed(2)}元`,
+                },
+                {
+                  key: 'free', title: '为您免单',
+                  desc: '补贴后 到手0元',
+                },
+              ].map((step, i) => (
+                <div key={step.key} className="flex gap-3 free-step" style={{ animationDelay: `${i * 0.45}s` }}>
+                  <div className="flex flex-col items-center">
+                    <div className="w-6 h-6 rounded-full bg-[#e8622d] text-white flex items-center justify-center text-xs">✓</div>
+                    {i < 2 && <div className="w-0.5 flex-1 bg-[#e8622d] min-h-[26px]" />}
+                  </div>
+                  <div className="pb-4">
+                    <div className="font-bold text-[15px]">{step.title}</div>
+                    <div className="text-sm text-[#e8622d] mt-0.5">{step.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="text-center text-sm text-semi-color-text-1 pb-3 free-step" style={{ animationDelay: '1.4s' }}>
+              即将发放 <Text strong type="danger">{freeConfirm.card.amount_yuan.toFixed(2)}元</Text> 无门槛小蚕红包
+            </div>
+            <div className="flex gap-3">
+              <Button block size="large" onClick={() => setFreeConfirm(null)}>我再想想</Button>
+              <Button block size="large" theme="solid" type="danger" loading={freeSubmitting} onClick={handleFreeOrderUse}>立即使用</Button>
+            </div>
+          </div>
+        )}
+
+        {/* 步骤三: 发放成功 (官方图四) */}
+        {freeDone && (
+          <div className="text-center py-4">
+            <div className="text-lg font-bold mb-4">恭喜获得{freeDone.amount.toFixed(2)}元红包</div>
+            <div className="mx-auto w-28 h-32 rounded-2xl border-2 border-[#e03e3e] bg-white shadow-md flex flex-col items-center justify-center gap-1 free-pop">
+              <div className="text-[#e03e3e] text-xs">¥{freeDone.amount.toFixed(2)}</div>
+              <div className="rounded-b-2xl bg-[#e03e3e] text-white text-xs px-3 py-1 -mb-6">外卖红包</div>
+            </div>
+            <div className="text-xs text-semi-color-text-2 mt-6">{freeDone.expire}到期</div>
+            <Button theme="solid" type="danger" block size="large" className="mt-4" onClick={() => { setFreeOrderVisible(false); setFreeConfirm(null); setFreeDone(null); }}>
+              开心收下
+            </Button>
+            <div className="text-xs text-semi-color-text-2 mt-2">【我的红包】查看</div>
+          </div>
+        )}
+      </Modal>
 
       {/* 返利扣除规则弹窗 (对齐小蚕APP官方规则文案) */}
       <Modal

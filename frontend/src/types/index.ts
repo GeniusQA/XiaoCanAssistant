@@ -245,6 +245,9 @@ export interface Order {
   remark?: string;
   /** 官方接口反馈已使用过领红包延时特权 (code=0/3 后置位) */
   delay_used?: number;
+  /** 会员专属订单免单: 免单时间戳与补贴金额 (核销免单券成功后本地记录) */
+  free_order_at?: number;
+  free_subsidy?: number;
   original_user_rebate?: number;
   redpack_reward_num?: number;
   status: 'pending' | 'auditing' | 'completed' | 'rejected' | 'cancelled';

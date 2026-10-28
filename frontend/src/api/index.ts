@@ -272,6 +272,10 @@ export const api = {
     client.get<{ ok: boolean; stage: 'idle' | 'capturing' | 'found' | 'not_found' | 'error'; message: string; order_id_str: string; target_order_id: number; target_store: string; frame: number; seq: number; ts: number }>(`/orders/hotkey-capture/status`, { timeout: 10000 }).then(r => r.data),
   hotkeyCaptureTrigger: () =>
     client.post<{ ok: boolean; stage: string; message: string }>(`/orders/hotkey-capture/trigger`, {}, { timeout: 10000 }).then(r => r.data),
+  freeOrderPanel: () =>
+    client.get<{ ok: boolean; cards: Array<{ account_key: string; nickname: string; card_id: number; amount_yuan: number; platforms: string[]; orders: Array<{ order_id: number; store_name: string; store_icon: string; platform: string; platform_order_id: string; order_sn: string; completed_time: string; order_money: number; rebate_money: number; redpack_reward_num: number; subsidy_amount: number }> }>; has_card: boolean }>(`/orders/free-order/panel`, { timeout: 60000 }).then(r => r.data),
+  useFreeCard: (id: number, platformOrderId?: string) =>
+    client.post<{ ok: boolean; message: string; raw?: Record<string, unknown> }>(`/orders/${id}/use-free-card`, platformOrderId ? { platform_order_id: platformOrderId } : {}, { timeout: 60000 }).then(r => r.data),
   delayOrderVoucher: (id: number, useDelayCard: boolean = false) =>
     client.post<{ ok: boolean; is_delayed: boolean; delay_time: number; message: string; use_delay_card?: boolean }>(`/orders/${id}/delay-voucher`, { use_delay_card: useDelayCard }).then(r => r.data),
   getMediaVipRecords: (key: string) =>
