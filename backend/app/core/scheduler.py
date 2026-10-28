@@ -154,6 +154,8 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
     log_output = f"[{time.strftime('%H:%M:%S')}] 开始执行【{task_label}】(账号: {nickname}, 方式: {trig_label})\n"
     status = "running"
     log_id = 0
+    # 阶梯奖励领取失败标记: 达标但领取报错时, 整体执行结果应判定为失败
+    step2_fail_reason = ""
     try:
         log_id = db.add_job_log(job_id, account_key, task_id, "running", log_output)
     except Exception:
@@ -485,7 +487,14 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                         has_got2 = True
                         p2_name = (claim_res2.get("prize") or {}).get("name") or "现金红包奖励"
                         log_output += f"[{time.strftime('%H:%M:%S')}] 阶段二阶梯奖励自动领取成功: {p2_name}\n"
+                    except XiaoCanRPCError as ce:
+                        if ce.code == 40043 or "单次霸王餐订单" in (ce.msg or ""):
+                            step2_fail_reason = "阶段二现金红包需先完成至少 1 单霸王餐订单后方可领取 (今日还未完成单次霸王餐订单)"
+                        else:
+                            step2_fail_reason = format_rpc_error(ce)
+                        log_output += f"[{time.strftime('%H:%M:%S')}] 阶段二阶梯奖励领取失败: {step2_fail_reason}\n"
                     except Exception as e:
+                        step2_fail_reason = str(e)
                         log_output += f"[{time.strftime('%H:%M:%S')}] 阶段二阶梯奖励领取异常: {e}\n"
 
                 step1_tag = "[已达成/已领取]" if has_got1 else f"[进行中 {lottery_cnt}/{step1_cnt}]"
@@ -1292,12 +1301,12 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
         elif task_id == "coupon_remind":
             # 卡券/红包到期提醒
             warn_hours = float(params.get("warn_hours", 24))
+            now_ts = int(time.time())
             log_output += f"[{time.strftime('%H:%M:%S')}] 正在检索账户内特权卡券与返利红包...\n"
             try:
                 cards_res = await client.get_user_card_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
                 card_list = cards_res.get("card_list") or cards_res.get("list") or []
                 expiring = []
-                now_ts = int(time.time())
                 for c in card_list:
                     exp_val = c.get("expire_time") or c.get("end_time") or 0
                     if isinstance(exp_val, str):
@@ -1323,6 +1332,60 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                     log_output += f"[{time.strftime('%H:%M:%S')}] 卡券核验完成: 暂无即将在 {warn_hours} 小时内过期的特权券\n"
             except Exception as e:
                 log_output += f"[{time.strftime('%H:%M:%S')}] 卡券核验信息: {e}\n"
+
+            # ---- 可用红包 (含免单红包, 官方24小时有效期) ----
+            async def _collect_expiring_redpacks():
+                """官方可用红包列表 (RedPackService.GetAppRedPackList): unused_items 内 end_time 临期的红包"""
+                try:
+                    rp_res = await client.get_app_redpack_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, page=1, page_size=50)
+                    items = rp_res.get("unused_items") or []
+                    found = []
+                    for rp in items:
+                        exp_val = int(rp.get("end_time") or 0)
+                        if exp_val > now_ts and (exp_val - now_ts) <= warn_hours * 3600:
+                            val = rp.get("value_num") or rp.get("reward_num") or 0
+                            amt = val / 100.0 if val >= 1 else val
+                            amt_txt = f"¥{amt:.2f}" if amt else ""
+                            exp_txt = time.strftime("%m-%d %H:%M", time.localtime(exp_val))
+                            found.append(f"{rp.get('name') or '无门槛红包'}{amt_txt}(至{exp_txt})")
+                    return found
+                except Exception as e:
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 可用红包核验信息: {e}\n"
+                    return []
+
+            # ---- 影音会员权益 (兑换码有效期, 如网易云周卡) ----
+            async def _collect_expiring_media_vips():
+                try:
+                    mv_res = await client.get_user_tencent_vip_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, page=1, page_size=50)
+                    items = mv_res.get("items") or []
+                    found = []
+                    for mv in items:
+                        exp_val = int(mv.get("end_time") or mv.get("expire_time") or 0)
+                        if exp_val > now_ts and (exp_val - now_ts) <= warn_hours * 3600:
+                            exp_txt = time.strftime("%m-%d %H:%M", time.localtime(exp_val))
+                            found.append(f"{mv.get('name') or mv.get('title') or '影音会员'}兑换码(至{exp_txt})")
+                    return found
+                except Exception as e:
+                    log_output += f"[{time.strftime('%H:%M:%S')}] 影音会员核验信息: {e}\n"
+                    return []
+
+            redpack_expiring, media_expiring = await asyncio.gather(_collect_expiring_redpacks(), _collect_expiring_media_vips())
+            if redpack_expiring or media_expiring:
+                parts = []
+                if redpack_expiring:
+                    parts.append(f"{len(redpack_expiring)} 个红包({'、'.join(redpack_expiring[:3])})")
+                if media_expiring:
+                    parts.append(f"{len(media_expiring)} 张影音会员兑换码({'、'.join(media_expiring[:2])})")
+                log_output += f"[{time.strftime('%H:%M:%S')}] 红包/影音会员到期预警: {'; '.join(parts)}\n"
+                await send_system_notification(
+                    title="小蚕红包与影音会员到期提醒",
+                    content=f"账号【{nickname}】即将在 {warn_hours:g} 小时内过期: {'; '.join(parts)}，请尽快使用！",
+                    account_key=account_key,
+                    event=NotificationEvent.COUPON_EXPIRE,
+                    level=NotificationLevel.WARNING
+                )
+            else:
+                log_output += f"[{time.strftime('%H:%M:%S')}] 红包/影音会员核验完成: 暂无 {warn_hours:g} 小时内到期项\n"
 
         elif task_id == "dual_rebate_monitor":
             from .dual_rebate_monitor import run_dual_rebate_monitor
@@ -1445,6 +1508,11 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
     except Exception as e:
         status = "error"
         log_output += f"[{time.strftime('%H:%M:%S')}] 异常: {str(e)}\n"
+
+    # 阶梯奖励达标但领取失败 → 整体执行结果判定为失败 (避免 9/9 达标却领不到奖励仍显示成功)
+    if step2_fail_reason:
+        status = "error"
+        log_output += f"[{time.strftime('%H:%M:%S')}] 执行结果判定为失败: {step2_fail_reason}\n"
 
     if log_id > 0:
         db.update_job_log(log_id, status=status, output=log_output)
