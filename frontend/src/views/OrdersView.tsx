@@ -79,6 +79,7 @@ export const OrdersView: React.FC = () => {
   };
   type FreeOrderCard = {
     account_key: string; nickname: string; card_id: number; amount_yuan: number;
+    status?: 'available' | 'used' | 'none';
     platforms: string[]; orders: FreeOrderItem[];
   };
   const [freeOrderVisible, setFreeOrderVisible] = useState(false);
@@ -95,11 +96,15 @@ export const OrdersView: React.FC = () => {
     try {
       const res = await api.freeOrderPanel();
       setFreeCards(res.cards || []);
-      if (!res.cards?.some((c) => c.orders.length)) {
-        const held = res.cards?.filter((c) => c.amount_yuan > 0);
-        Toast.info(held?.length
-          ? '免单券可用，但没有符合条件的订单（需最近48小时内完成且已绑定外卖单号）'
-          : '当前所有账号均未持有可用免单券（每月 14:00 秒杀获取）');
+      const cards: FreeOrderCard[] = res.cards || [];
+      if (cards.some((c) => c.orders.length)) {
+        // 有可用券+可免单订单, 正常展示不提示
+      } else if (cards.some((c) => c.status === 'available')) {
+        Toast.info('会员免单券可用，但没有最近48小时内的已完成订单可免单');
+      } else if (cards.some((c) => c.status === 'used')) {
+        Toast.warning('会员免单券已被使用，无法参与本期免单');
+      } else {
+        Toast.info('当前所有账号均未持有可用免单券（每月 14:00 秒杀获取）');
       }
     } catch (e: unknown) {
       Toast.error(`获取免单信息失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -1080,7 +1085,16 @@ export const OrdersView: React.FC = () => {
             </div>
             {freeLoading && <div className="text-center text-semi-color-text-2 text-sm py-6">正在获取免单券与订单数据...</div>}
             {!freeLoading && freeCards.filter((c) => c.orders.length > 0).length === 0 && (
-              <Empty description="没有可参与免单的订单" style={{ padding: 24 }} />
+              <Empty
+                description={
+                  freeCards.some((c) => c.status === 'used')
+                    ? '会员免单券已被使用，无法参与本期免单'
+                    : freeCards.some((c) => c.status === 'available')
+                      ? '没有最近48小时内可免单的已完成订单'
+                      : '没有可参与免单的订单'
+                }
+                style={{ padding: 24 }}
+              />
             )}
             {freeCards.filter((c) => c.orders.length > 0).map((card) => (
               <div key={card.account_key} className="space-y-2">

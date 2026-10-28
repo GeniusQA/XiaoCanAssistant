@@ -5219,8 +5219,6 @@ async def free_order_panel():
         except XiaoCanRPCError:
             continue
         info = res.get("info") or res
-        if not info.get("had") or info.get("used"):
-            continue
         values = info.get("red_pack_value") or []
         raw_amount = values[0] if isinstance(values, list) and values else (values if isinstance(values, (int, float)) else 0)
         amount_yuan = round(float(raw_amount or 0) / 100.0, 2)
@@ -5232,8 +5230,18 @@ async def free_order_panel():
         except Exception:
             pass
         rows = db.get_orders(account_key=acc.get("key"), status="completed", limit=100) or []
+        # 券真实状态核验: 官方 UserFreeOrderInfo 在核销后仍长期返回 used:false (已实测, 字段不可靠),
+        # 故以本地免单核销记录 (free_order_at) 作为「已被使用」的权威证据: 31天内有过核销 → 当期券已用
+        month_ago = time.time() - 31 * 86400
+        consumed = any(int(r.get("free_order_at") or 0) > month_ago for r in rows)
+        if not info.get("had"):
+            card_status = "none"
+        elif info.get("used") or consumed:
+            card_status = "used"
+        else:
+            card_status = "available"
         eligible = []
-        for r in rows:
+        for r in (rows if card_status == "available" else []):
             if r.get("free_order_at"):
                 continue
             if not r.get("platform_order_id"):
@@ -5265,8 +5273,9 @@ async def free_order_panel():
         cards.append({
             "account_key": acc.get("key"),
             "nickname": acc.get("nickname") or acc.get("key"),
+            "status": card_status,
             "card_id": info.get("user_free_card_id") or info.get("id") or 0,
-            "amount_yuan": amount_yuan,
+            "amount_yuan": amount_yuan if card_status == "available" else 0,
             "platforms": platforms,
             "orders": eligible,
         })
