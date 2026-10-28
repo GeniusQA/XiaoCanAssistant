@@ -5192,6 +5192,18 @@ def _extract_job_result_summary(status: str, output: str) -> str:
     """
     lines = [l.strip() for l in (output or "").splitlines() if l.strip()]
 
+    def _shorten(line: str, kw: str) -> str:
+        # 风控类关键词统一显示为 WAF拦截
+        core_kw = "WAF拦截" if kw in ("WAF", "熔断", "403", "拦截") else kw
+        # 提取关键词前最近的业务标签 [xxx] 或 【xxx】 (排除时间戳标签)
+        tags = [
+            t for t in re.findall(r"[\[【]([^\[\]【】]{2,24})[\]】]", line[: line.find(kw)])
+            if not re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?([.,]\d+)?", t)
+        ]
+        tag = tags[-1] if tags else ""
+        core = f"[{tag}] {core_kw}" if tag else core_kw
+        return core[:40]
+
     # 调度状态失败: 优先从文本提取具体失败原因 (取冒号后的内容, 跳过末尾汇总行), 不允许兜底为"处理完毕"
     if status in ("error", "failed"):
         for line in reversed(lines):
@@ -5216,18 +5228,6 @@ def _extract_job_result_summary(status: str, output: str) -> str:
     # 部分完成 / 留有未达成目标: 调度成功但业务未完全达成, 不能显示"处理完毕"
     partial_keywords = ["未完成", "还差", "未补齐", "待补齐", "未能领取", "未达标"]
     ok_keywords = ["兑换成功", "抢券成功", "领券成功", "斩获", "提现成功", "已启动", "已完成", "今日无在架商品", "处理完毕"]
-
-    def _shorten(line: str, kw: str) -> str:
-        # 风控类关键词统一显示为 WAF拦截
-        core_kw = "WAF拦截" if kw in ("WAF", "熔断", "403", "拦截") else kw
-        # 提取关键词前最近的业务标签 [xxx] 或 【xxx】 (排除时间戳标签)
-        tags = [
-            t for t in re.findall(r"[\[【]([^\[\]【】]{2,24})[\]】]", line[: line.find(kw)])
-            if not re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?([.,]\d+)?", t)
-        ]
-        tag = tags[-1] if tags else ""
-        core = f"[{tag}] {core_kw}" if tag else core_kw
-        return core[:40]
 
     for line in reversed(lines):
         for kw in fail_keywords:
