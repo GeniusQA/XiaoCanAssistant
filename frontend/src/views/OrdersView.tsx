@@ -576,6 +576,8 @@ export const OrdersView: React.FC = () => {
         const countdownHMS = formatRemainingHMS(remainingSec);
         const isTimeout = remainingSec !== null && remainingSec <= 0;
         // 与小蚕官方一致的子状态剩余时间提示 (精确到秒)
+        // 官方接口只返回 rebate_condition(99=无需评价) / rebate_condition_str("无需反馈"), 提示文案由前端拼装:
+        // 官方 APP 对 99 的展示为 "本单无需评价，如评价将无法拿到额外返利" (整段标红)
         const condText = (String(row?.condition || '无需评价')
           .replace(/[（(].*?需含字含图.*?[）)]/g, '')
           .replace(/[（(]需含字含图[）)]/g, '')
@@ -585,9 +587,10 @@ export const OrdersView: React.FC = () => {
           : isTimeout
             ? `(${hasExtId ? '上传凭证已超时' : '提交单号已超时'})`
             : `(${hasExtId ? '上传凭证剩余时间' : '提交单号剩余时间'}${countdownHMS})`;
-        const condHint = condText === '无需评价'
-          ? '单笔无需评价，如评价将无法拿到额外返利'
-          : `单笔${condText}，请在截止时间前完成反馈`;
+        const isNoReviewCond = condText === '无需评价' || condText === '无需反馈';
+        const condHint = isNoReviewCond
+          ? '本单无需评价，如评价将无法拿到额外返利'
+          : `本单${condText}，请在截止时间前完成反馈`;
 
         return (
           <div className="max-w-[270px]">
@@ -605,7 +608,7 @@ export const OrdersView: React.FC = () => {
               )}
             </Space>
             {status === 'pending' && deadlineHint && (
-              <div className="mt-1 text-xs text-semi-color-text-2 leading-4">
+              <div className="mt-1 text-xs text-semi-color-danger leading-4">
                 {deadlineHint} {condHint}
               </div>
             )}
