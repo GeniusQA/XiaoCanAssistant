@@ -597,3 +597,12 @@ html.is-landscape .flex.flex-col.gap-3 {
   align-items: center;
   gap: 6px;
 }
+
+/* 账号详情抽屉: 压缩选项卡, 保证 4 个标签单行容纳 (不换行挤到下一行) */
+.detail-drawer-tabs .semi-tabs-tab {
+  padding: 6px 6px !important;
+  font-size: 13px;
+}
+.detail-drawer-tabs .semi-tabs-tab > span {
+  gap: 4px;
+}

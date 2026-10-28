@@ -1877,7 +1877,7 @@ export const Accounts: React.FC = () => {
                 setActiveDetailTab(k);
                 if (k === 'media' && detailAccount) loadMediaVipRecords(detailAccount.key);
               }}
-              className="mt-2"
+              className="detail-drawer-tabs mt-2"
             >
               {/* Tab 1: 霸王餐可用红包 */}
               <TabPane
