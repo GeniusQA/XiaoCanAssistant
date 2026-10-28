@@ -630,15 +630,6 @@ export const OrdersView: React.FC = () => {
                   <span className="text-semi-color-text-3">未绑定外卖单号</span>
                   {status === 'pending' && (
                     <div className="flex items-center gap-1">
-                      <Button
-                        theme="light"
-                        type="primary"
-                        size="small"
-                        className="!py-0.5 !px-1.5 text-xs h-5"
-                        onClick={() => row && handleOpenUploadModal(row)}
-                      >
-                        提交单号
-                      </Button>
                       {!isPercentOrder && (
                         row?.delay_used ? (
                           <Tooltip content="官方接口反馈该订单已使用过领红包延时特权">
