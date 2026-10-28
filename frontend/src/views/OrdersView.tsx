@@ -598,11 +598,6 @@ export const OrdersView: React.FC = () => {
               <Tag color={badgeColor} size="small">
                 {statusText}
               </Tag>
-              {status === 'pending' && countdownHMS && (
-                <Tag color="amber" size="small" className="font-mono">
-                  {countdownHMS}
-                </Tag>
-              )}
               {status === 'pending' && isTimeout && (
                 <Tag color="red" size="small">已超时</Tag>
               )}
