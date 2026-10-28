@@ -1647,7 +1647,7 @@ export const Automation: React.FC = () => {
         customTaskId={runningTaskId || undefined}
         customAccountKey={currentAccountKey}
         customCreatedAt={new Date().toLocaleTimeString()}
-        customStatus={execTitle.includes('成功') ? 'success' : 'error'}
+        customStatus={execTitle.includes('完成') || execTitle.includes('成功') ? 'success' : 'error'}
         customOutput={execOutput}
       />
 
