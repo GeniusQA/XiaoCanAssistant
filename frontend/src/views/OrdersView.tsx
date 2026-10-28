@@ -15,7 +15,6 @@ import {
   Radio,
   Empty,
   Modal,
-  Descriptions,
   Banner,
   Tooltip
 } from '@douyinfe/semi-ui';
@@ -46,21 +45,13 @@ const normalizeConditionText = (condition?: string): string => {
   return c;
 };
 
-const formatRemainingTime = (remainingSec: number | null | undefined): string => {
-  if (remainingSec === null || remainingSec === undefined) return '';
-  if (remainingSec <= 0) return '已超时';
-  const totalMinutes = Math.floor(remainingSec / 60);
-  const days = Math.floor(totalMinutes / (60 * 24));
-  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
-  const minutes = totalMinutes % 60;
-
-  if (days > 0) {
-    return hours > 0 ? `剩 ${days}天${hours}小时` : `剩 ${days}天`;
-  }
-  if (hours > 0) {
-    return minutes > 0 ? `剩 ${hours}小时${minutes}分钟` : `剩 ${hours}小时`;
-  }
-  return `剩 ${Math.max(1, minutes)}分钟`;
+/** 与小蚕官方一致的精确到秒倒计时: HH:MM:SS (超 24 小时按总小时数展示, 如 24:36:41) */
+const formatRemainingHMS = (remainingSec: number | null | undefined): string => {
+  if (remainingSec === null || remainingSec === undefined || remainingSec <= 0) return '';
+  const h = Math.floor(remainingSec / 3600);
+  const m = Math.floor((remainingSec % 3600) / 60);
+  const s = remainingSec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 };
 
 export const OrdersView: React.FC = () => {
@@ -87,6 +78,12 @@ export const OrdersView: React.FC = () => {
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [deletingOrders, setDeletingOrders] = useState(false);
   const canDeleteOrders = activeStatusTab === 'completed' || activeStatusTab === 'cancelled';
+  // 秒级倒计时: pending 状态的凭证/单号剩余时间每秒刷新 (与小蚕官方一致)
+  const [nowTick, setNowTick] = useState<number>(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleBatchDelete = (singleId?: number) => {
     const ids = singleId ? [singleId] : selectedOrderIds;
@@ -577,9 +574,22 @@ export const OrdersView: React.FC = () => {
           statusText = '已取消';
         }
 
-        const nowSec = Math.floor(Date.now() / 1000);
-        const remainingSec = row?.timeout_time ? row.timeout_time - nowSec : null;
-        const countdownStr = formatRemainingTime(remainingSec);
+        const remainingSec = row?.timeout_time ? row.timeout_time - nowTick : null;
+        const countdownHMS = formatRemainingHMS(remainingSec);
+        const isTimeout = remainingSec !== null && remainingSec <= 0;
+        // 与小蚕官方一致的子状态剩余时间提示 (精确到秒)
+        const condText = (String(row?.condition || '无需评价')
+          .replace(/[（(].*?需含字含图.*?[）)]/g, '')
+          .replace(/[（(]需含字含图[）)]/g, '')
+          .trim()) || '无需评价';
+        const deadlineHint = remainingSec === null
+          ? ''
+          : isTimeout
+            ? `(${hasExtId ? '上传凭证已超时' : '提交单号已超时'})`
+            : `(${hasExtId ? '上传凭证剩余时间' : '提交单号剩余时间'}${countdownHMS})`;
+        const condHint = condText === '无需评价'
+          ? '单笔无需评价，如评价将无法拿到额外返利'
+          : `单笔${condText}，请在截止时间前完成反馈`;
 
         return (
           <div className="max-w-[270px]">
@@ -587,12 +597,20 @@ export const OrdersView: React.FC = () => {
               <Tag color={badgeColor} size="small">
                 {statusText}
               </Tag>
-              {status === 'pending' && countdownStr && (
-                <Tag color={countdownStr === '已超时' ? 'red' : 'amber'} size="small">
-                  {countdownStr}
+              {status === 'pending' && countdownHMS && (
+                <Tag color="amber" size="small" className="font-mono">
+                  {countdownHMS}
                 </Tag>
               )}
+              {status === 'pending' && isTimeout && (
+                <Tag color="red" size="small">已超时</Tag>
+              )}
             </Space>
+            {status === 'pending' && deadlineHint && (
+              <div className="mt-1 text-xs text-semi-color-text-2 leading-4">
+                {deadlineHint} {condHint}
+              </div>
+            )}
             <div className="mt-1.5 text-xs font-mono">
               {hasExtId ? (
                 <div>
@@ -621,7 +639,7 @@ export const OrdersView: React.FC = () => {
                         className="!py-0.5 !px-1.5 text-xs h-5"
                         onClick={() => row && handleOpenUploadModal(row)}
                       >
-                        回填单号
+                        提交单号
                       </Button>
                       {!isPercentOrder && (
                         row?.delay_used ? (
@@ -682,19 +700,17 @@ export const OrdersView: React.FC = () => {
       render: (_: any, row?: Order) => {
         const st = (row?.status || '').toLowerCase();
         const hasExt = Boolean(row?.platform_order_id);
-        // 待上传/已下单待反馈: 支持修改外卖单号(官方详情「修改」) 与 取消报名(官方卡片「取消报名」)
+        // 单号操作按钮文案对齐官方: 已下单待反馈→「上传凭证」, 已报名待下单→「提交单号」
         if (st === 'pending') {
           return (
             <div className="flex items-center gap-1 flex-wrap">
-              {hasExt && (
-                <Button
-                  size="small"
-                  theme="light"
-                  onClick={() => row && handleOpenUploadModal(row)}
-                >
-                  修改单号
-                </Button>
-              )}
+              <Button
+                size="small"
+                theme="light"
+                onClick={() => row && handleOpenUploadModal(row)}
+              >
+                {hasExt ? '上传凭证' : '提交单号'}
+              </Button>
               <Button
                 size="small"
                 theme="light"
@@ -969,9 +985,9 @@ export const OrdersView: React.FC = () => {
         </div>
       </Modal>
 
-      {/* 回填/修改外卖单号弹窗 (支持粘贴截图自动识别单号) */}
+      {/* 回填/修改外卖单号弹窗 (官方「下单流程」样式, 支持粘贴截图自动识别单号) */}
       <Modal
-        title={modifyMode ? '修改外卖单号' : '回填外卖单号'}
+        title="小蚕霸王餐 · 下单流程"
         visible={!!uploadModalOrder}
         onOk={handleConfirmSubmitId}
         onCancel={() => {
@@ -986,40 +1002,64 @@ export const OrdersView: React.FC = () => {
         centered
       >
         <div className="space-y-3 py-1" onPaste={handlePasteScreenshot}>
-          <Descriptions
-            size="small"
-            row={false}
-            style={{
-              padding: '10px 14px',
-              backgroundColor: 'var(--semi-color-fill-0)',
-              borderRadius: 'var(--semi-border-radius-medium)',
-              border: '1px solid var(--semi-color-border-subtle)'
-            }}
-            data={[
-              {
-                key: '商户名称',
-                value: (
-                  <Text strong ellipsis={{ showTooltip: true }}>
-                    {uploadModalOrder?.store_name}
-                  </Text>
-                )
-              },
-              {
-                key: '实付门槛',
-                value: <Text code size="small">¥{uploadModalOrder?.order_money}</Text>
-              },
-              {
-                key: '预计返利',
-                value: (() => {
-                  // 与列表行口径一致: max(原始返豆, 实际返豆) + 红包 (红包沿用进制定位换算)
-                  const rpRaw = Number(uploadModalOrder?.redpack_reward_num || 0);
-                  const rpYuan = rpRaw > 5 ? rpRaw / 100 : rpRaw;
-                  const total = Math.max(Number(uploadModalOrder?.original_user_rebate || 0), Number(uploadModalOrder?.rebate_money || 0)) + rpYuan;
-                  return <Text type="danger" strong>¥{total.toFixed(2)}</Text>;
-                })()
-              }
-            ]}
-          />
+          {(() => {
+            // 对齐官方下单流程页: 只展示店铺卡片 + 倒计时 + 提示语 (圈红部分信息)
+            const hasExt = Boolean(uploadModalOrder?.platform_order_id);
+            const remain = uploadModalOrder?.timeout_time ? uploadModalOrder.timeout_time - nowTick : null;
+            const hms = formatRemainingHMS(remain);
+            const timedOut = remain !== null && remain <= 0;
+            const plat = getPlatformBadge(uploadModalOrder?.platform);
+            const avatarSrc = uploadModalOrder?.store_icon || DEFAULT_PLATFORM_ICONS[uploadModalOrder?.platform || 'meituan'];
+            const rpRaw = Number(uploadModalOrder?.redpack_reward_num || 0);
+            const rpYuan = rpRaw > 5 ? rpRaw / 100 : rpRaw;
+            const tagRebate = parseFloat(
+              (Math.max(Number(uploadModalOrder?.original_user_rebate || 0), Number(uploadModalOrder?.rebate_money || 0)) + rpYuan).toFixed(2)
+            );
+            const condTag = (String(uploadModalOrder?.condition || '无需评价')
+              .replace(/[（(].*?需含字含图.*?[）)]/g, '')
+              .replace(/[（(]需含字含图[）)]/g, '')
+              .trim()) || '无需评价';
+            const hasRebateTag = Number(uploadModalOrder?.original_user_rebate || 0) > 0 && Number(uploadModalOrder?.order_money || 0) > 0;
+            return (
+              <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--semi-color-border-subtle)' }}>
+                <div className="flex items-center gap-2.5 p-3">
+                  <Avatar size="medium" shape="square" src={avatarSrc} color={plat.avatarColor} className="flex-shrink-0">
+                    {uploadModalOrder?.store_name?.[0] || '外'}
+                  </Avatar>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <Tag color={plat.color} size="small" shape="square" className="flex-shrink-0">{plat.label}</Tag>
+                      <Text strong ellipsis={{ showTooltip: true }} style={{ maxWidth: 190 }}>
+                        {uploadModalOrder?.store_name}
+                      </Text>
+                      {hasRebateTag && (
+                        <Tag color="red" size="small" shape="square" className="flex-shrink-0">
+                          满{uploadModalOrder?.order_money}返{tagRebate}
+                        </Tag>
+                      )}
+                      <Tag color="grey" size="small" shape="square" className="flex-shrink-0">
+                        {normalizeConditionText(condTag)}
+                      </Tag>
+                    </div>
+                  </div>
+                </div>
+                <div className="px-3 pb-1 text-center text-[13px] text-semi-color-text-1">
+                  请在{' '}
+                  <span className="font-mono font-semibold" style={{ color: 'var(--semi-color-warning-2)' }}>
+                    {timedOut ? '已超时' : (hms || '--:--:--')}
+                  </span>{' '}
+                  内{hasExt ? '上传订单完成截图' : '提交外卖单号'}
+                </div>
+                <div className="px-3 pb-3 pt-1 text-center text-[15px] font-medium text-semi-color-text-0">
+                  {hasExt ? (
+                    <>收到外卖后，请返回小蚕<br />上传订单完成截图</>
+                  ) : (
+                    <>完成下单后，请返回小蚕<br />提交外卖单号</>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
           <div>
             <Text size="small" type="secondary" className="block mb-1">
               请输入外卖平台订单号：
