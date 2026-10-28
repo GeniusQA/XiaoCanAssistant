@@ -279,6 +279,9 @@ def init_db():
     if "reviewed_time" not in cols:
         # 官方完单(审核)时间戳: 免单48h窗口与完单时间展示以此为准, updated_at只是同步时间
         c.execute("ALTER TABLE orders ADD COLUMN reviewed_time INTEGER DEFAULT 0")
+    if "upload_time" not in cols:
+        # 官方上传(提交单号/上传凭证)时间戳: 订单列表「上传时间」列展示
+        c.execute("ALTER TABLE orders ADD COLUMN upload_time INTEGER DEFAULT 0")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -1191,6 +1194,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 expire_time = :expire_time,
                 order_time = :order_time,
                 reviewed_time = :reviewed_time,
+                upload_time = CASE WHEN :upload_time > 0 THEN :upload_time ELSE upload_time END,
                 order_type = :order_type,
                 rebate_ratio = :rebate_ratio,
                 platform_total_price = :platform_total_price,
@@ -1219,6 +1223,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "updated_at": now,
                 "order_time": int(data.get("order_time") or 0),
                 "reviewed_time": int(data.get("reviewed_time") or 0),
+                "upload_time": int(data.get("upload_time") or 0),
                 "order_type": int(data.get("order_type") or 0),
                 "rebate_ratio": float(data.get("rebate_ratio") or 0),
                 "platform_total_price": float(data.get("platform_total_price") or 0),
@@ -1233,8 +1238,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return get_order_by_id(target_id)
 
         cursor = conn.execute("""
-        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, reviewed_time, order_type, rebate_ratio, platform_total_price, remark)
-        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :reviewed_time, :order_type, :rebate_ratio, :platform_total_price, :remark)
+        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, reviewed_time, upload_time, order_type, rebate_ratio, platform_total_price, remark)
+        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :reviewed_time, :upload_time, :order_type, :rebate_ratio, :platform_total_price, :remark)
         ON CONFLICT(order_sn) DO UPDATE SET
             promotion_order_id = excluded.promotion_order_id,
             platform_order_id = excluded.platform_order_id,
@@ -1250,6 +1255,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             reject_reason = excluded.reject_reason,
             order_time = excluded.order_time,
             reviewed_time = excluded.reviewed_time,
+            upload_time = CASE WHEN excluded.upload_time > 0 THEN excluded.upload_time ELSE upload_time END,
             expire_time = excluded.expire_time,
             condition = excluded.condition,
             order_type = excluded.order_type,
@@ -1281,6 +1287,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "updated_at": now,
             "order_time": int(data.get("order_time") or 0),
             "reviewed_time": int(data.get("reviewed_time") or 0),
+            "upload_time": int(data.get("upload_time") or 0),
             "order_type": int(data.get("order_type") or 0),
             "rebate_ratio": float(data.get("rebate_ratio") or 0),
             "platform_total_price": float(data.get("platform_total_price") or 0),

@@ -802,6 +802,14 @@ export const OrdersView: React.FC = () => {
       ),
     },
     {
+      title: '上传时间',
+      dataIndex: 'upload_time',
+      width: 170,
+      render: (ts: number) => (
+        <Text size="small" type="secondary">{ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'}</Text>
+      ),
+    },
+    {
       title: '操作',
       dataIndex: 'actions',
       width: 190,

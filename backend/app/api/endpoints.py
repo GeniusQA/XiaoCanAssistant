@@ -4578,6 +4578,7 @@ async def list_orders(
                 "order_time": int(ot or 0),
                 # 官方完单(审核通过)时间: 免单48h资格窗口与完单时间展示以此为准
                 "reviewed_time": int(o.get("reviewed_time") or 0),
+                "upload_time": int(o.get("upload_time") or 0),
                 "order_type": 12 if is_percent_order else order_type_val,
                 "rebate_ratio": rebate_ratio,
                 "platform_total_price": platform_total_price,
