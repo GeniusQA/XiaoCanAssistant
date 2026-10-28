@@ -362,12 +362,33 @@ async def check_activation(timeout: float = 15.0) -> Dict[str, Any]:
                 auth["getUpdatesBuf"] = new_buf
 
             msgs = data.get("msgs") or []
+
+            def _deep_find(obj, keys):
+                """递归查找字段: 官方消息结构可能嵌套, context_token 不一定在 msg 顶层"""
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if k.lower() in keys and isinstance(v, str) and v:
+                            return v
+                    for v in obj.values():
+                        r = _deep_find(v, keys)
+                        if r:
+                            return r
+                elif isinstance(obj, list):
+                    for v in obj:
+                        r = _deep_find(v, keys)
+                        if r:
+                            return r
+                return None
+
             found_token = None
             for m in msgs:
-                if isinstance(m, dict) and m.get("context_token"):
-                    found_token = m.get("context_token")
-                    if m.get("from_user_id"):
-                        auth["userId"] = m.get("from_user_id")
+                if not isinstance(m, dict):
+                    continue
+                found_token = _deep_find(m, {"context_token", "contexttoken"})
+                if found_token:
+                    uid = _deep_find(m, {"from_user_id"})
+                    if uid:
+                        auth["userId"] = uid
                     break
 
             if found_token:
@@ -380,13 +401,37 @@ async def check_activation(timeout: float = 15.0) -> Dict[str, Any]:
                     "message": "成功接收到微信会话消息，推送通道已激活就绪！"
                 }
 
+            if msgs:
+                # 收到了消息却提取不到凭证: 把原始结构写进运行日志供排查 (脱敏: 只记键名与长度)
+                try:
+                    def _shape(o, d=0):
+                        if d > 4:
+                            return "..."
+                        if isinstance(o, dict):
+                            return {k: _shape(v, d + 1) for k, v in o.items()}
+                        if isinstance(o, list):
+                            return [_shape(v, d + 1) for v in o[:2]]
+                        return f"<{type(o).__name__}:{len(str(o))}>"
+                    logger.warning(
+                        f"ClawBot getupdates 收到 {len(msgs)} 条消息但未提取到 context_token, "
+                        f"结构: {json.dumps(_shape(msgs[0]), ensure_ascii=False)[:600]}"
+                    )
+                except Exception:
+                    pass
+                return {
+                    "ok": True,
+                    "activated": bool(auth.get("contextToken")),
+                    "has_context_token": bool(auth.get("contextToken")),
+                    "message": f"已收到 {len(msgs)} 条消息但未能提取会话凭证，请再次发送消息并检测"
+                }
+
             # 暂未收到新消息，如果原本已有 context_token 则依然有效
             has_token = bool(auth.get("contextToken"))
             return {
                 "ok": True,
                 "activated": has_token,
                 "has_context_token": has_token,
-                "message": "暂未检测到微信新消息，请在手机微信向 ClawBot 发送任意文字后再次检测"
+                "message": "暂未检测到微信新消息，请先点击「重新检测」，再在 15 秒内于手机微信向 ClawBot 发送任意文字"
             }
     except httpx.TimeoutException:
         has_token = bool(auth.get("contextToken"))
