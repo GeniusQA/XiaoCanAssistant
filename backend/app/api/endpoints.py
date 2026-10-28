@@ -4519,6 +4519,8 @@ async def list_orders(
                 "expire_time": exp_at,
                 "created_at": c_at,
                 "order_time": int(ot or 0),
+                # 官方完单(审核通过)时间: 免单48h资格窗口与完单时间展示以此为准
+                "reviewed_time": int(o.get("reviewed_time") or 0),
                 "order_type": 12 if is_percent_order else order_type_val,
                 "rebate_ratio": rebate_ratio,
                 "platform_total_price": platform_total_price,
@@ -5165,11 +5167,17 @@ async def free_order_panel():
                 continue
             if (r.get("platform") or "").lower() not in platforms:
                 continue
-            # 完成时间以本地 updated_at (同步完成态的时间) 估算
-            try:
-                done_ts = time.mktime(time.strptime(r["updated_at"], "%Y-%m-%d %H:%M:%S"))
-            except Exception:
-                continue
+            # 48h 资格窗口以官方完单时间 reviewed_time 为准 (updated_at 只是本地同步时间, 会随每次刷新漂移)
+            done_ts = int(r.get("reviewed_time") or 0)
+            if done_ts:
+                done_time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(done_ts))
+            else:
+                # 历史订单无 reviewed_time: 退回 updated_at (同步时间), 宁可漏不可错
+                try:
+                    done_ts = time.mktime(time.strptime(r["updated_at"], "%Y-%m-%d %H:%M:%S"))
+                    done_time_str = r["updated_at"][:16]
+                except Exception:
+                    continue
             if now - done_ts > 48 * 3600:
                 continue
             eligible.append({
@@ -5179,7 +5187,7 @@ async def free_order_panel():
                 "platform": r.get("platform"),
                 "platform_order_id": r.get("platform_order_id"),
                 "order_sn": r.get("order_sn"),
-                "completed_time": r.get("updated_at"),
+                "completed_time": done_time_str,
                 "order_money": r.get("order_money"),
                 "rebate_money": r.get("rebate_money"),
                 "redpack_reward_num": r.get("redpack_reward_num"),

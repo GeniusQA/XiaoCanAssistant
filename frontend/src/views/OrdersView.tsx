@@ -1077,7 +1077,7 @@ export const OrdersView: React.FC = () => {
                         </span>
                       </div>
                       <div className="mt-1.5 text-[11px] text-semi-color-text-2 leading-4">
-                        <div>订单号: <span className="font-mono">{o.platform_order_id || o.order_sn}</span></div>
+                        <div>订单号: <span className="font-mono">{o.order_sn}</span></div>
                         <div>完单时间: {o.completed_time}</div>
                       </div>
                     </div>
