@@ -282,6 +282,12 @@ def init_db():
     if "upload_time" not in cols:
         # 官方上传(提交单号/上传凭证)时间戳: 订单列表「上传时间」列展示
         c.execute("ALTER TABLE orders ADD COLUMN upload_time INTEGER DEFAULT 0")
+    if "vip_growth_score" not in cols:
+        # 官方 vip_points.score: 本单基础会员成长值(分, 100分=1成长值)
+        c.execute("ALTER TABLE orders ADD COLUMN vip_growth_score INTEGER DEFAULT 0")
+    if "vip_plus_score" not in cols:
+        # 官方 vip_points.plus_score: SVIP加成成长值(分), plus_score/score 即加成百分比
+        c.execute("ALTER TABLE orders ADD COLUMN vip_plus_score INTEGER DEFAULT 0")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -1195,6 +1201,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 order_time = :order_time,
                 reviewed_time = :reviewed_time,
                 upload_time = CASE WHEN :upload_time > 0 THEN :upload_time ELSE upload_time END,
+                vip_growth_score = CASE WHEN :vip_growth_score > 0 THEN :vip_growth_score ELSE vip_growth_score END,
+                vip_plus_score = CASE WHEN :vip_plus_score > 0 THEN :vip_plus_score ELSE vip_plus_score END,
                 order_type = :order_type,
                 rebate_ratio = :rebate_ratio,
                 platform_total_price = :platform_total_price,
@@ -1224,6 +1232,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "order_time": int(data.get("order_time") or 0),
                 "reviewed_time": int(data.get("reviewed_time") or 0),
                 "upload_time": int(data.get("upload_time") or 0),
+                "vip_growth_score": int(data.get("vip_growth_score") or 0),
+                "vip_plus_score": int(data.get("vip_plus_score") or 0),
                 "order_type": int(data.get("order_type") or 0),
                 "rebate_ratio": float(data.get("rebate_ratio") or 0),
                 "platform_total_price": float(data.get("platform_total_price") or 0),
@@ -1238,8 +1248,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return get_order_by_id(target_id)
 
         cursor = conn.execute("""
-        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, reviewed_time, upload_time, order_type, rebate_ratio, platform_total_price, remark)
-        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :reviewed_time, :upload_time, :order_type, :rebate_ratio, :platform_total_price, :remark)
+        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, reviewed_time, upload_time, vip_growth_score, vip_plus_score, order_type, rebate_ratio, platform_total_price, remark)
+        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :reviewed_time, :upload_time, :vip_growth_score, :vip_plus_score, :order_type, :rebate_ratio, :platform_total_price, :remark)
         ON CONFLICT(order_sn) DO UPDATE SET
             promotion_order_id = excluded.promotion_order_id,
             platform_order_id = excluded.platform_order_id,
@@ -1256,6 +1266,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             order_time = excluded.order_time,
             reviewed_time = excluded.reviewed_time,
             upload_time = CASE WHEN excluded.upload_time > 0 THEN excluded.upload_time ELSE upload_time END,
+            vip_growth_score = CASE WHEN excluded.vip_growth_score > 0 THEN excluded.vip_growth_score ELSE vip_growth_score END,
+            vip_plus_score = CASE WHEN excluded.vip_plus_score > 0 THEN excluded.vip_plus_score ELSE vip_plus_score END,
             expire_time = excluded.expire_time,
             condition = excluded.condition,
             order_type = excluded.order_type,
@@ -1288,6 +1300,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "order_time": int(data.get("order_time") or 0),
             "reviewed_time": int(data.get("reviewed_time") or 0),
             "upload_time": int(data.get("upload_time") or 0),
+            "vip_growth_score": int(data.get("vip_growth_score") or 0),
+            "vip_plus_score": int(data.get("vip_plus_score") or 0),
             "order_type": int(data.get("order_type") or 0),
             "rebate_ratio": float(data.get("rebate_ratio") or 0),
             "platform_total_price": float(data.get("platform_total_price") or 0),
@@ -1303,7 +1317,8 @@ def update_order(order_id: int, data: Dict[str, Any]) -> Optional[Dict[str, Any]
         "platform_order_id", "status", "receipt_img", "reject_reason",
         "order_money", "rebate_money", "original_user_rebate",
         "redpack_reward_num", "timeout_time", "store_icon",
-        "free_order_at", "free_subsidy", "reviewed_time"
+        "free_order_at", "free_subsidy", "reviewed_time",
+        "vip_growth_score", "vip_plus_score"
     ]
     updates = []
     params: Dict[str, Any] = {"id": order_id, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}

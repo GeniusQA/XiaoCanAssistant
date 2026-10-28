@@ -4579,6 +4579,9 @@ async def list_orders(
                 # 官方完单(审核通过)时间: 免单48h资格窗口与完单时间展示以此为准
                 "reviewed_time": int(o.get("reviewed_time") or 0),
                 "upload_time": int(o.get("upload_time") or 0),
+                # 官方 vip_points: score=基础成长值分, plus_score=SVIP加成分 (100分=1成长值, plus/score=加成百分比)
+                "vip_growth_score": int((o.get("vip_points") or [{}])[0].get("score") or 0),
+                "vip_plus_score": int((o.get("vip_points") or [{}])[0].get("plus_score") or 0),
                 "order_type": 12 if is_percent_order else order_type_val,
                 "rebate_ratio": rebate_ratio,
                 "platform_total_price": platform_total_price,

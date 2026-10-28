@@ -719,10 +719,23 @@ export const OrdersView: React.FC = () => {
               <Tag color={badgeColor} size="small">
                 {statusText}
               </Tag>
+            </Space>
+            {status === 'completed' && (() => {
+              const gScore = Number(row?.vip_growth_score || 0);
+              const pScore = Number(row?.vip_plus_score || 0);
+              if (!gScore) return null;
+              const growthVal = Number(((gScore + pScore) / 100).toFixed(2));
+              const plusPct = pScore > 0 ? Math.round((pScore / gScore) * 100) : 0;
+              return (
+                <div className="mt-1 text-[11px] leading-4 text-[#7a4a21]">
+                  会员成长值+{growthVal}
+                  {plusPct > 0 && <span className="ml-1">/SVIP会员已加成{plusPct}%</span>}
+                </div>
+              );
+            })()}
               {status === 'pending' && isTimeout && (
                 <Tag color="red" size="small">已超时</Tag>
               )}
-            </Space>
             {status === 'pending' && deadlineHint && (
               <div className="mt-1 text-xs text-semi-color-danger leading-4">
                 {deadlineHint} {condHint}

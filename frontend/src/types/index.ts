@@ -260,6 +260,11 @@ export interface Order {
   rebate_ratio?: number;
   created_at: string;
   updated_at?: string;
+  /** 官方完单/上传时间戳与会员成长值 (官方 vip_points: score 基础成长值分, plus_score SVIP加成分) */
+  reviewed_time?: number;
+  upload_time?: number;
+  vip_growth_score?: number;
+  vip_plus_score?: number;
 }
 
 export interface OrderStats {
