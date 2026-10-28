@@ -305,17 +305,6 @@ export const Dashboard: React.FC = () => {
 
   const handleSelectMessage = (msg: XiaoCanMessage) => {
     setActiveMessageModal(msg);
-    Notification.info({
-      title: msg.title,
-      content: (
-        <div className="text-xs space-y-1">
-          {msg.object_name && <div className="font-semibold text-semi-color-primary">{msg.object_name}</div>}
-          <div>{msg.content}</div>
-          <div className="text-semi-color-text-2 font-mono text-[11px]">{formatMsgTime(msg.create_time)}</div>
-        </div>
-      ),
-      duration: 4,
-    });
   };
 
   // 小蚕官方消息中心数据拉取
