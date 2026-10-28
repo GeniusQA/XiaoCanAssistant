@@ -5226,6 +5226,11 @@ async def free_order_panel():
         amount_yuan = round(float(raw_amount or 0) / 100.0, 2)
         biz_list = info.get("order_business") or []
         platforms = [biz_to_platform.get(int(b)) for b in biz_list if str(b).isdigit()] or ["meituan"]
+        # 先回填官方APP手动免单痕迹 (红包列表「会员专属免单红包」→本地免单记录), 确保已免单订单即时排除
+        try:
+            await _backfill_free_order_marks(acc.get("key"), acc)
+        except Exception:
+            pass
         rows = db.get_orders(account_key=acc.get("key"), status="completed", limit=100) or []
         eligible = []
         for r in rows:
@@ -5235,17 +5240,13 @@ async def free_order_panel():
                 continue
             if (r.get("platform") or "").lower() not in platforms:
                 continue
-            # 48h 资格窗口以官方完单时间 reviewed_time 为准 (updated_at 只是本地同步时间, 会随每次刷新漂移)
+            # 48h 资格窗口参照物 = 官方真实完单时间 reviewed_time (从完单时刻起算 48 小时)
+            # 无官方完单时间的订单 (不在同步分页内的历史单) 一律不参与, 宁可漏不可错;
+            # 严禁退回 updated_at (本地同步时间会随刷新漂移, 会让老订单伪装成新完单)
             done_ts = int(r.get("reviewed_time") or 0)
-            if done_ts:
-                done_time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(done_ts))
-            else:
-                # 历史订单无 reviewed_time: 退回 updated_at (同步时间), 宁可漏不可错
-                try:
-                    done_ts = time.mktime(time.strptime(r["updated_at"], "%Y-%m-%d %H:%M:%S"))
-                    done_time_str = r["updated_at"][:16]
-                except Exception:
-                    continue
+            if not done_ts:
+                continue
+            done_time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(done_ts))
             if now - done_ts > 48 * 3600:
                 continue
             eligible.append({
