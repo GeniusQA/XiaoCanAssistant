@@ -4290,6 +4290,63 @@ async def cancel_appointment(aid: int):
 
 # ---------------- 4.1 霸王餐订单管理接口 ---------------- #
 
+# 会员专属免单横幅回填节流缓存 (账号 → 上次执行时间)
+_FREE_ORDER_MARK_CACHE: Dict[str, float] = {}
+
+
+async def _backfill_free_order_marks(account_key: str, acc: Dict[str, Any]):
+    """
+    会员专属免单横幅回填: 官方订单列表接口无论是否免单均不返回免单标记字段,
+    唯一权威痕迹是红包列表 (RedPackService.GetAppRedPackList) 中的「会员专属免单红包」——
+    其 begin_time 即免单到账时刻, value_num (分) 即补贴金额。
+    将每个免单红包匹配到该账号已完成订单 (完单时间早于到账时刻且间隔最近、尚未标记者),
+    写入本地 free_order_at / free_subsidy, 订单列表据此展示免单横幅。
+    """
+    token = acc.get("token")
+    if not token:
+        return
+    rp_res = await client.get_app_redpack_list(
+        token=token, silk_id=str(acc.get("silk_id")), user_id=acc.get("user_id"),
+        city_code=acc.get("city_code") or 440303, page=1, page_size=50
+    )
+    packs: List[Dict[str, Any]] = []
+    for list_key in ("unused_items", "used_items", "expired_items"):
+        for it in (rp_res.get(list_key) or []):
+            if isinstance(it, dict) and (it.get("name") or "") == "会员专属免单红包":
+                packs.append(it)
+    if not packs:
+        return
+    rows = db.get_orders(account_key=account_key, status="completed", limit=100) or []
+    marked = 0
+    for pk in packs:
+        begin_ts = int(pk.get("begin_time") or 0)
+        if not begin_ts:
+            continue
+        best = None
+        best_gap = 0
+        for r in rows:
+            if r.get("free_order_at"):
+                continue
+            rt = int(r.get("reviewed_time") or 0)
+            if rt <= 0 or rt > begin_ts:
+                continue
+            gap = begin_ts - rt
+            if gap > 48 * 3600:
+                continue
+            if best is None or gap < best_gap:
+                best = r
+                best_gap = gap
+        if best is not None:
+            val = pk.get("value_num") or pk.get("reward_num") or 0
+            db.update_order(best["id"], {
+                "free_order_at": begin_ts,
+                "free_subsidy": round(float(val or 0) / 100.0, 2)
+            })
+            marked += 1
+            logger.info(f"免单横幅回填: 订单#{best['id']} ({best.get('order_sn')}) 关联会员专属免单红包 (到账 {time.strftime('%m-%d %H:%M', time.localtime(begin_ts))})")
+    return marked
+
+
 @router.get("/orders")
 async def list_orders(
     account_key: Optional[str] = Query(None),
@@ -4564,6 +4621,17 @@ async def list_orders(
     except Exception as e:
         sync_error = str(e)
         logger.info(f"官方 RPC 同步订单异常 (将直接返回本地数据库记录): {e}")
+
+    # 会员专属免单横幅回填: 官方已完成/全部 Tab 同步后, 用红包列表中的
+    # 「会员专属免单红包」痕迹自动标记被免单的订单 (含官方APP手动免单), 2分钟节流
+    if query_st in (2, 99) and account_key:
+        now_mark = time.time()
+        if now_mark - _FREE_ORDER_MARK_CACHE.get(account_key, 0) > 120:
+            _FREE_ORDER_MARK_CACHE[account_key] = now_mark
+            try:
+                await _backfill_free_order_marks(account_key, acc)
+            except Exception as fe:
+                logger.debug(f"免单横幅回填跳过 {account_key}: {fe}")
 
     orders = db.get_orders(
         account_key=account_key,
