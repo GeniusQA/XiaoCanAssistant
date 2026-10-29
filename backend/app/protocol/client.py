@@ -1735,6 +1735,10 @@ class XiaoCanClient:
                 )
             except XiaoCanRPCError as e:
                 last_err = e
+                # 记录每种参数形态的官方原始拒绝原因, 供后续抓包比对对齐 (不额外发请求)
+                logger.warning(
+                    f"DelayPromotionQuota 形态被拒: body={body} -> code={e.code} msg={e.msg} raw={getattr(e, 'raw', None)}"
+                )
                 # 参数形态不匹配 (参数错误/网关500) 时继续尝试下一形态; 其它业务错误直接抛出
                 if e.code not in (1, 3, 500):
                     raise
