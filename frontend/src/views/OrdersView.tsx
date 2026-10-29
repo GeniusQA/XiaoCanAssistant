@@ -222,8 +222,9 @@ export const OrdersView: React.FC = () => {
       if (!tableContainerRef.current) return;
       const ch = tableContainerRef.current.clientHeight;
       if (ch > 100) {
-        // 预留表头(44px)与分页条(48px)及边框空间(约96px)
-        const targetH = Math.max(260, ch - 96);
+        // 预留表头(约56px)、分页条(约56px含内边距)与边框空间(约40px) 共 152px,
+        // 否则分页条会被容器 overflow:hidden 裁掉 (表现为「分页选择器消失」)
+        const targetH = Math.max(200, ch - 152);
         setTableScrollY((prev) => (Math.abs(prev - targetH) > 12 ? targetH : prev));
       }
     };
