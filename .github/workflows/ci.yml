@@ -68,7 +68,7 @@ jobs:
 
   # ---------------- 上游仓库同步合并 (每日定时 / 手动) ----------------
   sync-upstream:
-    name: Sync Upstream (检测上游更新并合并)
+    name: Sync Other Repositories (检测其他仓库更新并合并)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -111,7 +111,8 @@ jobs:
           # --squash: 上游变更压缩为单个提交 (作者=github-actions[bot]), 不引入上游提交历史与作者信息
           # -X ours: 内容冲突时保留本仓库版本
           if git merge -X ours --squash --allow-unrelated-histories upstream/main; then
-            git commit --no-edit -m "chore: sync upstream AkiSeele/xiaocan-assistant"
+            # 合并说明统一为 Sync Other Repositories, 不出现任何上游仓库/作者信息
+            git commit -m "chore: Sync Other Repositories"
             after_tree=$(git rev-parse 'HEAD^{tree}')
             if [ "$before_tree" = "$after_tree" ]; then
               # 合并后文件树无实质变化 (上游改动已被本仓库包含), 回退避免空提交噪音
