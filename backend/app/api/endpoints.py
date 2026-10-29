@@ -451,6 +451,8 @@ async def get_account_cards_endpoint(key: str, status: int = Query(0, descriptio
         try:
             res = await client.get_user_card_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, status=status, offset=0, number=100)
             cards = res.get("list") or []
+            # 复用本次官方响应作为免单券状态判定的证据源 (免单面板不再额外请求卡券接口)
+            _CARD_LIST_CACHE.setdefault(key, {})[int(status)] = cards
         except XiaoCanRPCError as e:
             cards_error = short_rpc_error(e)
             logger.warning(f"获取卡券失败: {e}")
@@ -4293,6 +4295,32 @@ async def cancel_appointment(aid: int):
 # 会员专属免单横幅回填节流缓存 (账号 → 上次执行时间)
 _FREE_ORDER_MARK_CACHE: Dict[str, float] = {}
 
+# 卡券列表内存缓存 (账号 → {status: 列表}) : 复用「我的卡券」页已拉取的官方数据,
+# 供免单面板判定使用; 附拉取时间戳, 5 分钟内不重复请求官方接口 (降低 WAF 风控风险)
+_CARD_LIST_CACHE: Dict[str, Dict[int, List[Dict[str, Any]]]] = {}
+_CARD_LIST_CACHE_TS: Dict[str, Dict[int, float]] = {}
+_CARD_LIST_TTL = 300
+
+
+def _is_free_order_card(item: Dict[str, Any]) -> bool:
+    """判断卡券列表条目是否为「会员免单券」: 官方卡券结构常见为 {card: {name/title/...}} 或平铺字段"""
+    card = item.get("card") if isinstance(item.get("card"), dict) and item.get("card") else item
+    names = [
+        str(card.get(k) or "") for k in ("name", "title", "card_name", "sub_name")
+    ]
+    names.append(str(card.get("desc") or ""))
+    text = " ".join(names)
+    return ("免单" in text) or ("霸王餐" in text)
+
+
+def _pick_free_card(account_key: str, status: int) -> Optional[Dict[str, Any]]:
+    """从已缓存的卡券列表里挑出指定状态的会员免单券 (status: 0未使用 1已使用 2已过期)"""
+    bucket = _CARD_LIST_CACHE.get(account_key) or {}
+    for item in (bucket.get(int(status)) or []):
+        if isinstance(item, dict) and _is_free_order_card(item):
+            return item
+    return None
+
 
 async def _backfill_free_order_marks(account_key: str, acc: Dict[str, Any]):
     """
@@ -5215,35 +5243,80 @@ async def free_order_panel():
     for acc in db.get_all_accounts():
         if not acc.get("token"):
             continue
-        try:
-            res = await client.get_user_free_order_info(
-                token=acc["token"], silk_id=acc.get("silk_id"), user_id=acc.get("user_id"),
-                city_code=acc.get("city_code") or 440303
-            )
-        except XiaoCanRPCError:
-            continue
-        info = res.get("info") or res
-        values = info.get("red_pack_value") or []
-        raw_amount = values[0] if isinstance(values, list) and values else (values if isinstance(values, (int, float)) else 0)
-        amount_yuan = round(float(raw_amount or 0) / 100.0, 2)
-        biz_list = info.get("order_business") or []
-        platforms = [biz_to_platform.get(int(b)) for b in biz_list if str(b).isdigit()] or ["meituan"]
-        # 先回填官方APP手动免单痕迹 (红包列表「会员专属免单红包」→本地免单记录), 确保已免单订单即时排除
-        try:
-            await _backfill_free_order_marks(acc.get("key"), acc)
-        except Exception:
-            pass
-        rows = db.get_orders(account_key=acc.get("key"), status="completed", limit=100) or []
-        # 券真实状态核验: 官方 UserFreeOrderInfo 在核销后仍长期返回 used:false (已实测, 字段不可靠),
-        # 故以本地免单核销记录 (free_order_at) 作为「已被使用」的权威证据: 31天内有过核销 → 当期券已用
-        month_ago = time.time() - 31 * 86400
+        acc_key = acc.get("key")
+        # 1) 先回填官方APP手动免单痕迹 (红包列表「会员专属免单红包」→本地免单记录), 确保已免单订单即时排除
+        #    60 秒节流: 面板反复刷新时不重复打红包接口, 降低腾讯 WAF 风控概率
+        if now - _FREE_ORDER_MARK_CACHE.get(acc_key, 0) > 60:
+            _FREE_ORDER_MARK_CACHE[acc_key] = now
+            try:
+                await _backfill_free_order_marks(acc_key, acc)
+            except Exception:
+                pass
+        rows = db.get_orders(account_key=acc_key, status="completed", limit=100) or []
+        # 2) 本地权威证据: 官方 UserFreeOrderInfo 核销后仍长期返回 used:false (实测不可靠),
+        #    故 31 天内存在免单核销记录 (free_order_at) 即判定当期券已用, 且无需再请求官方接口
+        month_ago = now - 31 * 86400
         consumed = any(int(r.get("free_order_at") or 0) > month_ago for r in rows)
-        if not info.get("had"):
-            card_status = "none"
-        elif info.get("used") or consumed:
+
+        info: Dict[str, Any] = {}
+        amount_yuan = 0.0
+        platforms = ["meituan"]
+        card_id = 0
+        # 3) 卡券列表证据: 官方「我的卡券」页 (SilkwormCardService.GetUserCardList) 是免单券状态的权威来源,
+        #    直接复用前端已拉取的未使用/已使用两个 Tab 快照, 不新增官方请求
+        bucket = _CARD_LIST_CACHE.get(acc_key) or {}
+        # 「已使用」Tab 是判断券是否已核销的权威来源: 缺失或过期(5分钟)时补拉一次, 命中即无需再问 UserFreeOrderInfo
+        if now - ((_CARD_LIST_CACHE_TS.get(acc_key) or {}).get(1, 0)) > _CARD_LIST_TTL:
+            try:
+                used_res = await client.get_user_card_list(
+                    token=acc["token"], silk_id=acc.get("silk_id"), user_id=acc.get("user_id"),
+                    city_code=acc.get("city_code") or 440303, status=1, offset=0, number=100
+                )
+                _CARD_LIST_CACHE.setdefault(acc_key, {})[1] = used_res.get("list") or []
+                _CARD_LIST_CACHE_TS.setdefault(acc_key, {})[1] = now
+                bucket = _CARD_LIST_CACHE.get(acc_key) or {}
+            except Exception as ce:
+                logger.debug(f"免单面板拉取已使用卡券失败 {acc_key}: {ce}")
+        has_snapshot = 0 in bucket and 1 in bucket
+        avail_hit = _pick_free_card(acc_key, 0) if has_snapshot else None
+        used_hit = _pick_free_card(acc_key, 1)
+
+        if consumed:
             card_status = "used"
-        else:
+        elif used_hit:
+            # 官方卡券表「已使用」Tab 里存在会员免单券 → 权威结论: 已用 (不再看 UserFreeOrderInfo.used)
+            card_status = "used"
+        elif has_snapshot and avail_hit:
             card_status = "available"
+        elif has_snapshot:
+            # 卡券快照齐全且无免单券 → 官方侧本就没有可用券, 不必再猜 used 字段
+            card_status = "none"
+        else:
+            # 4) 无卡券快照时回退官方接口 (金额/适用平台仍以官方 red_pack_value / order_business 为准)
+            try:
+                res = await client.get_user_free_order_info(
+                    token=acc["token"], silk_id=acc.get("silk_id"), user_id=acc.get("user_id"),
+                    city_code=acc.get("city_code") or 440303
+                )
+            except XiaoCanRPCError:
+                card_status = "none" if has_snapshot else "skip"
+            else:
+                info = res.get("info") or res
+                if not info.get("had"):
+                    card_status = "none"
+                elif info.get("used"):
+                    card_status = "used"
+                else:
+                    card_status = "available"
+            if card_status == "skip":
+                continue
+        if card_status != "used":
+            values = info.get("red_pack_value") or []
+            raw_amount = values[0] if isinstance(values, list) and values else (values if isinstance(values, (int, float)) else 0)
+            amount_yuan = round(float(raw_amount or 0) / 100.0, 2)
+            biz_list = info.get("order_business") or []
+            platforms = [biz_to_platform.get(int(b)) for b in biz_list if str(b).isdigit()] or ["meituan"]
+            card_id = int(info.get("user_free_card_id") or info.get("id") or 0)
         eligible = []
         for r in (rows if card_status == "available" else []):
             if r.get("free_order_at"):
@@ -5278,7 +5351,7 @@ async def free_order_panel():
             "account_key": acc.get("key"),
             "nickname": acc.get("nickname") or acc.get("key"),
             "status": card_status,
-            "card_id": info.get("user_free_card_id") or info.get("id") or 0,
+            "card_id": card_id,
             "amount_yuan": amount_yuan if card_status == "available" else 0,
             "platforms": platforms,
             "orders": eligible,
@@ -5307,6 +5380,13 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
 
     plat = (target_order.get("platform") or "meituan").lower()
     order_business = 2 if "ele" in plat else 1
+
+    # 本地免单核销记录优先: 官方 UserFreeOrderInfo.used 核销后仍长期返回 false (实测不可靠),
+    # 31 天内已有免单核销记录 → 直接拒绝, 避免重复核销
+    _month_ago = time.time() - 31 * 86400
+    _rows = db.get_orders(account_key=account_key, status="completed", limit=100) or []
+    if any(int(r.get("free_order_at") or 0) > _month_ago for r in _rows):
+        raise HTTPException(status_code=400, detail="当前账号本月免单券已使用，每月限使用 1 次")
 
     # 获取用户免单券 ID
     user_free_card_id = data.get("user_free_card_id")
