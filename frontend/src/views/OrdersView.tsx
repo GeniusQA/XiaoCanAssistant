@@ -276,7 +276,16 @@ export const OrdersView: React.FC = () => {
 
       if (ordersRes.ok) {
         lastOrdersSignatureRef.current = queryKey;
-        setOrders(ordersRes.orders || []);
+        // 方案A: 「已取消」Tab 默认仅展示近 7 天, 更早的历史订单隐藏 (搜索词非空时不过滤, 数据保留可查)
+        let list: Order[] = ordersRes.orders || [];
+        if (activeStatusTab === 'cancelled' && !keywordToSearch) {
+          const cutoff = Math.floor(Date.now() / 1000) - 7 * 86400;
+          list = list.filter((o) => {
+            const t = Number((o as any).order_time) || 0;
+            return t === 0 || t >= cutoff;
+          });
+        }
+        setOrders(list);
         if ((ordersRes.orders || []).length === 0 && ordersRes.sync_error) {
           Toast.warning({
             content: '官方订单同步失败，当前展示本地缓存。原因: ' + ordersRes.sync_error,
@@ -994,6 +1003,11 @@ export const OrdersView: React.FC = () => {
           <TabPane tab="已驳回" itemKey="rejected" />
           <TabPane tab="已取消" itemKey="cancelled" />
         </Tabs>
+        {activeStatusTab === 'cancelled' && (
+          <Text size="small" type="secondary" className="shrink-0">
+            仅展示近 7 天已取消订单，更早记录可使用上方搜索框按店铺名/单号查看
+          </Text>
+        )}
 
         <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
           <RadioGroup
