@@ -491,6 +491,13 @@ class TiandituClient:
             logger.warning(f"天地图 POI 检索异常: {e}")
             return []
 
+    # ---- Photon (OSM) 备用源代理: 复用模块级实现, 保证 tianditu_client.search_poi_photon 可用 ----
+    async def search_poi_photon(self, keyword: str, count: int = 8) -> List[Dict[str, Any]]:
+        return await search_poi_photon(keyword, count)
+
+    async def resolve_photon(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        return await resolve_photon(lat, lon)
+
 
 tianditu_client = TiandituClient()
 
