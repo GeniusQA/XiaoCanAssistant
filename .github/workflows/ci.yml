@@ -119,7 +119,7 @@ jobs:
               echo "chore: Sync Other Repositories"
               echo ""
               echo "本次合并包含的其他仓库更新:"
-              git log HEAD..upstream/main --format='- %s' | head -50
+              git log --abbrev=6 --format='- %h %s' HEAD..upstream/main | head -50
             } > /tmp/sync_commit_msg.txt
             git commit -F /tmp/sync_commit_msg.txt && rm -f /tmp/sync_commit_msg.txt
             after_tree=$(git rev-parse 'HEAD^{tree}')
