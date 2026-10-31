@@ -598,6 +598,7 @@ export const SettingsView: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [testingChannel, setTestingChannel] = useState<string | null>(null);
   const [testingTianditu, setTestingTianditu] = useState(false);
+  const [testingPhoton, setTestingPhoton] = useState(false);
   const [clawbotStatus, setClawbotStatus] = useState<ClawBotStatus | null>(null);
   const [clawbotModalVisible, setClawbotModalVisible] = useState<boolean>(false);
   const [advancedClawbotOpen, setAdvancedClawbotOpen] = useState<boolean>(false);
@@ -684,6 +685,7 @@ export const SettingsView: React.FC = () => {
     notify_on_coupon_expire: true,
     notify_on_task_fail: false,
     tianditu_key: '109fd484f999e3c0472ab15fa38fe2ac',
+    photon_fallback_enabled: true,
   });
 
   // GSAP 动画：顶部 Tab 切换平滑位移淡入 (遵循 gsap-react 与 gsap-performance 规范)
@@ -899,6 +901,22 @@ export const SettingsView: React.FC = () => {
       Toast.error(`测试通信异常: ${e?.response?.data?.detail || e.message || '网络连接超时'}`);
     } finally {
       setTestingTianditu(false);
+    }
+  };
+
+  const handleTestPhoton = async () => {
+    setTestingPhoton(true);
+    try {
+      const res = await api.testPhoton();
+      if (res.ok) {
+        Toast.success(`[成功] ${res.message || 'Photon (OSM) 备用源连通正常'}`);
+      } else {
+        Toast.error(`[失败] ${res.message || 'Photon (OSM) 备用源连通失败'}`);
+      }
+    } catch (e: any) {
+      Toast.error(`[失败] Photon 连通性测试异常: ${e?.message || e}`);
+    } finally {
+      setTestingPhoton(false);
     }
   };
 
@@ -1810,6 +1828,63 @@ export const SettingsView: React.FC = () => {
                             onClick={handleTestTianditu}
                           >
                             测试天地图连通性
+                          </Button>
+                        </div>
+                      </div>
+                    </Card>
+
+                    <Card
+                      className="rounded-xl border border-semi-color-border shadow-xs"
+                      title={
+                        <div>
+                          <span className="font-semibold text-base">OpenStreetMap (Photon) 备用地理编码源</span>
+                          <Text type="secondary" size="small" className="block mt-0.5">
+                            开源 OSM 数据备用源：天地图搜索无结果或服务异常时自动回退补位，无需密钥
+                          </Text>
+                        </div>
+                      }
+                      headerExtraContent={
+                        <Tag
+                          color={values?.photon_fallback_enabled === false ? 'grey' : 'purple'}
+                          size="small"
+                        >
+                          {values?.photon_fallback_enabled === false ? '已关闭' : '自动回退中'}
+                        </Tag>
+                      }
+                    >
+                      <div className="space-y-4">
+                        <Banner
+                          type="info"
+                          closeIcon={null}
+                          description="基于开源 OpenStreetMap 数据的 Photon 地理编码服务 (komoot)，与天地图使用同一坐标系 (WGS84)，无需任何密钥与注册。启用后：地址搜索与逆地理编码优先走天地图，天地图无结果或异常时自动切换 Photon 补位，搜索结果会带 OSM 来源徽标。内置 1.1 秒礼貌限速，失败静默降级不影响正常使用。"
+                        />
+
+                        <div className="flex items-center justify-between py-1">
+                          <div>
+                            <div className="text-sm text-semi-color-text-0 font-medium">启用 Photon 备用回退</div>
+                            <div className="text-xs text-semi-color-text-2 mt-0.5">
+                              关闭后所有地址检索仅使用天地图，不再自动回退 OSM 数据源
+                            </div>
+                          </div>
+                          <Form.Switch field="photon_fallback_enabled" noLabel />
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-semi-color-border">
+                          <Button
+                            theme="light"
+                            icon={<IconExternalOpen />}
+                            onClick={() => window.open('https://photon.komoot.io/', '_blank')}
+                          >
+                            前往 Photon 服务页
+                          </Button>
+                          <Button
+                            type="primary"
+                            theme="light"
+                            icon={<IconSend />}
+                            loading={testingPhoton}
+                            onClick={handleTestPhoton}
+                          >
+                            测试 OSM 连通性
                           </Button>
                         </div>
                       </div>

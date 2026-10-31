@@ -5492,7 +5492,9 @@ async def get_settings():
         "notify_on_coupon_expire": db.get_setting("notify_on_coupon_expire", True),
         "notify_on_task_fail": db.get_setting("notify_on_task_fail", False),
         # 位置服务与天地图 Web API (tianditu.gov.cn)
-        "tianditu_key": db.get_setting("tianditu_key", "109fd484f999e3c0472ab15fa38fe2ac")
+        "tianditu_key": db.get_setting("tianditu_key", "109fd484f999e3c0472ab15fa38fe2ac"),
+        # OpenStreetMap (Photon) 备用地理编码源开关
+        "photon_fallback_enabled": db.get_setting("photon_fallback_enabled", True)
     }
 
 
@@ -5664,6 +5666,21 @@ async def test_tianditu_endpoint(data: Dict[str, Any] = Body(...)):
     tianditu_key = str(data.get("tianditu_key", "")).strip()
     res = await tianditu_client.test_connection(tianditu_key)
     return res
+
+
+@router.post("/settings/test-photon")
+async def test_photon_endpoint():
+    """测试 OpenStreetMap (Photon) 备用地理编码源连通性 (样例检索 '成都')"""
+    t0 = time.time()
+    try:
+        res = await tianditu_client.search_poi_photon("成都")
+        ms = int((time.time() - t0) * 1000)
+        if res:
+            return {"ok": True, "count": len(res), "latency_ms": ms,
+                    "message": f"Photon (OSM) 连通正常，耗时 {ms}ms，返回 {len(res)} 条候选"}
+        return {"ok": False, "message": "Photon 可达但未返回候选 (可能被限速或服务波动)，请稍后重试"}
+    except Exception as e:
+        return {"ok": False, "message": f"Photon 连接失败: {e}"}
 
 
 @router.post("/settings/test-notify")
@@ -5863,11 +5880,10 @@ async def search_location(keyword: str = Query("", description="搜索地址或�
         }
 
     # 兜底 1: 天地图 0 命中/异常 -> Photon (OSM) 备用地理编码源自动回退
-    try:
-        photon_c = await tianditu_client.search_poi_photon(clean_kw)
-    except Exception as e:
-        logger.warning(f"Photon 备用检索异常: {e}")
-        photon_c = []
+    _photon_on = str(db.get_setting("photon_fallback_enabled", True)).strip().lower() not in ("false", "0", "off")
+    photon_c = (await tianditu_client.search_poi_photon(clean_kw)) if _photon_on else []
+    if not _photon_on:
+        logger.info("Photon 备用源已在设置中关闭, 跳过回退")
     if photon_c:
         for c in photon_c:
             if not c.get("city_code"):
@@ -5955,8 +5971,9 @@ async def resolve_location(latitude: float = Query(...), longitude: float = Quer
         logger.warning(f"天地图逆地理编码异常，切换降级通道: {e}")
 
     # 2. 降级备用通道 (Photon/OSM): 免key, 与天地图同坐标系 (WGS84/CGCS2000)
+    _photon_on_rev = str(db.get_setting("photon_fallback_enabled", True)).strip().lower() not in ("false", "0", "off")
+    photon_res = (await tianditu_client.resolve_photon(latitude, longitude)) if _photon_on_rev else None
     try:
-        photon_res = await tianditu_client.resolve_photon(latitude, longitude)
         if photon_res and photon_res.get("city_name"):
             c_name = photon_res["city_name"]
             c_code = photon_res.get("city_code") or CITY_CODE_MAP.get(c_name) or CITY_CODE_MAP.get(f"{c_name}市") or 0

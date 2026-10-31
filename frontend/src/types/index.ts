@@ -647,6 +647,7 @@ export interface SystemSettings {
   notify_on_task_fail: boolean;
   // 位置服务与天地图 Web API (tianditu.gov.cn)
   tianditu_key?: string;
+  photon_fallback_enabled?: boolean;
 }
 
 export interface NotifyTestResult {
