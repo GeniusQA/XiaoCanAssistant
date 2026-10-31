@@ -5615,15 +5615,20 @@ async def notify_healthcheck_endpoint(data: Dict[str, Any] = Body(default={})):
     bad_list = [x for x in results if not x["ok"]]
 
     # 巡检同时刷新 ClawBot 会话探测缓存, 使设置页「连接状态」同步更新
+    # 语义修正: 仅「会话尚未激活/上下文已过期」(官方 ret=-2) 才判定会话失效;
+    # WAF 403/网络超时等发送失败不代表会话无效, 不覆盖会话缓存 (曾导致刚激活即显示失效)
     claw_res = next((x for x in results if x["channel"] == "clawbot"), None)
     if claw_res is not None:
         try:
-            db.set_setting("clawbot_last_probe", json.dumps({
-                "ok": claw_res["ok"],
-                "message": claw_res["message"],
-                "probed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "ts": time.time(),
-            }, ensure_ascii=False))
+            _claw_msg = str(claw_res.get("message") or "")
+            _is_session_issue = ("会话尚未激活" in _claw_msg) or ("上下文已过期" in _claw_msg)
+            if claw_res.get("ok") or _is_session_issue:
+                db.set_setting("clawbot_last_probe", json.dumps({
+                    "ok": bool(claw_res.get("ok")),
+                    "message": _claw_msg,
+                    "probed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "ts": time.time(),
+                }, ensure_ascii=False))
         except Exception:
             pass
 
@@ -5777,6 +5782,17 @@ async def clawbot_poll_qr_endpoint(
 async def clawbot_check_activation_endpoint():
     """长轮询检测并抓取用户发给 ClawBot 的消息以激活 context_token"""
     res = await clawbot_client.check_activation(timeout=15.0)
+    # 激活成功立即覆写会话探测缓存, 避免设置页 120s 缓存窗口内仍显示旧的「会话已失效」
+    try:
+        if res.get("ok") and res.get("has_context_token", res.get("activated")):
+            db.set_setting("clawbot_last_probe", json.dumps({
+                "ok": True,
+                "message": "微信会话已激活 (context_token 就绪)",
+                "probed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "ts": time.time(),
+            }, ensure_ascii=False))
+    except Exception:
+        pass
     return res
 
 
