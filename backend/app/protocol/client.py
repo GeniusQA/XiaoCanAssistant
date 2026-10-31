@@ -2051,6 +2051,34 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    async def delete_promotion_order(
+        self,
+        promotion_order_id: Any,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """删除霸王餐订单记录 (SilkwormService.DeletePromotionOrder)
+
+        官方抓包确认: body {"silk_id":..., "promotion_order_id":..., "app_id":20}
+        成功响应 {"status": {"code": 0}}; 仅允许删除 已完成/已取消 状态订单
+        """
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_order_id": int(promotion_order_id),
+            "app_id": 20
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.DeletePromotionOrder",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
     async def get_store_promotion_detail(
         self,
         promotion_id: Any,
