@@ -298,35 +298,6 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
         log_steps.append(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 流程完成 - 订单状态已置为待下单，已投递抢单成功系统通知")
         logger.info(f"预约/监听任务 #{aid} 抢单成功: {success_msg}")
 
-        # 写入订单库
-        try:
-            ratio_val = 0.0
-            if is_percent_order:
-                raw_r = float(res.get("user_ratio") or res.get("ratio") or 0)
-                if raw_r > 0:
-                    ratio_val = round(raw_r / 100.0 if raw_r >= 100 else raw_r, 1)
-                else:
-                    m_ratio = re.search(r"(\d+(?:\.\d+)?)\s*%", rebate_desc_str)
-                    if m_ratio:
-                        ratio_val = float(m_ratio.group(1))
-            db.save_order({
-                "account_key": apt["account_key"],
-                "order_sn": str(res.get("order_id_str") or order_id),
-                "promotion_order_id": order_id,
-                "store_id": apt["store_id"],
-                "store_name": apt["store_name"],
-                "store_icon": apt.get("store_icon") or "",
-                "platform": apt.get("platform", "meituan"),
-                "order_money": 0.0 if is_percent_order else float(apt.get("order_money", 0.0)),
-                "rebate_money": float(apt.get("rebate_price", 0.0)),
-                "order_type": 12 if is_percent_order else 1,
-                "rebate_ratio": ratio_val,
-                "status": "pending",
-                "condition": "无需评价",
-                "order_time": int(time.time())
-            })
-        except Exception as oe:
-            logger.warning(f"写入订单记录失败: {oe}")
 
         # 发送系统通知
         await send_system_notification(

@@ -4322,59 +4322,6 @@ def _pick_free_card(account_key: str, status: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _backfill_free_order_marks(account_key: str, acc: Dict[str, Any]):
-    """
-    会员专属免单横幅回填: 官方订单列表接口无论是否免单均不返回免单标记字段,
-    唯一权威痕迹是红包列表 (RedPackService.GetAppRedPackList) 中的「会员专属免单红包」——
-    其 begin_time 即免单到账时刻, value_num (分) 即补贴金额。
-    将每个免单红包匹配到该账号已完成订单 (完单时间早于到账时刻且间隔最近、尚未标记者),
-    写入本地 free_order_at / free_subsidy, 订单列表据此展示免单横幅。
-    """
-    token = acc.get("token")
-    if not token:
-        return
-    rp_res = await client.get_app_redpack_list(
-        token=token, silk_id=str(acc.get("silk_id")), user_id=acc.get("user_id"),
-        city_code=acc.get("city_code") or 440303, page=1, page_size=50
-    )
-    packs: List[Dict[str, Any]] = []
-    for list_key in ("unused_items", "used_items", "expired_items"):
-        for it in (rp_res.get(list_key) or []):
-            if isinstance(it, dict) and (it.get("name") or "") == "会员专属免单红包":
-                packs.append(it)
-    if not packs:
-        return
-    rows = db.get_orders(account_key=account_key, status="completed", limit=100) or []
-    marked = 0
-    for pk in packs:
-        begin_ts = int(pk.get("begin_time") or 0)
-        if not begin_ts:
-            continue
-        best = None
-        best_gap = 0
-        for r in rows:
-            if r.get("free_order_at"):
-                continue
-            rt = int(r.get("reviewed_time") or 0)
-            if rt <= 0 or rt > begin_ts:
-                continue
-            gap = begin_ts - rt
-            if gap > 48 * 3600:
-                continue
-            if best is None or gap < best_gap:
-                best = r
-                best_gap = gap
-        if best is not None:
-            val = pk.get("value_num") or pk.get("reward_num") or 0
-            db.update_order(best["id"], {
-                "free_order_at": begin_ts,
-                "free_subsidy": round(float(val or 0) / 100.0, 2)
-            })
-            marked += 1
-            logger.info(f"免单横幅回填: 订单#{best['id']} ({best.get('order_sn')}) 关联会员专属免单红包 (到账 {time.strftime('%m-%d %H:%M', time.localtime(begin_ts))})")
-    return marked
-
-
 @router.get("/orders")
 async def list_orders(
     account_key: Optional[str] = Query(None),
@@ -4435,6 +4382,7 @@ async def list_orders(
     sync_error = ""
     try:
         raw_orders: List[Dict[str, Any]] = []
+        live_orders: List[Dict[str, Any]] = []
         max_pages = 3 if query_st != 99 else 2
         hist_key = f"{account_key}_{query_st}"
         hist_fresh = (time.time() - _ORDER_HIST_PAGE_CACHE.get(hist_key, 0)) < 300
@@ -4477,18 +4425,6 @@ async def list_orders(
                 ""
             )
             store_id = str(store_obj.get("store_id") or "")
-            if not store_icon and (store_id or store_name):
-                try:
-                    conn = db.get_db()
-                    cur = conn.cursor()
-                    r_icon = cur.execute(
-                        "SELECT store_icon FROM orders WHERE (store_id = ? OR store_name = ?) AND store_icon != '' LIMIT 1",
-                        (store_id, store_name)
-                    ).fetchone()
-                    if r_icon and r_icon[0]:
-                        store_icon = r_icon[0]
-                except Exception:
-                    pass
             
             order_type_val = int(o.get("order_type") or 0)
             raw_ratio = float(o.get("ratio") or 0)
@@ -4583,7 +4519,8 @@ async def list_orders(
             tt = o.get("timeout_time")
             exp_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tt)) if tt else ""
 
-            db.save_order({
+            live_orders.append({
+                "id": int(o.get("promotion_order_id") or 0),
                 "account_key": account_key,
                 "order_sn": order_sn,
                 "promotion_order_id": int(o.get("promotion_order_id") or 0),
@@ -4618,62 +4555,31 @@ async def list_orders(
                 "if_user_deleted": 1 if o.get("if_user_deleted") else None
             })
 
-        # 若本次查询为「待上传」(query_st == 0) 或全部，核验本地与官方待处理列表
-        if query_st == 0 and account_key:
-            official_pending_sns = {str(o.get("order_id_str") or o.get("promotion_order_id") or "") for o in raw_orders if o}
-            local_pending = db.get_orders(account_key=account_key, status="pending", limit=100)
-            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-            now_ts = int(time.time())
-            backfill_done = 0
-            for lp in local_pending:
-                lp_sn = str(lp.get("order_sn") or "")
-                # 状态一律以官方为准: 不再按本地超时时间把订单推断为已取消
-                # 补全官方已提交的平台单号: 列表接口不返回, 仅详情接口(GetClientPromotionOrder)返回
-                if not str(lp.get("platform_order_id") or "").strip() and int(lp.get("promotion_order_id") or 0) > 0 and backfill_done < 5:
-                    try:
-                        det = await client.get_client_promotion_order(
-                            promotion_order_id=int(lp["promotion_order_id"]),
-                            token=token, silk_id=silk_id, user_id=user_id, city_code=city_code
-                        )
-                        po = det.get("promotion_order") or {}
-                        poid = str(po.get("platform_order_id") or "").strip()
-                        if poid:
-                            db.update_order(lp["id"], {
-                                "platform_order_id": poid,
-                                "platform_total_price": float(po.get("platform_order_total_price") or lp.get("platform_total_price") or 0),
-                                "remark": str(po.get("reason") or lp.get("remark") or "")
-                            })
-                            backfill_done += 1
-                    except Exception as det_err:
-                        logger.debug(f"订单详情补全单号失败 #{lp.get('id')}: {det_err}")
-                    await asyncio.sleep(0.2)
     except XiaoCanRPCError as se:
         sync_error = short_rpc_error(se)
-        logger.info(f"官方 RPC 同步订单异常 (将直接返回本地数据库记录): {se}")
+        logger.info(f"官方 RPC 同步订单异常 (本次列表返回官方已拉取数据或为空): {se}")
     except Exception as e:
         sync_error = str(e)
-        logger.info(f"官方 RPC 同步订单异常 (将直接返回本地数据库记录): {e}")
+        logger.info(f"官方 RPC 同步订单异常 (本次列表返回官方已拉取数据或为空): {e}")
 
-    # 会员专属免单横幅回填: 官方已完成/全部 Tab 同步后, 用红包列表中的
-    # 「会员专属免单红包」痕迹自动标记被免单的订单 (含官方APP手动免单), 2分钟节流
-    if query_st in (2, 99) and account_key:
-        now_mark = time.time()
-        if now_mark - _FREE_ORDER_MARK_CACHE.get(account_key, 0) > 120:
-            _FREE_ORDER_MARK_CACHE[account_key] = now_mark
-            try:
-                await _backfill_free_order_marks(account_key, acc)
-            except Exception as fe:
-                logger.debug(f"免单横幅回填跳过 {account_key}: {fe}")
 
-    orders = db.get_orders(
-        account_key=account_key,
-        status=status,
-        platform=platform,
-        keyword=keyword,
-        limit=limit,
-        offset=offset
-    )
-    resp: Dict[str, Any] = {"ok": True, "orders": orders, "total": len(orders)}
+    # 直连官方模式: 不读本地订单库, 直接以官方实时拉取结果返回 (内存过滤)
+    kw = (keyword or "").strip().lower()
+
+    def _match(o: Dict[str, Any]) -> bool:
+        if status and status != "all" and (o.get("status") or "") != status:
+            return False
+        if platform and platform != "all" and (o.get("platform") or "") != platform:
+            return False
+        if kw:
+            hay = " ".join(str(o.get(k) or "") for k in ("store_name", "order_sn", "platform_order_id", "store_id")).lower()
+            if kw not in hay:
+                return False
+        return True
+
+    filtered = [o for o in live_orders if _match(o)]
+    page = filtered[(offset or 0): (offset or 0) + (limit or 200)]
+    resp: Dict[str, Any] = {"ok": True, "orders": page, "total": len(filtered)}
     if sync_error:
         # 官方同步失败 (如 WAF 拦截/凭据失效) 时附带具体原因，前端可提示用户，避免静默空列表
         resp["sync_error"] = sync_error
@@ -4696,31 +4602,44 @@ async def get_orders_stats(account_key: Optional[str] = Query(None)):
                 "total_spent": 0
             }
         }
-    stats = db.get_order_stats(account_key=account_key)
-    
-    # 结合当前主控账号的官方原生资产进行综合校准
+    # 直连官方模式: 统计直接取官方账号资产 (accounts 表为账号资料同步, 非订单缓存)
     acc = None
     if account_key:
         acc = db.get_account_by_key(account_key)
     if not acc and accounts:
         acc = accounts[0]
-        
+    stats = {
+        "total_orders": 0,
+        "completed_orders": 0,
+        "pending_orders": 0,
+        "total_rebate": 0.0,
+        "pending_rebate": 0.0,
+        "total_spent": 0.0,
+    }
     if acc:
-        official_completed = int(acc.get("completed_number") or 0)
-        official_total_rebate = round(((acc.get("withdraw_total") or 0) + (acc.get("silk") or 0)) / 100.0, 2)
-        if official_completed > stats["completed_orders"]:
-            stats["completed_orders"] = official_completed
-            stats["total_orders"] = max(stats["total_orders"], official_completed + stats["pending_orders"])
-        if official_total_rebate > stats["total_rebate"]:
-            stats["total_rebate"] = official_total_rebate
-            
+        stats["completed_orders"] = int(acc.get("completed_number") or 0)
+        stats["pending_orders"] = int(acc.get("pending_number") or 0)
+        stats["total_orders"] = stats["completed_orders"] + stats["pending_orders"]
+        stats["total_rebate"] = round(((acc.get("withdraw_total") or 0) + (acc.get("silk") or 0)) / 100.0, 2)
+
     return {"ok": True, "stats": stats}
 
 
 @router.get("/dashboard/chart-data")
 async def get_dashboard_chart_data_endpoint(account_key: Optional[str] = Query(None)):
     """获取仪表盘可视化图表数据 (近7天返利趋势、订单状态分布、平台分布)"""
-    chart_data = db.get_dashboard_chart_data(account_key=account_key)
+    # 直连官方模式: 本地订单库已移除, 图表数据不再提供 (保留空结构兼容前端)
+    chart_data = {
+        "today_summary": {
+            "today_savings": 0.0,
+            "today_completed_orders": 0,
+            "today_orders": 0,
+            "today_pending_orders": 0,
+        },
+        "rebate_trend": [],
+        "status_distribution": [],
+        "platform_distribution": [],
+    }
     return {"ok": True, "data": chart_data}
 
 
@@ -4772,56 +4691,30 @@ async def reload_scheduler_jobs_endpoint():
 
 @router.post("/orders")
 async def create_order_endpoint(data: Dict[str, Any] = Body(...)):
-    """手动录入新订单"""
-    if not data.get("store_icon"):
-        sname = (data.get("store_name") or "").strip()
-        if sname:
-            try:
-                conn = db.get_db()
-                cur = conn.cursor()
-                r_icon = cur.execute(
-                    "SELECT store_icon FROM orders WHERE store_name = ? AND store_icon != '' LIMIT 1",
-                    (sname,)
-                ).fetchone()
-                if r_icon and r_icon[0]:
-                    data["store_icon"] = r_icon[0]
-            except Exception:
-                pass
-    saved = db.save_order(data)
-    return {"ok": True, "order": saved, "message": "订单已成功登记"}
+    """手动录入订单已随本地订单缓存下线 (订单列表直连官方实时数据)"""
+    return {"ok": False, "message": "手动录入订单功能已下线：订单列表已改为直连官方实时数据"}
 
 
 @router.put("/orders/{order_id}")
 async def update_order_endpoint(order_id: int, data: Dict[str, Any] = Body(...)):
-    """更新霸王餐订单信息"""
-    updated = db.update_order(order_id, data)
-    if not updated:
-        raise HTTPException(status_code=404, detail="订单不存在")
-    return {"ok": True, "order": updated, "message": "订单信息已更新"}
+    """本地订单编辑已随订单缓存下线 (订单信息以官方实时数据为准)"""
+    return {"ok": False, "message": "本地订单编辑功能已下线：订单信息以官方实时数据为准"}
 
 
 @router.post("/orders/{order_id}/cancel-signup")
-async def cancel_order_signup(order_id: int):
+async def cancel_order_signup(order_id: int, account_key: Optional[str] = Query(None)):
     """
     取消报名 (对应官方待上传订单卡片底部「取消报名」)
-    直连官方 Silkworm.SilkwormService.CancelPromotionQuota, 成功后本地置为已取消。
+    直连官方 Silkworm.SilkwormService.CancelPromotionQuota; order_id 即官方 promotion_order_id
     """
-    order = db.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="订单不存在")
-    if (order.get("status") or "") != "pending":
-        raise HTTPException(status_code=400, detail="仅「待上传/已下单待反馈」订单可取消报名")
-
-    account_key = order.get("account_key")
+    accounts = db.get_all_accounts()
     acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc and accounts:
+        acc = accounts[0]
     if not acc or not acc.get("token"):
         raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
 
-    promo_id = int(order.get("promotion_order_id") or 0)
-    if not promo_id:
-        m = re.search(r"(\d{8,10})$", str(order.get("order_sn") or ""))
-        if m:
-            promo_id = int(m.group(1))
+    promo_id = int(order_id or 0)
     if not promo_id:
         raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号，无法取消报名")
 
@@ -4838,8 +4731,7 @@ async def cancel_order_signup(order_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"取消报名请求异常: {str(e)}")
 
-    db.update_order(order_id, {"status": "cancelled"})
-    return {"ok": True, "order": db.get_order_by_id(order_id), "message": "已成功取消报名（官方已确认）", "raw": res}
+    return {"ok": True, "message": "已成功取消报名（官方已确认）", "raw": res}
 
 
 @router.post("/orders/{order_id}/submit-platform-id")
@@ -4847,36 +4739,27 @@ async def submit_platform_order_id(order_id: int, data: Dict[str, Any] = Body(..
     """
     提交/修改外卖单号进入小蚕平台审核返利流程 (100% 直连官方接口)
     force_modify=true 时为「修改外卖单号」模式: 允许覆盖官方已绑定单号 (对应官方订单详情页「修改」)
+    order_id 即官方 promotion_order_id
     """
     platform_order_id = (data.get("platform_order_id") or "").strip()
     force_modify = bool(data.get("force_modify"))
     if not platform_order_id:
         raise HTTPException(status_code=400, detail="外卖平台订单号不能为空")
-    
-    target_order = db.get_order_by_id(order_id)
-    if not target_order:
-        raise HTTPException(status_code=404, detail="订单不存在")
 
-    existing_id = (target_order.get("platform_order_id") or "").strip()
-    if existing_id and existing_id != platform_order_id and not force_modify:
-        raise HTTPException(status_code=400, detail="外卖平台订单号已绑定，如需修改请使用「修改单号」(对应官方订单详情页「修改」)")
+    accounts = db.get_all_accounts()
+    acc = db.get_account_by_key(data.get("account_key")) if data.get("account_key") else None
+    if not acc and accounts:
+        acc = accounts[0]
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+    token = acc["token"]
 
-    promo_order_id = target_order.get("promotion_order_id") or 0
+    promo_order_id = int(order_id or 0)
     if not promo_order_id:
-        order_sn = target_order.get("order_sn", "")
-        m = re.search(r'(\d{8,10})$', order_sn)
-        if m:
-            promo_order_id = int(m.group(1))
+        raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号，无法提交外卖单号")
 
-    # 尝试直连小蚕官方 RPC 提交外卖单号
-    upstream_res = None
-    account_key = target_order.get("account_key")
-    acc = db.get_account_by_key(account_key) if account_key else None
-    token = acc.get("token") if acc else None
-
-    # 提交前先核验官方是否已绑定单号: 列表接口不返回 single 单号, 详情接口才返回
-    # 若官方已有单号, 直接同步本地并明确告知, 不再发起必然失败的重复提交
-    if promo_order_id and token and acc:
+    # 提交前先核验官方是否已绑定单号 (详情接口): 官方已有单号时明确告知, 不发起必然失败的重复提交
+    if not force_modify:
         try:
             det = await client.get_client_promotion_order(
                 promotion_order_id=int(promo_order_id),
@@ -4887,77 +4770,57 @@ async def submit_platform_order_id(order_id: int, data: Dict[str, Any] = Body(..
             )
             po = det.get("promotion_order") or {}
             official_pid = str(po.get("platform_order_id") or "").strip()
-            if official_pid and not force_modify:
-                db.update_order(order_id, {
-                    "platform_order_id": official_pid,
-                    "platform_total_price": float(po.get("platform_order_total_price") or target_order.get("platform_total_price") or 0),
-                    "remark": str(po.get("reason") or target_order.get("remark") or "")
-                })
+            if official_pid:
                 if official_pid == platform_order_id:
                     return {
                         "ok": True,
-                        "order": db.get_order_by_id(order_id),
-                        "message": f"官方已存在该外卖单号 ({official_pid})，已同步至本地，无需重复提交"
+                        "message": f"官方已存在该外卖单号 ({official_pid})，无需重复提交"
                     }
                 reason = str(po.get("reason") or "").strip()
                 return {
                     "ok": False,
-                    "order": db.get_order_by_id(order_id),
                     "error": (
-                        f"官方已绑定外卖单号 {official_pid}（平台禁止二次修改），已同步到本地。"
+                        f"官方已绑定外卖单号 {official_pid}（平台禁止二次修改）。"
                         + (f"官方说明: {reason}" if reason else "")
                     )
                 }
         except Exception as det_err:
             logger.debug(f"提交前核验官方单号失败: {det_err}")
 
-    if promo_order_id and token:
-        try:
-            upstream_res = await client.invoke_rpc(
-                server_name="SilkwormPromotion",
-                method_name="PromotionService.SubmitPlatformOrderId",
-                body={
-                    "promotion_order_id": promo_order_id,
-                    "platform_order_id": platform_order_id,
-                    "order_type": 0,
-                    "app_id": 20
-                },
-                city_code=acc.get("city_code", 420100),
-                token=token
-            )
-            logger.info(f"小蚕官方提交外卖单号结果: {upstream_res}")
-        except XiaoCanRPCError as e:
-            # 官方提交失败必须阻断：若照常改本地状态会造成“假成功”，官方侧收不到单号，后续核销返利将静默失败
-            detail = short_rpc_error(e)
-            if e.code >= 500 or "HTTP 500" in (e.msg or ""):
-                detail = "官方服务返回 500（常见原因: 单号无效 / 该订单已有绑定单号 / 订单状态不允许提交，可刷新查看官方已绑定单号）"
-            logger.warning(f"小蚕官方接口提交单号失败: {e}")
-            return {
-                "ok": False,
-                "order": target_order,
-                "error": f"官方接口提交外卖单号失败，本地订单状态未变更。原因: {detail}"
-            }
-        except Exception as e:
-            logger.warning(f"小蚕官方接口提交单号异常: {e}")
-            return {
-                "ok": False,
-                "order": target_order,
-                "error": f"官方接口提交外卖单号异常，本地订单状态未变更。原因: {e}"
-            }
-    else:
-        logger.warning(f"提交外卖单号缺少活动订单ID或账号凭据 (promo_order_id={promo_order_id}, has_token={bool(token)})，仅保存到本地")
+    try:
+        upstream_res = await client.invoke_rpc(
+            server_name="SilkwormPromotion",
+            method_name="PromotionService.SubmitPlatformOrderId",
+            body={
+                "promotion_order_id": promo_order_id,
+                "platform_order_id": platform_order_id,
+                "order_type": 0,
+                "app_id": 20
+            },
+            city_code=acc.get("city_code", 420100),
+            token=token
+        )
+        logger.info(f"小蚕官方提交外卖单号结果: {upstream_res}")
+    except XiaoCanRPCError as e:
+        detail = short_rpc_error(e)
+        if e.code >= 500 or "HTTP 500" in (e.msg or ""):
+            detail = "官方服务返回 500（常见原因: 单号无效 / 该订单已有绑定单号 / 订单状态不允许提交，可刷新查看官方已绑定单号）"
+        logger.warning(f"小蚕官方接口提交单号失败: {e}")
+        return {
+            "ok": False,
+            "error": f"官方接口提交外卖单号失败。原因: {detail}"
+        }
+    except Exception as e:
+        logger.warning(f"小蚕官方接口提交单号异常: {e}")
+        return {
+            "ok": False,
+            "error": f"官方接口提交外卖单号异常。原因: {e}"
+        }
 
     has_receipt = bool(data.get("receipt_img"))
-    new_status = "auditing" if has_receipt else "pending"
-    updated = db.update_order(order_id, {
-        "platform_order_id": platform_order_id,
-        "status": new_status,
-        "receipt_img": data.get("receipt_img", "")
-    })
     msg = "外卖单号与评价凭证已提交审核！预计 2-24 小时内核销到账" if has_receipt else "外卖单号已成功绑定！待外卖送达后即可在小蚕APP提交评价反馈"
     return {
         "ok": True,
-        "order": updated,
         "upstream_response": upstream_res,
         "message": msg
     }
@@ -4965,75 +4828,59 @@ async def submit_platform_order_id(order_id: int, data: Dict[str, Any] = Body(..
 
 @router.delete("/orders/{order_id}")
 async def remove_order(order_id: int):
-    """删除订单记录"""
-    db.delete_order(order_id)
-    return {"ok": True, "message": "订单记录已删除"}
+    """本地单条删除已随订单缓存下线; 如需删除订单请使用官方批量删除接口"""
+    return {"ok": False, "message": "本地删除已下线：请使用「批量删除」（直连官方删除接口）"}
 
 
 @router.post("/orders/batch-delete")
 async def batch_delete_orders(data: Dict[str, Any] = Body(...)):
     """
-    删除订单 (调用官方删除接口, 成功后同步删除本地记录):
-    仅允许删除「已完成 / 已取消」订单; 官方删除失败则保留本地记录并返回原因。
-    body: {"ids": [1, 2, 3]}
+    删除订单 (直连官方删除接口 Silkworm.SilkwormService.DeletePromotionOrder):
+    仅允许删除「已完成 / 已取消」订单 (前端已按 Tab 限制)。
+    body: {"ids": [promotion_order_id, ...], "account_key": optional}
     """
     ids = data.get("ids") or []
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="缺少待删除订单ID (ids)")
 
+    accounts = db.get_all_accounts()
+    acc = db.get_account_by_key(data.get("account_key")) if data.get("account_key") else None
+    if not acc and accounts:
+        acc = accounts[0]
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
     deleted, failed, skipped = [], [], []
     for raw_id in ids[:100]:
         try:
-            oid = int(raw_id)
+            promo_id = int(raw_id)
         except Exception:
             continue
-        order = db.get_order_by_id(oid)
-        if not order:
-            skipped.append({"id": oid, "reason": "记录不存在"})
-            continue
-        st = (order.get("status") or "").lower()
-        if st not in ("completed", "cancelled"):
-            skipped.append({"id": oid, "reason": "仅支持删除已完成/已取消订单"})
-            continue
-
-        account_key = order.get("account_key")
-        acc = db.get_account_by_key(account_key) if account_key else None
-        promo_id = int(order.get("promotion_order_id") or 0)
         if not promo_id:
-            m = re.search(r"(\d{8,10})$", str(order.get("order_sn") or ""))
-            if m:
-                promo_id = int(m.group(1))
+            skipped.append({"id": raw_id, "reason": "缺少官方活动订单号"})
+            continue
 
-        # 官方真实删除接口 (抓包确认): Silkworm.SilkwormService.DeletePromotionOrder
-        # {"silk_id":..., "promotion_order_id":..., "app_id":20} → {"status":{"code":0}}
-        # 必须官方确认成功才移除本地记录, 避免出现"本地已删但官方仍在"的假删除。
         official_ok = False
         official_msg = ""
-        if acc and acc.get("token") and promo_id:
-            try:
-                await client.delete_promotion_order(
-                    promotion_order_id=promo_id,
-                    token=acc["token"],
-                    silk_id=acc.get("silk_id"),
-                    user_id=acc.get("user_id"),
-                    city_code=acc.get("city_code") or 440303
-                )
-                official_ok = True
-            except XiaoCanRPCError as official_err:
-                official_msg = short_rpc_error(official_err)
-            except Exception as official_err:
-                official_msg = str(official_err)
-        else:
-            official_msg = "缺少账号凭据或活动订单号"
+        try:
+            await client.delete_promotion_order(
+                promotion_order_id=promo_id,
+                token=acc["token"],
+                silk_id=acc.get("silk_id"),
+                user_id=acc.get("user_id"),
+                city_code=acc.get("city_code") or 440303
+            )
+            official_ok = True
+        except XiaoCanRPCError as official_err:
+            official_msg = short_rpc_error(official_err)
+        except Exception as official_err:
+            official_msg = str(official_err)
 
         if official_ok:
-            # 官方删除成功: 仅标记为官方已删除(不删本地记录), 之后由官方 status=4 返回结果决定展示
-            db.update_order(oid, {"if_user_deleted": 1})
-            deleted.append(oid)
+            deleted.append(promo_id)
         else:
             failed.append({
-                "id": oid,
-                "order_sn": order.get("order_sn"),
+                "id": promo_id,
                 "reason": official_msg or "官方删除失败"
             })
         await asyncio.sleep(0.35)  # 逐条间隔, 降低频控风险
@@ -5066,30 +4913,24 @@ async def delay_order_voucher(order_id: int, data: Optional[Dict[str, Any]] = Bo
     data = data or {}
     use_delay_card = bool(data.get("use_delay_card"))
 
-    target_order = db.get_order_by_id(order_id)
-    if not target_order:
-        raise HTTPException(status_code=404, detail="订单记录不存在")
-
-    if int(target_order.get("order_type") or 0) == 12 or float(target_order.get("rebate_ratio") or 0) > 0:
-        raise HTTPException(status_code=400, detail="百分比按比例返现订单不支持「领红包延时2小时」特权")
-
-    account_key = target_order.get("account_key")
-    acc = db.get_account_by_key(account_key) if account_key else None
-    if not acc or not acc.get("token"):
-        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
-
-    promo_order_id = target_order.get("promotion_order_id") or 0
-    if not promo_order_id:
-        order_sn = target_order.get("order_sn", "")
-        m = re.search(r'(\d{8,10})$', order_sn)
-        if m:
-            promo_order_id = int(m.group(1))
-
+    # 直连官方模式: 订单平台/类型由前端随请求传入, order_id 即官方 promotion_order_id
+    promo_order_id = int(order_id or 0)
     if not promo_order_id:
         raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号 promotion_order_id，无法申请延时")
 
+    accounts = db.get_all_accounts()
+    acc = db.get_account_by_key(data.get("account_key")) if (data and data.get("account_key")) else None
+    if not acc and accounts:
+        acc = accounts[0]
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    # 百分比按比例返现订单不支持「领红包延时2小时」特权 (类型由前端传入, 未传时跳过校验)
+    if data and (data.get("order_type") == 12 or float(data.get("rebate_ratio") or 0) > 0):
+        raise HTTPException(status_code=400, detail="百分比按比例返现订单不支持「领红包延时2小时」特权")
+
     # 根据平台确定任务类型: 4 为美团 (user_receive_meituan_task), 3 为淘宝闪购 (user_receive_elem_task)
-    plat = (target_order.get("platform") or "meituan").lower()
+    plat = str((data or {}).get("platform") or "meituan").lower()
     task_type = 3 if "ele" in plat else 4
 
     # 延时券模式: SilkwormService.DelayPromotionQuota (官方 App 延时券弹窗同源)
@@ -5131,14 +4972,12 @@ async def delay_order_voucher(order_id: int, data: Optional[Dict[str, Any]] = Bo
         st_code = int((res.get("status") or {}).get("code") or 0)
         st_msg = (res.get("status") or {}).get("msg") or ""
         if st_code == 3:
-            db.update_order(order_id, {"delay_used": 1})
             return {
                 "ok": True,
                 "already_delayed": True,
                 "message": "官方接口反馈该订单已使用过延时特权，无需重复延时",
                 "raw": res
             }
-        db.update_order(order_id, {"delay_used": 1})
         return {
             "ok": True,
             "is_delayed": True,
@@ -5165,11 +5004,10 @@ async def ocr_order_id_endpoint(order_id: int, data: Dict[str, Any] = Body(...))
     if len(image_b64) > 6_000_000:
         raise HTTPException(status_code=400, detail="截图过大，请压缩后重试 (限约 4MB)")
 
-    target_order = db.get_order_by_id(order_id)
-    if not target_order:
-        raise HTTPException(status_code=404, detail="订单记录不存在")
-    account_key = target_order.get("account_key")
-    acc = db.get_account_by_key(account_key) if account_key else None
+    accounts = db.get_all_accounts()
+    acc = db.get_account_by_key(str(data.get("account_key") or "")) if data.get("account_key") else None
+    if not acc and accounts:
+        acc = accounts[0]
     if not acc or not acc.get("token"):
         raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
 
@@ -5244,19 +5082,31 @@ async def free_order_panel():
         if not acc.get("token"):
             continue
         acc_key = acc.get("key")
-        # 1) 先回填官方APP手动免单痕迹 (红包列表「会员专属免单红包」→本地免单记录), 确保已免单订单即时排除
-        #    60 秒节流: 面板反复刷新时不重复打红包接口, 降低腾讯 WAF 风控概率
-        if now - _FREE_ORDER_MARK_CACHE.get(acc_key, 0) > 60:
-            _FREE_ORDER_MARK_CACHE[acc_key] = now
-            try:
-                await _backfill_free_order_marks(acc_key, acc)
-            except Exception:
-                pass
-        rows = db.get_orders(account_key=acc_key, status="completed", limit=100) or []
-        # 2) 本地权威证据: 官方 UserFreeOrderInfo 核销后仍长期返回 used:false (实测不可靠),
-        #    故 31 天内存在免单核销记录 (free_order_at) 即判定当期券已用, 且无需再请求官方接口
-        month_ago = now - 31 * 86400
-        consumed = any(int(r.get("free_order_at") or 0) > month_ago for r in rows)
+        # 直连官方模式: 资格订单实时拉取官方「已完成」列表 (status=2), 不读本地订单库
+        rows: List[Dict[str, Any]] = []
+        try:
+            c_res = await client.get_order_list(
+                token=acc["token"], silk_id=acc.get("silk_id"), user_id=acc.get("user_id"),
+                order_status=2, offset=0, number=50, city_code=acc.get("city_code") or 440303
+            )
+            for o in (c_res.get("order_list") or c_res.get("orders") or []):
+                _promo = o.get("store_promotion") or {}
+                _store = _promo.get("store") or {}
+                _sp = o.get("store_platform")
+                rows.append({
+                    "id": int(o.get("promotion_order_id") or 0),
+                    "store_name": _store.get("name") or _promo.get("store_name") or "小蚕霸王餐",
+                    "store_icon": _store.get("icon") or _store.get("logo") or _promo.get("picture") or "",
+                    "platform": "jingdong" if _sp == 3 else ("eleme" if _sp == 2 else "meituan"),
+                    "platform_order_id": str(o.get("platform_order_id") or "").strip(),
+                    "order_sn": str(o.get("order_id_str") or o.get("promotion_order_id") or ""),
+                    "reviewed_time": int(o.get("reviewed_time") or 0),
+                    "order_money": round(float(o.get("store_platform_order_money", 0) or 0) / 100.0, 2),
+                    "rebate_money": round(float(o.get("user_rebate", 0) or 0) / 100.0, 2),
+                    "redpack_reward_num": round(float(o.get("redpack_reward_num", 0) or 0) / 100.0, 2),
+                })
+        except Exception as oe:
+            logger.debug(f"免单面板拉取官方已完成订单失败 {acc_key}: {oe}")
 
         info: Dict[str, Any] = {}
         amount_yuan = 0.0
@@ -5281,9 +5131,7 @@ async def free_order_panel():
         avail_hit = _pick_free_card(acc_key, 0) if has_snapshot else None
         used_hit = _pick_free_card(acc_key, 1)
 
-        if consumed:
-            card_status = "used"
-        elif used_hit:
+        if used_hit:
             # 官方卡券表「已使用」Tab 里存在会员免单券 → 权威结论: 已用 (不再看 UserFreeOrderInfo.used)
             card_status = "used"
         elif has_snapshot and avail_hit:
@@ -5319,8 +5167,6 @@ async def free_order_panel():
             card_id = int(info.get("user_free_card_id") or info.get("id") or 0)
         eligible = []
         for r in (rows if card_status == "available" else []):
-            if r.get("free_order_at"):
-                continue
             if not r.get("platform_order_id"):
                 continue
             if (r.get("platform") or "").lower() not in platforms:
@@ -5365,28 +5211,20 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
     对指定订单核销使用每月霸王餐全额免单神券
     对齐官方微服务: SilkwormVip.VipRightsService.UseFreeOrderCard
     """
-    target_order = db.get_order_by_id(order_id)
-    if not target_order:
-        raise HTTPException(status_code=404, detail="订单记录不存在")
-
-    account_key = target_order.get("account_key")
-    acc = db.get_account_by_key(account_key) if account_key else None
+    # 直连官方模式: order_id 即官方 promotion_order_id, 订单信息由前端随请求传入
+    accounts = db.get_all_accounts()
+    acc = db.get_account_by_key(data.get("account_key")) if data.get("account_key") else None
+    if not acc and accounts:
+        acc = accounts[0]
     if not acc or not acc.get("token"):
         raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
 
-    platform_order_id = (data.get("platform_order_id") or target_order.get("platform_order_id") or "").strip()
+    platform_order_id = (data.get("platform_order_id") or "").strip()
     if not platform_order_id:
         raise HTTPException(status_code=400, detail="请先填写并绑定外卖平台订单号方可使用免单券")
 
-    plat = (target_order.get("platform") or "meituan").lower()
+    plat = str(data.get("platform") or "meituan").lower()
     order_business = 2 if "ele" in plat else 1
-
-    # 本地免单核销记录优先: 官方 UserFreeOrderInfo.used 核销后仍长期返回 false (实测不可靠),
-    # 31 天内已有免单核销记录 → 直接拒绝, 避免重复核销
-    _month_ago = time.time() - 31 * 86400
-    _rows = db.get_orders(account_key=account_key, status="completed", limit=100) or []
-    if any(int(r.get("free_order_at") or 0) > _month_ago for r in _rows):
-        raise HTTPException(status_code=400, detail="当前账号本月免单券已使用，每月限使用 1 次")
 
     # 获取用户免单券 ID
     user_free_card_id = data.get("user_free_card_id")
@@ -5427,14 +5265,6 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
             user_id=acc.get("user_id"),
             city_code=acc.get("city_code") or 440303
         )
-        # 核销成功: 本地记录免单时间与补贴金额 (官方列表接口不返回免单横幅字段)
-        try:
-            db.update_order(order_id, {
-                "free_order_at": int(time.time()),
-                "free_subsidy": free_subsidy_amount or (target_order.get("rebate_money") or 0)
-            })
-        except Exception as ex:
-            logger.warning(f"免单结果本地记录失败: {ex}")
         return {
             "ok": True,
             "message": "免单券核销使用成功！该笔订单已享全额免单返现",
