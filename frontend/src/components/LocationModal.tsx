@@ -39,6 +39,16 @@ const formatCityTag = (rawCity?: string, district?: string) => {
   return '地点';
 };
 
+// 地址来源标识映射: 哪个地图源解析出的当前地址
+const ADDRESS_SOURCE_META: Record<string, { label: string; color: 'blue' | 'purple' | 'grey' | 'white' | 'cyan' }> = {
+  tianditu: { label: '天地图', color: 'blue' },
+  osm: { label: 'OSM', color: 'purple' },
+  preset: { label: '预设', color: 'grey' },
+  fallback: { label: '备用', color: 'grey' },
+  history: { label: '历史', color: 'white' },
+  ip: { label: 'IP定位', color: 'cyan' },
+};
+
 export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }) => {
   const activeLocation = useAppStore((s) => s.activeLocation);
   const setActiveLocation = useAppStore((s) => s.setActiveLocation);
@@ -53,6 +63,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
   const [resolvedCityCode, setResolvedCityCode] = useState<number>(activeLocation?.cityCode || 0);
   const [resolvedCityName, setResolvedCityName] = useState<string>(activeLocation?.cityName || '');
   const [resolvedAddress, setResolvedAddress] = useState<string>(activeLocation?.addressName || '');
+  const [addressSource, setAddressSource] = useState<string>('');
 
   const [resolving, setResolving] = useState<boolean>(false);
   const [locating, setLocating] = useState<boolean>(false);
@@ -129,6 +140,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
         setResolvedCityCode(res.city_code || 420100);
         setResolvedCityName(res.city_name);
         setResolvedAddress(res.address_name || `${res.city_name}市`);
+        setAddressSource(res.source || 'tianditu');
         if (showToast) {
           Toast.success(`解析成功：${res.city_name} · ${res.address_name}`);
         }
@@ -152,6 +164,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
     setResolvedCityCode(cand.city_code || 420100);
     setResolvedCityName(cand.city_name);
     setResolvedAddress(cand.full_address || `${cand.city_name} · ${cand.short_name}`);
+    setAddressSource(cand.source || 'tianditu');
     setDropdownVisible(false);
     Toast.success(`已切换：${cand.city_name} · ${cand.short_name}`);
   };
@@ -163,6 +176,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
     setResolvedCityCode(item.cityCode || 420100);
     setResolvedCityName(item.cityName);
     setResolvedAddress(item.addressName);
+    setAddressSource('history');
     Toast.success(`已切换历史位置：${item.cityName} · ${item.addressName}`);
   };
 
@@ -213,6 +227,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
           setResolvedCityCode(ipRes.city_code || 420100);
           setResolvedCityName(ipRes.city_name);
           setResolvedAddress(ipRes.address_name || `${ipRes.city_name}市`);
+          setAddressSource('ip');
           Toast.success(`已成功获取定位：${ipRes.city_name} · ${ipRes.address_name}`);
         } else {
           Toast.error('获取定位失败，请尝试搜索地址');
@@ -242,6 +257,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
             setResolvedCityCode(res.city_code || 420100);
             setResolvedCityName(res.city_name);
             setResolvedAddress(res.address_name || `${res.city_name}市`);
+            setAddressSource(res.source || 'tianditu');
             Toast.success(`已成功获取高精定位：${res.city_name} · ${res.address_name}`);
           } else {
             fallbackToIp();
@@ -320,6 +336,15 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
                 <Tag size="small" color={resolvedCityName ? "blue" : "grey"}>
                   {resolvedCityName ? formatCityTag(resolvedCityName) : '未设置'}
                 </Tag>
+                {addressSource && ADDRESS_SOURCE_META[addressSource] && (
+                  <Tag
+                    size="small"
+                    color={ADDRESS_SOURCE_META[addressSource].color}
+                    className="font-normal"
+                  >
+                    {ADDRESS_SOURCE_META[addressSource].label}
+                  </Tag>
+                )}
               </Space>
               {geoAvailable && (
                 <Button
