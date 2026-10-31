@@ -387,11 +387,23 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose }
                       <div className="text-xs text-semi-color-text-0 font-medium truncate">
                         {cand.short_name || cand.full_address}
                       </div>
-                      <div
-                        className="text-[11px] text-semi-color-text-2 truncate"
-                        title={cand.full_address}
-                      >
-                        {cand.full_address}
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <div
+                          className="text-[11px] text-semi-color-text-2 truncate"
+                          title={cand.full_address}
+                        >
+                          {cand.full_address}
+                        </div>
+                        {(cand.source === 'osm' || cand.source === 'preset') && (
+                          <Tag
+                            size="small"
+                            color={cand.source === 'osm' ? 'purple' : 'grey'}
+                            className="shrink-0 font-normal"
+                            style={{ fontSize: '10px', lineHeight: '14px', padding: '0 4px' }}
+                          >
+                            {cand.source === 'osm' ? 'OSM' : '预设'}
+                          </Tag>
+                        )}
                       </div>
                     </div>
                   </div>

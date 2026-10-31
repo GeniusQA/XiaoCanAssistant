@@ -5862,7 +5862,35 @@ async def search_location(keyword: str = Query("", description="搜索地址或�
             "source": top.get("source", "tianditu")
         }
 
-    # 兜底：尝试从已有预设城市快速匹配
+    # 兜底 1: 天地图 0 命中/异常 -> Photon (OSM) 备用地理编码源自动回退
+    try:
+        photon_c = await tianditu_client.search_poi_photon(clean_kw)
+    except Exception as e:
+        logger.warning(f"Photon 备用检索异常: {e}")
+        photon_c = []
+    if photon_c:
+        for c in photon_c:
+            if not c.get("city_code"):
+                c_name = c.get("city_name", "")
+                c["city_code"] = CITY_CODE_MAP.get(c_name) or CITY_CODE_MAP.get(f"{c_name}市") or 420100
+        top = photon_c[0]
+        logger.info(f"地址检索 '{clean_kw}' 天地图无结果, Photon 回退命中 {len(photon_c)} 条")
+        return {
+            "ok": True,
+            "keyword": clean_kw,
+            "candidates": photon_c,
+            "city_code": top.get("city_code", 420100),
+            "city_name": top.get("city_name", ""),
+            "district_name": top.get("district_name", ""),
+            "town_name": top.get("town_name", ""),
+            "short_name": top.get("short_name", clean_kw),
+            "full_address": top.get("full_address", ""),
+            "latitude": top.get("latitude", ""),
+            "longitude": top.get("longitude", ""),
+            "source": top.get("source", "osm")
+        }
+
+    # 兜底 2：尝试从已有预设城市快速匹配
     for code, (cname, clng, clat) in CITY_COORDS.items():
         if cname in clean_kw or clean_kw in cname:
             c_item = {
@@ -5926,7 +5954,28 @@ async def resolve_location(latitude: float = Query(...), longitude: float = Quer
     except Exception as e:
         logger.warning(f"天地图逆地理编码异常，切换降级通道: {e}")
 
-    # 2. 降级备用通道 (BigDataCloud)
+    # 2. 降级备用通道 (Photon/OSM): 免key, 与天地图同坐标系 (WGS84/CGCS2000)
+    try:
+        photon_res = await tianditu_client.resolve_photon(latitude, longitude)
+        if photon_res and photon_res.get("city_name"):
+            c_name = photon_res["city_name"]
+            c_code = photon_res.get("city_code") or CITY_CODE_MAP.get(c_name) or CITY_CODE_MAP.get(f"{c_name}市") or 0
+            return {
+                "ok": True,
+                "city_code": c_code,
+                "city_name": c_name,
+                "locality": photon_res.get("district", ""),
+                "province": photon_res.get("province", ""),
+                "address_name": photon_res.get("address_name", ""),
+                "latitude": f"{latitude:.6f}",
+                "longitude": f"{longitude:.6f}",
+                "source": "osm",
+                "accuracy": "medium"
+            }
+    except Exception as e:
+        logger.warning(f"Photon 逆地理编码异常, 继续降级: {e}")
+
+    # 3. 降级备用通道 (BigDataCloud)
     city_name = "武汉"
     locality = ""
     province = ""

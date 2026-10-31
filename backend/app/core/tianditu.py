@@ -6,6 +6,7 @@
 import logging
 import json
 import re
+import time
 import asyncio
 from typing import Dict, Any, Optional, List
 import httpx
@@ -492,3 +493,118 @@ class TiandituClient:
 
 
 tianditu_client = TiandituClient()
+
+
+# ---------------- Photon (OSM) 备用地理编码源 ----------------
+# 天地图搜不到的位置 (新开商户/别名/小区) 时自动回退; 免key, WGS84, GeoJSON.
+# 参考: 上游定位APP (com.yinshibai.location) 线上验证 Photon 可用性优于 Nominatim.
+PHOTON_SEARCH_URL = "https://photon.komoot.io/api/"
+PHOTON_REVERSE_URL = "https://photon.komoot.io/reverse"
+_photon_last_req = 0.0
+
+
+async def _photon_throttle() -> None:
+    """Photon 公共实例礼貌限速: 相邻请求间隔 >= 1.1s"""
+    global _photon_last_req
+    wait = 1.1 - (time.time() - _photon_last_req)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _photon_last_req = time.time()
+
+
+def _photon_in_china(lon_v: float, lat_v: float) -> bool:
+    """中国范围粗过滤, 避免境外同名地点干扰"""
+    return 73.0 <= lon_v <= 136.0 and 17.0 <= lat_v <= 54.0
+
+
+async def search_poi_photon(keyword: str, count: int = 8) -> List[Dict[str, Any]]:
+    """Photon 备用 POI 检索: 返回与 search_poi 相同结构的候选列表, source='osm'"""
+    clean_kw = (keyword or "").strip()
+    if not clean_kw:
+        return []
+    try:
+        await _photon_throttle()
+        async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+            resp = await client.get(
+                PHOTON_SEARCH_URL,
+                params={"q": clean_kw, "limit": count, "lang": "zh"},
+                headers={"User-Agent": DESKTOP_UA}
+            )
+            data = resp.json()
+    except Exception as e:
+        logger.info(f"Photon POI 检索失败(静默降级, 不影响主流程): {e}")
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    for f in (data.get("features") or []):
+        props = f.get("properties") or {}
+        geom = (f.get("geometry") or {}).get("coordinates") or []
+        if len(geom) < 2:
+            continue
+        try:
+            lon_v, lat_v = float(geom[0]), float(geom[1])
+        except Exception:
+            continue
+        if not _photon_in_china(lon_v, lat_v):
+            continue
+        name = str(props.get("name") or props.get("street") or "").strip()
+        if not name:
+            continue
+        city_name = str(props.get("city") or props.get("county") or props.get("state") or "").replace("市", "").strip()
+        district = str(props.get("district") or props.get("county") or "").strip()
+        full_addr = ", ".join(str(props.get(k) or "") for k in ("name", "street", "district", "city", "state", "country")).strip(", ")
+        candidates.append({
+            "city_code": 0,  # 由端点层用 CITY_CODE_MAP 统一兜底
+            "city_name": city_name or "未知",
+            "province": str(props.get("state") or ""),
+            "district_name": district,
+            "town_name": "",
+            "poi": name,
+            "short_name": f"{district} · {name}" if (district and name not in district) else name,
+            "full_address": full_addr or name,
+            "latitude": f"{lat_v:.6f}",
+            "longitude": f"{lon_v:.6f}",
+            "source": "osm"
+        })
+    logger.info(f"Photon POI 检索 '{clean_kw}': {len(candidates)} 条候选")
+    return candidates
+
+
+async def resolve_photon(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """Photon 备用逆地理编码: 返回与 resolve_location 相同结构, source='osm'"""
+    try:
+        await _photon_throttle()
+        async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+            resp = await client.get(
+                PHOTON_REVERSE_URL,
+                params={"lat": lat, "lon": lon, "lang": "zh"},
+                headers={"User-Agent": DESKTOP_UA}
+            )
+            data = resp.json()
+    except Exception as e:
+        logger.info(f"Photon 逆地理编码失败(静默降级): {e}")
+        return None
+
+    feats = data.get("features") or []
+    if not feats:
+        return None
+    props = feats[0].get("properties") or {}
+    city_name = str(props.get("city") or props.get("county") or props.get("state") or "").replace("市", "").strip()
+    if not city_name:
+        return None
+    district = str(props.get("district") or props.get("county") or "").strip()
+    street = str(props.get("street") or "").strip()
+    name = str(props.get("name") or "").strip()
+    addr_str = " · ".join(x for x in (city_name, district, name or street) if x) or f"{city_name}定位点"
+    return {
+        "city_code": 0,
+        "city_name": city_name or "未知",
+        "province": str(props.get("state") or ""),
+        "district": district,
+        "town": "",
+        "poi": name,
+        "address_name": addr_str,
+        "latitude": f"{lat:.6f}",
+        "longitude": f"{lon:.6f}",
+        "source": "osm",
+    }
