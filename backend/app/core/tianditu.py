@@ -534,7 +534,8 @@ async def search_poi_photon(keyword: str, count: int = 8) -> List[Dict[str, Any]
         async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
             resp = await client.get(
                 PHOTON_SEARCH_URL,
-                params={"q": clean_kw, "limit": count, "lang": "zh"},
+                # 注意: Photon 公共实例不支持 lang=zh (仅 default/de/en/fr), 传 zh 会 400
+                params={"q": clean_kw, "limit": count},
                 headers={"User-Agent": DESKTOP_UA}
             )
             data = resp.json()
@@ -584,7 +585,7 @@ async def resolve_photon(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
             resp = await client.get(
                 PHOTON_REVERSE_URL,
-                params={"lat": lat, "lon": lon, "lang": "zh"},
+                params={"lat": lat, "lon": lon},
                 headers={"User-Agent": DESKTOP_UA}
             )
             data = resp.json()
