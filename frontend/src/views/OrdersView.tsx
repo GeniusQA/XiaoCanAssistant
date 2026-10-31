@@ -28,7 +28,7 @@ import {
   IconHelpCircle
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
-import { api } from '../api';
+import { api, warnOnce } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
 import type { Order } from '../types';
 
@@ -288,10 +288,7 @@ export const OrdersView: React.FC = () => {
         }
         setOrders(list);
         if ((ordersRes.orders || []).length === 0 && ordersRes.sync_error) {
-          Toast.warning({
-            content: '官方订单同步失败，当前展示本地缓存。原因: ' + ordersRes.sync_error,
-            duration: 6,
-          });
+          warnOnce('官方订单实时同步失败，本次列表可能为空或不完整。原因: ' + ordersRes.sync_error, 6);
         }
       } else if (ordersRes.error) {
         Toast.error('拉取订单列表失败: ' + ordersRes.error);

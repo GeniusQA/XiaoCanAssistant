@@ -279,6 +279,15 @@ async def sync_account_endpoint(key: str):
 
 
 @router.get("/accounts/{key}/detail")
+def _merge_sync_errors(errors: List[str]) -> List[str]:
+    """官方WAF熔断提示统一: 多个子项全部为WAF拦截时合并为单条熔断提示 (全局唯一提示语要求)"""
+    waf_kw = "WAF临时频次拦截保护冷却中"
+    if errors and all(waf_kw in e for e in errors):
+        first = errors[0]
+        return [first.split(": ", 1)[1] if ": " in first else first]
+    return errors
+
+
 async def get_account_detail_endpoint(key: str):
     """获取指定账号的全面详情（包含个人信息、元宝状态、特权卡券列表与可用红包列表）"""
     acc = db.get_account_by_key(key)
@@ -431,7 +440,7 @@ async def get_account_detail_endpoint(key: str):
         "redpacks": redpacks
     }
     if sync_errors:
-        resp["sync_errors"] = sync_errors
+        resp["sync_errors"] = _merge_sync_errors(sync_errors)
     return resp
 
 
@@ -812,7 +821,7 @@ async def sync_account_endpoint(key: str):
     }
     if sync_errors:
         # 官方资料/资产同步失败 (如 WAF 拦截) 时附带原因，避免前端把旧数据/默认值当作最新同步结果
-        resp["sync_error"] = "；".join(sync_errors)
+        resp["sync_error"] = "；".join(_merge_sync_errors(sync_errors))
         resp["message"] = f"账号【{enriched.get('nickname')}】同步完成，但部分官方数据获取失败"
     return resp
 

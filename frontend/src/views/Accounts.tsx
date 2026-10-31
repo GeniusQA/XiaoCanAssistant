@@ -64,7 +64,7 @@ import {
   IconEdit
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
-import { api } from '../api';
+import { api, warnOnce } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
 import { copyText } from '../utils/clipboard';
 import { DevicePairingPanel } from '../components/DevicePairingPanel';
@@ -320,7 +320,7 @@ export const Accounts: React.FC = () => {
       const res = await api.syncAccount(key);
       if (res.ok) {
         if (res.sync_error) {
-          Toast.warning({ content: `同步完成，但部分官方数据获取失败: ${res.sync_error}`, duration: 6 });
+          warnOnce(`同步完成，但部分官方数据获取失败: ${res.sync_error}`, 6);
         } else {
           Toast.success(res.message || '账号资产与官方档案已成功同步');
         }
@@ -412,10 +412,7 @@ export const Accounts: React.FC = () => {
         }
         loadAccounts();
         if (res.sync_errors && res.sync_errors.length > 0) {
-          Toast.warning({
-            content: `部分官方资产数据获取失败（当前显示 0/空可能并非真实数据）: ${res.sync_errors.slice(0, 2).join('；')}`,
-            duration: 8,
-          });
+          warnOnce(`部分官方资产数据获取失败（当前显示 0/空可能并非真实数据）: ${res.sync_errors.slice(0, 2).join('；')}`);
         }
       } else {
         Toast.error('获取账号资产详情失败');

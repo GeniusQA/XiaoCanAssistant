@@ -45,7 +45,7 @@ import {
 import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
 import { useAppStore } from '../store/useAppStore';
-import { api } from '../api';
+import { api, warnOnce } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
 import type { StoreItem, StorePromotion, StoreAppointment, AccountDetailData } from '../types';
 
@@ -343,10 +343,7 @@ export const StoreSniping: React.FC = () => {
       if (res && res.ok) {
         setAssetDetail(res);
         if (res.sync_errors && res.sync_errors.length > 0) {
-          Toast.warning({
-            content: `官方资产数据获取失败（当前显示 0/空可能并非真实数据）: ${res.sync_errors.slice(0, 2).join('；')}`,
-            duration: 8,
-          });
+          warnOnce(`官方资产数据获取失败（当前显示 0/空可能并非真实数据）: ${res.sync_errors.slice(0, 2).join('；')}`);
         }
         const rawCards = res.cards || [];
         let mealCount = 0;

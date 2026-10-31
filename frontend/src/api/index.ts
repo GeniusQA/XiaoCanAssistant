@@ -83,6 +83,15 @@ client.interceptors.response.use(
   }
 );
 
+// 官方WAF熔断提示全局去重: 10 秒内相同文案只弹一次 (无论多少接口/页面同时触发, 只展示一条)
+let lastWafToast = { text: '', at: 0 };
+export const warnOnce = (content: string, duration = 8) => {
+  const now = Date.now();
+  if (content === lastWafToast.text && now - lastWafToast.at < 10000) return;
+  lastWafToast = { text: content, at: now };
+  Toast.warning({ content, duration });
+};
+
 // 在途 GET 请求复用池：避免同一时间点多个并发相同 GET 请求重复打到后端
 const inFlightGetRequests = new Map<string, Promise<any>>();
 

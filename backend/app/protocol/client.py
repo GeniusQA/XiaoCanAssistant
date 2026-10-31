@@ -104,10 +104,12 @@ def short_rpc_error(e: "XiaoCanRPCError", max_msg_len: int = 40) -> str:
     """把 RPC 错误总结为一句话 (用于前端弹窗提示)；详细版 format_rpc_error 保留在后端日志中"""
     msg = (e.msg or "").strip()
     if e.code == 403 and ("WAF" in msg or "拦截" in msg):
-        if "冷却中" in msg:
-            m = re.search(r"剩余约\s*(\d+)\s*秒", msg)
-            return f"IP被官方WAF临时拦截，约{m.group(1)}秒后自动解封" if m else "IP被官方WAF临时拦截，稍后自动解封"
-        return "请求被官方WAF/网关拦截(403)，建议更换IP或稍后重试"
+        # 统一熔断提示语: 无论哪个官方接口触发, 全局只展示这一条文案 (剩余秒数动态取熔断冷却器)
+        remain = get_waf_cooldown_seconds()
+        return (
+            f"当前网络IP处于官方腾讯云WAF临时频次拦截保护冷却中（剩余约 {remain} 秒），"
+            "系统已自动熔断休眠以避免延长封禁。如需立即恢复，请切换手机热点、重启光猫更换IP或等待冷却。"
+        )
     if e.code in (10001, 20006):
         return "官方判定今日已完成或重复提交"
     short = re.split(r"[。；;\n]", msg)[0].strip()
