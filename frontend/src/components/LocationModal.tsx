@@ -42,7 +42,7 @@ const formatCityTag = (rawCity?: string, district?: string) => {
 // 地址来源标识映射: 哪个地图源解析出的当前地址
 const ADDRESS_SOURCE_META: Record<string, { label: string; color: 'blue' | 'purple' | 'grey' | 'white' | 'cyan' }> = {
   tianditu: { label: '天地图', color: 'blue' },
-  osm: { label: 'OSM', color: 'purple' },
+  osm: { label: 'OpenStreetMap', color: 'purple' },
   preset: { label: '预设', color: 'grey' },
   fallback: { label: '备用', color: 'grey' },
   history: { label: '历史', color: 'white' },
