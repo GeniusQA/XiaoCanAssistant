@@ -6064,6 +6064,10 @@ async def get_messages(
                     gather_errors.append(f"{label}: {short_rpc_error(r)}")
                 else:
                     gather_errors.append(f"{label}: {r}")
+        # 多个接口同时被 WAF 拦截时合并为单条熔断提示 (全局唯一提示语要求), 避免同一红条重复刷屏
+        if len(gather_errors) > 1 and all("WAF临时频次拦截保护冷却中" in e for e in gather_errors):
+            first = gather_errors[0]
+            gather_errors = [first.split(": ", 1)[1] if ": " in first else first]
 
         unread_total = sum(c.get("unread", 0) for c in channels)
 

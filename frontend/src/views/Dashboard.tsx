@@ -40,7 +40,7 @@ import {
   IconList
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
-import { api } from '../api';
+import { api, warnOnce } from '../api';
 import { TaskIcon } from '../components/TaskIcons';
 import { LogDetailModal } from '../components/LogDetailModal';
 import { useGSAP, animateStaggerEnter, gsap } from '../utils/animations';
@@ -332,7 +332,7 @@ export const Dashboard: React.FC = () => {
         }
         setMessagesUnreadTotal(res.unread_total ?? 0);
         if (res.error && (res.messages || []).length === 0) {
-          Toast.warning({ content: `消息中心获取失败: ${res.error}`, duration: 8 });
+          warnOnce(`消息中心获取失败: ${res.error}`, 8);
         }
       }
     } catch {
