@@ -23,6 +23,7 @@ import { gsap, useGSAP } from '../utils/animations';
 import type { ColumnProps } from '@douyinfe/semi-ui/lib/es/table';
 import {
   IconRefresh,
+  IconSearch,
   IconCopy,
   IconHelpCircle
 } from '@douyinfe/semi-icons';
@@ -64,6 +65,7 @@ export const OrdersView: React.FC = () => {
   const [tableScrollY, setTableScrollY] = useState<number>(460);
 
   const [orders, setOrders] = useState<Order[]>([]);
+  const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [activeStatusTab, setActiveStatusTab] = useState<string>('all');
   const [platformFilter, setPlatformFilter] = useState<string>('all');
@@ -247,14 +249,14 @@ export const OrdersView: React.FC = () => {
   // 请求序号: 允许并发, 仅最新一次请求的结果生效 (避免切 Tab 时旧请求覆盖新数据)
   const fetchSeqRef = useRef<number>(0);
 
-  // 官方无搜索订单能力, 已对齐移除 (kw 参数保留以兼容既有调用点)
-  const fetchOrders = async (_kw?: string, force = false, silent = false) => {
+  const fetchOrders = async (kw?: string, force = false, silent = false) => {
     if (accounts.length === 0) {
       setOrders([]);
       return;
     }
+    const keywordToSearch = typeof kw === 'string' ? kw.trim() : (searchKeyword || '').trim();
     const effectiveKey = currentAccountKey || accounts[0]?.key || '';
-    const queryKey = `${effectiveKey}_${activeStatusTab}_${platformFilter}`;
+    const queryKey = `${effectiveKey}_${activeStatusTab}_${platformFilter}_${keywordToSearch}`;
 
     if (!force && lastOrdersSignatureRef.current === queryKey) {
       return;
@@ -266,7 +268,8 @@ export const OrdersView: React.FC = () => {
       const ordersRes = await api.getOrders({
         account_key: effectiveKey || undefined,
         status: activeStatusTab,
-        platform: platformFilter
+        platform: platformFilter,
+        keyword: keywordToSearch
       });
 
       // 过期响应 (期间已发起更新的请求) 直接丢弃, 防止旧数据覆盖新 Tab 结果
@@ -274,7 +277,12 @@ export const OrdersView: React.FC = () => {
 
       if (ordersRes.ok) {
         lastOrdersSignatureRef.current = queryKey;
-        setOrders(ordersRes.orders || []);
+        // 「已取消」对齐官方 APP: 其已取消视图不渲染接口返回的历史取消单, 本端同样不展示
+        if (activeStatusTab === 'cancelled') {
+          setOrders([]);
+        } else {
+          setOrders(ordersRes.orders || []);
+        }
         if ((ordersRes.orders || []).length === 0 && ordersRes.sync_error) {
           warnOnce('官方订单实时同步失败，本次列表可能为空或不完整。原因: ' + ordersRes.sync_error, 6);
         }
@@ -989,6 +997,11 @@ export const OrdersView: React.FC = () => {
           <TabPane tab="已驳回" itemKey="rejected" />
           <TabPane tab="已取消" itemKey="cancelled" />
         </Tabs>
+        {activeStatusTab === 'cancelled' && (
+          <Text size="small" type="secondary" className="shrink-0">
+            与官方 APP 一致：官方已取消视图当前无可展示记录，历史取消单已同步但不展示
+          </Text>
+        )}
 
         <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
           <RadioGroup
@@ -1002,6 +1015,19 @@ export const OrdersView: React.FC = () => {
             <Radio value="jingdong">京东</Radio>
           </RadioGroup>
 
+          <Input
+            prefix={<IconSearch />}
+            placeholder="搜索店铺名、单号..."
+            value={searchKeyword}
+            onChange={(val) => setSearchKeyword(val || '')}
+            onEnterPress={() => fetchOrders()}
+            showClear
+            onClear={() => {
+              setSearchKeyword('');
+              fetchOrders('');
+            }}
+            style={{ width: 220 }}
+          />
         </div>
       </div>
 
