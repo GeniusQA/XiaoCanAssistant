@@ -480,7 +480,10 @@ async def send_message(
     auth_json_str: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    通过腾讯 iLink 官方接口向已绑定的微信发送通知消息
+    通过腾讯 iLink 官方接口向已绑定的微信发送通知消息。
+    协议限制: context_token 是「回复用户消息」的短时效上下文 (实测约 15-30 分钟),
+    长时间无互动后推送会 ret=-2; 此时自动 getupdates 抓最新 token 重发一次,
+    用户最近在微信发过消息即可无感续期。
     """
     auth, src_msg = load_auth(custom_path, auth_json_str)
     if not auth:
@@ -488,71 +491,80 @@ async def send_message(
 
     token = auth.get("token", "").strip()
     user_id = auth.get("userId", "").strip()
-    context_token = auth.get("contextToken", "").strip() if auth.get("contextToken") else ""
-
     if not token or not user_id:
         return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭证缺少 token 或 userId"}
 
     text = f"【小蚕助手】{title}\n\n{content}"
-    client_id = f"openclaw-weixin-{uuid.uuid4().hex}"
 
-    # iLink 单条 text_item 在微信端会把 \n 折叠为空格, 导致多项挤在一行。
-    # 按行拆成多条 text_item, 保证逐项独立成行 (空行保留为段落间距)。
+    # iLink 单条 text_item 在微信端会把 \n 折叠为空格, 按行拆多条保证逐项独立成行
     item_list: list = []
     for ln in text.split("\n"):
-        # 空行用单个空格占位: 保留标题与正文间的段落间距, 同时避免发送空字符串被 iLink 拒绝
         item_list.append({"type": 1, "text_item": {"text": ln if ln != "" else " "}})
     if not item_list:
         item_list = [{"type": 1, "text_item": {"text": text}}]
 
-    msg_body: Dict[str, Any] = {
-        "from_user_id": "",
-        "to_user_id": user_id,
-        "client_id": client_id,
-        "message_type": 2,
-        "message_state": 2,
-        "item_list": item_list
-    }
-    if context_token:
-        msg_body["context_token"] = context_token
-
-    payload = {
-        "msg": msg_body,
-        "base_info": {
-            "channel_version": ILINK_CHANNEL_VERSION,
-            "bot_agent": BOT_AGENT
+    async def _attempt(ctx_token: str) -> Dict[str, Any]:
+        msg_body: Dict[str, Any] = {
+            "from_user_id": "",
+            "to_user_id": user_id,
+            "client_id": f"openclaw-weixin-{uuid.uuid4().hex}",
+            "message_type": 2,
+            "message_state": 2,
+            "item_list": item_list,
         }
-    }
-
-    try:
+        if ctx_token:
+            msg_body["context_token"] = ctx_token
+        payload = {
+            "msg": msg_body,
+            "base_info": {
+                "channel_version": ILINK_CHANNEL_VERSION,
+                "bot_agent": BOT_AGENT
+            }
+        }
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{BASE_URL}/ilink/bot/sendmessage",
                 json=payload,
                 headers=_build_headers(token)
             )
-            if resp.status_code in (401, 403):
-                _log_session_alert("凭据鉴权失败或已过期 (HTTP 401/403)")
-                return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭据鉴权失败或已过期 (HTTP 401/403)"}
-            if resp.status_code != 200:
-                return {"ok": False, "channel": "clawbot", "message": f"ClawBot 接口 HTTP 异常: {resp.status_code}"}
+        if resp.status_code in (401, 403):
+            _log_session_alert("凭据鉴权失败或已过期 (HTTP 401/403)")
+            return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭据鉴权失败或已过期 (HTTP 401/403)"}
+        if resp.status_code != 200:
+            return {"ok": False, "channel": "clawbot", "message": f"ClawBot 接口 HTTP 异常: {resp.status_code}"}
+        data = resp.json()
+        ret = data.get("ret", 0)
+        if ret == 0:
+            return {"ok": True, "channel": "clawbot", "message": "微信 ClawBot 推送成功"}
+        if ret == -14:
+            return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭据已过期，请在设置中重新扫码登录"}
+        errmsg = data.get("errmsg") or f"错误码 {ret}"
+        return {"ok": False, "channel": "clawbot", "message": f"ClawBot 推送异常: {errmsg}", "ret": ret}
 
-            data = resp.json()
-            ret = data.get("ret", 0)
-            if ret == 0:
-                return {"ok": True, "channel": "clawbot", "message": "微信 ClawBot 推送成功"}
-            elif ret == -14:
-                return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭据已过期，请在设置中重新扫码登录"}
-            elif ret == -2:
-                _log_session_alert("会话尚未激活或上下文已过期 (ret=-2)")
-                return {
-                    "ok": False,
-                    "channel": "clawbot",
-                    "message": "ClawBot 会话尚未激活或上下文已过期，请在手机微信中向你的 ClawBot 机器人发送一条任意消息以建立会话"
-                }
-            else:
-                errmsg = data.get("errmsg") or f"错误码 {ret}"
-                return {"ok": False, "channel": "clawbot", "message": f"ClawBot 推送异常: {errmsg}"}
-    except Exception as e:
-        logger.warning(f"微信 ClawBot 推送请求异常: {e}")
-        return {"ok": False, "channel": "clawbot", "message": f"网络通信错误: {str(e)}"}
+    # 第一次尝试: 使用当前存储的 context_token
+    ctx_token = (auth.get("contextToken") or "").strip()
+    result = await _attempt(ctx_token)
+    if result.get("ok"):
+        return result
+
+    # ret=-2 (会话上下文过期): 自动 getupdates 抓最新 token 无感续期重发一次
+    if result.get("ret") == -2:
+        _log_session_alert("会话上下文已过期 (ret=-2), 自动尝试 getupdates 续期重发")
+        try:
+            await check_activation(timeout=6.0)
+            fresh_auth, _ = load_auth()
+            new_token = ((fresh_auth or {}).get("contextToken") or "").strip()
+            if new_token and new_token != ctx_token:
+                retry = await _attempt(new_token)
+                if retry.get("ok"):
+                    return {"ok": True, "channel": "clawbot",
+                            "message": "微信 ClawBot 推送成功 (会话上下文已自动续期)"}
+                result = retry
+        except Exception as e:
+            logger.debug(f"ClawBot 自动续期重发失败: {e}")
+        return {
+            "ok": False,
+            "channel": "clawbot",
+            "message": "ClawBot 会话上下文已过期 (实测时效约 15-30 分钟)。请在手机微信中向你的 ClawBot 机器人发送一条任意消息激活，然后重试"
+        }
+    return result
