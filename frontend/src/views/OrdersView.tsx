@@ -24,7 +24,6 @@ import type { ColumnProps } from '@douyinfe/semi-ui/lib/es/table';
 import {
   IconRefresh,
   IconCopy,
-  IconSearch,
   IconHelpCircle
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
@@ -68,7 +67,6 @@ export const OrdersView: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [activeStatusTab, setActiveStatusTab] = useState<string>('all');
   const [platformFilter, setPlatformFilter] = useState<string>('all');
-  const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [uploadModalOrder, setUploadModalOrder] = useState<Order | null>(null);
   const [rebateRuleVisible, setRebateRuleVisible] = useState(false);
   // 会员专属订单免单 (对齐官方「会员专区-订单免单」: 券状态与补贴金额来自官方 UserFreeOrderInfo)
@@ -249,14 +247,14 @@ export const OrdersView: React.FC = () => {
   // 请求序号: 允许并发, 仅最新一次请求的结果生效 (避免切 Tab 时旧请求覆盖新数据)
   const fetchSeqRef = useRef<number>(0);
 
-  const fetchOrders = async (kw?: string, force = false, silent = false) => {
+  // 官方无搜索订单能力, 已对齐移除 (kw 参数保留以兼容既有调用点)
+  const fetchOrders = async (_kw?: string, force = false, silent = false) => {
     if (accounts.length === 0) {
       setOrders([]);
       return;
     }
-    const keywordToSearch = typeof kw === 'string' ? kw.trim() : (searchKeyword || '').trim();
     const effectiveKey = currentAccountKey || accounts[0]?.key || '';
-    const queryKey = `${effectiveKey}_${activeStatusTab}_${platformFilter}_${keywordToSearch}`;
+    const queryKey = `${effectiveKey}_${activeStatusTab}_${platformFilter}`;
 
     if (!force && lastOrdersSignatureRef.current === queryKey) {
       return;
@@ -268,8 +266,7 @@ export const OrdersView: React.FC = () => {
       const ordersRes = await api.getOrders({
         account_key: effectiveKey || undefined,
         status: activeStatusTab,
-        platform: platformFilter,
-        keyword: keywordToSearch
+        platform: platformFilter
       });
 
       // 过期响应 (期间已发起更新的请求) 直接丢弃, 防止旧数据覆盖新 Tab 结果
@@ -277,16 +274,7 @@ export const OrdersView: React.FC = () => {
 
       if (ordersRes.ok) {
         lastOrdersSignatureRef.current = queryKey;
-        // 方案A: 「已取消」Tab 默认仅展示近 7 天, 更早的历史订单隐藏 (搜索词非空时不过滤, 数据保留可查)
-        let list: Order[] = ordersRes.orders || [];
-        if (activeStatusTab === 'cancelled' && !keywordToSearch) {
-          const cutoff = Math.floor(Date.now() / 1000) - 7 * 86400;
-          list = list.filter((o) => {
-            const t = Number((o as any).order_time) || 0;
-            return t === 0 || t >= cutoff;
-          });
-        }
-        setOrders(list);
+        setOrders(ordersRes.orders || []);
         if ((ordersRes.orders || []).length === 0 && ordersRes.sync_error) {
           warnOnce('官方订单实时同步失败，本次列表可能为空或不完整。原因: ' + ordersRes.sync_error, 6);
         }
@@ -1001,11 +989,6 @@ export const OrdersView: React.FC = () => {
           <TabPane tab="已驳回" itemKey="rejected" />
           <TabPane tab="已取消" itemKey="cancelled" />
         </Tabs>
-        {activeStatusTab === 'cancelled' && (
-          <Text size="small" type="secondary" className="shrink-0">
-            仅展示近 7 天已取消订单，更早记录可使用上方搜索框按店铺名/单号查看
-          </Text>
-        )}
 
         <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
           <RadioGroup
@@ -1019,19 +1002,6 @@ export const OrdersView: React.FC = () => {
             <Radio value="jingdong">京东</Radio>
           </RadioGroup>
 
-          <Input
-            prefix={<IconSearch />}
-            placeholder="搜索店铺名、单号..."
-            value={searchKeyword}
-            onChange={(val) => setSearchKeyword(val || '')}
-            onEnterPress={() => fetchOrders()}
-            showClear
-            onClear={() => {
-              setSearchKeyword('');
-              fetchOrders('');
-            }}
-            style={{ width: 220 }}
-          />
         </div>
       </div>
 
