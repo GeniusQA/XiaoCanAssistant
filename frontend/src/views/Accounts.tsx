@@ -198,10 +198,6 @@ export const Accounts: React.FC = () => {
   const [detailData, setDetailData] = useState<AccountDetailData | null>(null);
   const [cardFilterStatus, setCardFilterStatus] = useState<number>(0);
   const [redpackFilterStatus, setRedpackFilterStatus] = useState<number>(0);
-  // 已过期红包: 官方未使用列表中失效时间已过的部分 (前端按 end_time 划分)
-  const redpackExpiredList = (detailData?.redpacks || []).filter(
-    (item) => item.end_time && (item.end_time * 1000 - Date.now() < 0)
-  );
   const [cardsLoading, setCardsLoading] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState<string>('redpacks');
   // 影音会员领取记录 (VipRightsService.UserTencentVipList, 兑换码直领直用)
@@ -1876,13 +1872,13 @@ export const Accounts: React.FC = () => {
                       onChange={(e) => setRedpackFilterStatus(Number(e.target.value))}
                     >
                       <Radio value={0}>未使用 ({detailData?.redpack_stats?.num || detailData?.redpacks?.length || 0})</Radio>
-                      <Radio value={1}>已使用</Radio>
-                      <Radio value={2}>已过期 ({redpackExpiredList.length})</Radio>
+                      <Radio value={1}>已使用 ({detailData?.redpack_counts?.used_count || detailData?.redpacks_used?.length || 0})</Radio>
+                      <Radio value={2}>已过期 ({detailData?.redpack_counts?.expired_count || detailData?.redpacks_expired?.length || 0})</Radio>
                     </RadioGroup>
                     <span className="text-xs text-semi-color-text-2">
                       {redpackFilterStatus === 0 && '可用于抵扣或补贴霸王餐返利'}
-                      {redpackFilterStatus === 1 && '官方接口未提供已使用红包记录'}
-                      {redpackFilterStatus === 2 && '已过失效时间且未使用的红包'}
+                      {redpackFilterStatus === 1 && '已核销的红包记录'}
+                      {redpackFilterStatus === 2 && '已失效未领取的红包记录'}
                     </span>
                   </div>
 
@@ -1895,22 +1891,25 @@ export const Accounts: React.FC = () => {
                         </Text>
                       </Space>
                     </div>
-                  ) : redpackFilterStatus === 1 ? (
+                  ) : (redpackFilterStatus === 0
+                    ? (detailData?.redpacks || [])
+                    : redpackFilterStatus === 1
+                      ? (detailData?.redpacks_used || [])
+                      : (detailData?.redpacks_expired || [])
+                  ).length === 0 ? (
                     <div className="py-10 text-center">
                       <Empty
-                        title="官方接口未提供已使用红包记录"
-                        description="霸王餐红包接口仅返回未使用列表，已核销的红包请以订单返利到账为准"
-                      />
-                    </div>
-                  ) : (redpackFilterStatus === 0 ? (detailData?.redpacks || []) : redpackExpiredList).length === 0 ? (
-                    <div className="py-10 text-center">
-                      <Empty
-                        title={redpackFilterStatus === 2 ? '没有已过期的红包' : '暂无可用的霸王餐红包'}
-                        description={redpackFilterStatus === 2 ? '未使用的红包过期后自动归入此列表' : '每日可通过整点红包雨、签到或任务中心获取外卖专属红包'}
+                        title={redpackFilterStatus === 1 ? '暂无已使用的红包' : redpackFilterStatus === 2 ? '暂无已过期的红包' : '暂无可用的霸王餐红包'}
+                        description="每日可通过整点红包雨、签到或任务中心获取外卖专属红包"
                       />
                     </div>
                   ) : (
-                    (redpackFilterStatus === 0 ? (detailData?.redpacks || []) : redpackExpiredList).map((item) => {
+                    (redpackFilterStatus === 0
+                      ? (detailData?.redpacks || [])
+                      : redpackFilterStatus === 1
+                        ? (detailData?.redpacks_used || [])
+                        : (detailData?.redpacks_expired || [])
+                    ).map((item) => {
                       const amountYuan = ((item.value_num || item.reward_num || 0) / 100).toFixed(2);
                       const isExpiringSoon = item.end_time && (item.end_time * 1000 - Date.now() < 24 * 3600 * 1000);
                       const platforms = item.limit?.platform_items || item.limit?.bwc_platforms || [];
@@ -1953,6 +1952,9 @@ export const Accounts: React.FC = () => {
                             )}
                             {redpackFilterStatus === 2 && (
                               <Tag size="small" color="grey" className="mb-1">已过期</Tag>
+                            )}
+                            {redpackFilterStatus === 1 && (
+                              <Tag size="small" color="grey" className="mb-1">已使用</Tag>
                             )}
                             <div className="text-[11px] text-semi-color-text-2">
                               {formatTimestamp(item.end_time)}
@@ -2160,7 +2162,7 @@ export const Accounts: React.FC = () => {
                 tab={
                   <span className="flex items-center gap-1.5">
                     <IconUser />
-                    <span>账号设置与凭据</span>
+                    <span>账号信息</span>
                   </span>
                 }
                 itemKey="profile"

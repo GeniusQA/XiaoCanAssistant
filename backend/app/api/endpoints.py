@@ -318,6 +318,9 @@ async def get_account_detail_endpoint(key: str):
     cards = []
     redpack_stats = {"num": 0}
     redpacks = []
+    redpacks_used = []
+    redpacks_expired = []
+    redpack_counts = {"used_count": 0, "expired_count": 0}
     user_info = {}
     task_info = {}
     sync_errors = []
@@ -361,8 +364,15 @@ async def get_account_detail_endpoint(key: str):
 
         try:
             rplist_res = await client.get_app_redpack_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, page=1, page_size=50)
-            if isinstance(rplist_res, dict) and rplist_res.get("unused_items"):
-                redpacks = rplist_res["unused_items"]
+            if isinstance(rplist_res, dict):
+                # 官方响应原生包含三态列表 (unused_items/used_items/expired_items) 与总数
+                redpacks = rplist_res.get("unused_items") or []
+                redpacks_used = rplist_res.get("used_items") or []
+                redpacks_expired = rplist_res.get("expired_items") or []
+                redpack_counts = {
+                    "used_count": int(rplist_res.get("used_count") or len(redpacks_used)),
+                    "expired_count": int(rplist_res.get("expired_count") or len(redpacks_expired)),
+                }
         except XiaoCanRPCError as e:
             sync_errors.append(f"红包列表: {short_rpc_error(e)}")
             logger.warning(f"获取账号红包列表失败: {e}")
@@ -437,7 +447,10 @@ async def get_account_detail_endpoint(key: str):
         "card_stats": card_stats,
         "cards": cards,
         "redpack_stats": redpack_stats,
-        "redpacks": redpacks
+        "redpacks": redpacks,
+        "redpacks_used": redpacks_used,
+        "redpacks_expired": redpacks_expired,
+        "redpack_counts": redpack_counts
     }
     if sync_errors:
         resp["sync_errors"] = _merge_sync_errors(sync_errors)

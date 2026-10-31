@@ -734,6 +734,9 @@ export interface AccountDetailData {
     num: number;
   };
   redpacks: UserRedPackItem[];
+  redpacks_used?: UserRedPackItem[];
+  redpacks_expired?: UserRedPackItem[];
+  redpack_counts?: { used_count?: number; expired_count?: number };
 }
 
 export interface LocationCandidate {
