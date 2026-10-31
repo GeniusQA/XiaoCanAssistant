@@ -105,6 +105,8 @@ jobs:
         id: merge
         if: steps.check.outputs.has_updates == 'true'
         run: |
+          # 记录合并前 SHA, 供验证失败时自动回退
+          echo "before_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           before_tree=$(git rev-parse 'HEAD^{tree}')
           # 上游若带回独立同步工作流文件, 统一清理 (避免与本工作流重复)
           git rm -f --ignore-unmatch .github/workflows/sync-upstream.yml || true
@@ -130,6 +132,29 @@ jobs:
             echo "::warning::上游合并存在无法自动解决的冲突，已中止，请手动处理"
           fi
 
-      - name: Push
+      - name: Verify sync result (后端编译 + 前端构建)
+        id: verify
         if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -e
+          echo "== 后端编译检查 =="
+          python3 -m compileall -q backend/app
+          echo "== 前端构建 =="
+          cd frontend
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run build
+
+      - name: Rollback on verify failure (验证失败自动回退本次同步)
+        if: failure() && steps.merge.outputs.changed == 'true'
+        run: |
+          git reset --hard "${{ steps.merge.outputs.before_sha }}"
+          echo "::error::Sync Other Repositories 同步后验证失败 (后端编译或前端构建)，已自动回退本次合并、未推送远程，请手动检查上游改动"
+          {
+            echo "### Sync Other Repositories 同步已自动回退"
+            echo ""
+            echo "合并后自动验证失败（py_compile / 前端构建），本次同步未推送，仓库保持原状。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push
+        if: steps.merge.outputs.changed == 'true' && success()
         run: git push origin main
