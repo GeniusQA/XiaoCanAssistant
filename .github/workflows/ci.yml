@@ -91,52 +91,68 @@ jobs:
       - name: Check upstream updates
         id: check
         run: |
-          COUNT=$(git rev-list --count HEAD..upstream/main 2>/dev/null || echo 0)
-          echo "上游领先提交数: $COUNT"
+          # 已同步清单 (每行一个上游提交SHA, 随仓库存储; 内容已在本地或已甄别处理的记录于此)
+          touch .github/workflows/.upstream-synced-sha
+          sort -u .github/workflows/.upstream-synced-sha -o .github/workflows/.upstream-synced-sha
+          git rev-list --reverse --no-merges upstream/main > /tmp/all_shas.txt
+          grep -vxFf .github/workflows/.upstream-synced-sha /tmp/all_shas.txt > /tmp/pending_shas.txt || true
+          COUNT=$(wc -l < /tmp/pending_shas.txt | tr -d ' ')
+          echo "待甄别同步提交数: $COUNT"
           if [ "$COUNT" -gt 0 ]; then
             echo "has_updates=true" >> "$GITHUB_OUTPUT"
-            git log HEAD..upstream/main --oneline | head -20
+            while read s; do git log -1 --format='- %h %s' "$s"; done < /tmp/pending_shas.txt
           else
             echo "has_updates=false" >> "$GITHUB_OUTPUT"
             echo "上游无新提交"
           fi
 
-      - name: Merge upstream (squash 压缩, 不保留上游作者; 冲突保留本仓库代码)
+      - name: Cherry-pick upstream commits (行级甄别: 保本地功能+吸收修复, 冲突隔离待人工)
         id: merge
         if: steps.check.outputs.has_updates == 'true'
         run: |
-          # 记录合并前 SHA, 供验证失败时自动回退
           echo "before_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          before_tree=$(git rev-parse 'HEAD^{tree}')
-          # 上游若带回独立同步工作流文件, 统一清理 (避免与本工作流重复)
-          git rm -f --ignore-unmatch .github/workflows/sync-upstream.yml || true
-          # --squash: 上游变更压缩为单个提交 (作者=github-actions[bot]), 不引入上游提交历史与作者信息
-          # -X ours: 内容冲突时保留本仓库版本
-          if git merge -X ours --squash --allow-unrelated-histories upstream/main; then
-            # 合并说明统一为 Sync Other Repositories, 并附带上游各提交的标题清单
-            # (%s 仅取提交说明, 不含作者/邮箱等任何上游作者信息; 最多列 50 条防止超长)
-            {
-              echo "chore: Sync Other Repositories"
-              echo ""
-              echo "本次合并包含的其他仓库更新:"
-              git log --abbrev=6 --format='- %h %s' HEAD..upstream/main | head -50
-            } > /tmp/sync_commit_msg.txt
-            git commit -F /tmp/sync_commit_msg.txt && rm -f /tmp/sync_commit_msg.txt
-            after_tree=$(git rev-parse 'HEAD^{tree}')
-            if [ "$before_tree" = "$after_tree" ]; then
-              # 合并后文件树无实质变化 (上游改动已被本仓库包含), 回退避免空提交噪音
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-              git reset --hard 'HEAD~1'
-              echo "上游无实质内容变化，跳过推送"
+          applied=0; skipped=0; conflicted=0
+          : > /tmp/applied_list.txt
+          : > /tmp/pending_list.txt
+          while read sha; do
+            [ -z "$sha" ] && continue
+            subj=$(git log -1 --format='%s' "$sha")
+            if git cherry-pick -n "$sha" >/dev/null 2>&1; then
+              if git diff --cached --quiet; then
+                # 本地已有等价实现 (应用后无实质变化)
+                skipped=$((skipped+1))
+                echo "$sha" >> .github/workflows/.upstream-synced-sha
+              else
+                git log -1 --format='%s' "$sha" > /tmp/cmsg.txt
+                git commit -q -F /tmp/cmsg.txt
+                applied=$((applied+1))
+                echo "- $sha $subj" >> /tmp/applied_list.txt
+                echo "$sha" >> .github/workflows/.upstream-synced-sha
+              fi
             else
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-              git --no-pager diff --stat 'HEAD~1' HEAD | tail -5
+              # 真冲突: 隔离待人工甄别 (不写入清单, 下次运行自动重试, 永不静默丢弃)
+              git cherry-pick --abort >/dev/null 2>&1 || true
+              git checkout -- . || true
+              conflicted=$((conflicted+1))
+              echo "- $sha $subj" >> /tmp/pending_list.txt
             fi
-          else
-            git merge --abort || true
-            git reset --hard HEAD || true
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::上游合并存在无法自动解决的冲突，已中止，请手动处理"
+          done < /tmp/pending_shas.txt
+          echo "applied=$applied" >> "$GITHUB_OUTPUT"
+          echo "conflicted=$conflicted" >> "$GITHUB_OUTPUT"
+          echo "甄别结果: 自动应用 $applied | 等价跳过 $skipped | 冲突隔离 $conflicted"
+          changed=false
+          if [ "$applied" -gt 0 ]; then
+            changed=true
+          fi
+          sort -u .github/workflows/.upstream-synced-sha -o .github/workflows/.upstream-synced-sha
+          git add .github/workflows/.upstream-synced-sha
+          if ! git diff --cached --quiet -- .github/workflows/.upstream-synced-sha; then
+            git commit -q -m "chore: 更新上游已同步提交清单"
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$conflicted" -gt 0 ]; then
+            echo "::warning::有 $conflicted 个上游提交存在冲突已隔离待人工甄别 (未丢弃, 下次运行自动重试)"
           fi
 
       - name: Verify sync result (后端编译 + 前端构建)
@@ -154,12 +170,39 @@ jobs:
       - name: Rollback on verify failure (验证失败自动回退本次同步)
         if: failure() && steps.merge.outputs.changed == 'true'
         run: |
-          git reset --hard "${{ steps.merge.outputs.before_sha }}"
+          git reset --hard "${ steps.merge.outputs.before_sha }"
           echo "::error::Sync Other Repositories 同步后验证失败 (后端编译或前端构建)，已自动回退本次合并、未推送远程，请手动检查上游改动"
           {
             echo "### Sync Other Repositories 同步已自动回退"
             echo ""
             echo "合并后自动验证失败（py_compile / 前端构建），本次同步未推送，仓库保持原状。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sync report (甄别式同步报告)
+        if: always() && steps.check.outputs.has_updates == 'true'
+        run: |
+          {
+            echo "### Sync Other Repositories 甄别式同步报告"
+            echo ""
+            echo "- 自动应用: ${{ steps.merge.outputs.applied || 0 }} 条"
+            echo "- 冲突隔离(待人工): ${{ steps.merge.outputs.conflicted || 0 }} 条"
+            if [ -s /tmp/applied_list.txt ]; then
+              echo ""
+              echo "<details><summary>本次自动应用的提交</summary>"
+              echo ""
+              echo '```'
+              cat /tmp/applied_list.txt
+              echo '```'
+              echo "</details>"
+            fi
+            if [ -s /tmp/pending_list.txt ]; then
+              echo ""
+              echo "⚠️ **以下上游提交存在冲突, 已隔离待人工甄别 (未丢弃, 下次运行自动重试):**"
+              echo ""
+              echo '```'
+              cat /tmp/pending_list.txt
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push
