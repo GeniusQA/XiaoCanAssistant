@@ -1102,8 +1102,8 @@ export const Accounts: React.FC = () => {
                     )}
                   </div>
 
-                  {/* 美团官方账号绑定状态与领券区 */}
-                  {isMeituanBound ? (
+                  {/* 美团官方账号绑定状态与领券区 (未绑定时整行隐藏, 绑定入口仅保留底部「绑定美团」) */}
+                  {isMeituanBound && (
                     <div
                       className="bg-semi-color-fill-0 border border-semi-color-border rounded-lg p-2.5 mb-3.5 flex items-center justify-between text-xs transition-colors hover:border-amber-400/50"
                       onClick={(e) => e.stopPropagation()}
@@ -1168,32 +1168,6 @@ export const Accounts: React.FC = () => {
                             明细
                           </Button>
                         )}
-                      </Space>
-                    </div>
-                  ) : (
-                    <div
-                      className="bg-semi-color-fill-0 border border-dashed border-semi-color-border rounded-lg p-2 mb-3.5 flex items-center justify-between text-xs"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Avatar
-                          size="extra-extra-small"
-                          style={{ backgroundColor: 'var(--semi-color-fill-2)', color: 'var(--semi-color-text-2)', fontSize: '10px' }}
-                        >
-                          美
-                        </Avatar>
-                        <Text type="tertiary" size="small">未绑定美团账号</Text>
-                      </div>
-                      <Space spacing="tight">
-                        <Button
-                          theme="light"
-                          type="warning"
-                          size="small"
-                          icon={<IconQrCode />}
-                          onClick={() => handleStartMeituanLogin(acc)}
-                        >
-                          绑定美团
-                        </Button>
                       </Space>
                     </div>
                   )}
