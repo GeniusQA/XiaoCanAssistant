@@ -278,7 +278,6 @@ async def sync_account_endpoint(key: str):
         return {"ok": False, "message": f"同步失败: {str(e)}"}
 
 
-@router.get("/accounts/{key}/detail")
 def _merge_sync_errors(errors: List[str]) -> List[str]:
     """官方WAF熔断提示统一: 多个子项全部为WAF拦截时合并为单条熔断提示 (全局唯一提示语要求)"""
     waf_kw = "WAF临时频次拦截保护冷却中"
@@ -288,6 +287,7 @@ def _merge_sync_errors(errors: List[str]) -> List[str]:
     return errors
 
 
+@router.get("/accounts/{key}/detail")
 async def get_account_detail_endpoint(key: str):
     """获取指定账号的全面详情（包含个人信息、元宝状态、特权卡券列表与可用红包列表）"""
     acc = db.get_account_by_key(key)
