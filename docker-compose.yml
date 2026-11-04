@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  xiaocan-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xiaocan-assistant
+    restart: unless-stopped
+    ports:
+      - "8690:8690"
+    volumes:
+      - ./data:/app/backend/data
+    environment:
+      - TZ=Asia/Shanghai
+      - XIAOCAN_RELOAD=0
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8690/health\")' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

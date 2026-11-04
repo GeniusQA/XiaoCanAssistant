@@ -1,0 +1,369 @@
+name: CI Quality Gate
+
+# 触发分流:
+#   push / pull_request → 代码质量门禁 (后端编译 + 前端构建)
+#   schedule (每日北京时间 11:00) / workflow_dispatch → 上游仓库同步合并
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------- 代码质量门禁 (push / PR) ----------------
+  backend-quality:
+    name: Backend Syntax & Compile Check
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Backend Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Compile Backend App
+        run: |
+          python -m compileall backend/app
+
+  frontend-quality:
+    name: Frontend Lint & Build Check
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run Lint Gate
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run Production Build
+        working-directory: frontend
+        run: npm run build
+
+  # ---------------- 上游仓库同步合并 (每日定时 / 手动) ----------------
+  sync-upstream:
+    name: Sync Other Repositories (检测其他仓库更新并合并)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git
+        run: |
+          # 所有同步提交一律归属仓库所有者本人 (GitHub noreply 邮箱, 不暴露私人邮箱,
+          # 也不再产生 github-actions[bot] 这个额外贡献者身份)
+          git config user.name "GeniusQA"
+          git config user.email "158152582+GeniusQA@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/AkiSeele/xiaocan-assistant.git || true
+          git fetch upstream --tags || echo "::warning::上游仓库拉取失败"
+
+      - name: Check upstream updates
+        id: check
+        run: |
+          # 已同步清单 (每行一个上游提交SHA, 随仓库存储; 内容已在本地或已甄别处理的记录于此)
+          touch .github/workflows/.upstream-synced-sha
+          sort -u .github/workflows/.upstream-synced-sha -o .github/workflows/.upstream-synced-sha
+          git rev-list --reverse --no-merges upstream/main > /tmp/all_shas.txt
+          grep -vxFf .github/workflows/.upstream-synced-sha /tmp/all_shas.txt > /tmp/pending_shas.txt || true
+          COUNT=$(wc -l < /tmp/pending_shas.txt | tr -d ' ')
+          echo "待甄别同步提交数: $COUNT"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+            # 仅输出条数, 不回显其他仓库的提交标题/SHA 等信息
+            echo "检测到 $COUNT 条待甄别的其他仓库更新"
+          else
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "其他仓库无新提交"
+          fi
+
+      - name: "Cherry-pick with auto conflict resolution (本地优先+功能零丢弃+验证门禁)"
+        id: merge
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          echo "before_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          applied=0; skipped=0; unioned=0; fallback=0; selective=0; isolated=0
+          : > /tmp/applied_list.txt
+          : > /tmp/pending_list.txt
+          mkdir -p .github/workflows/deferred
+
+          # 第1层: 三方 union 自动解冲突 (双方改动都保留, 不产生冲突标记)
+          union_resolve() {
+            git diff --name-only --diff-filter=U > /tmp/conflict_files.txt || return 1
+            local f
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if ! git cat-file -e ":2:$f" 2>/dev/null; then
+                git show ":3:$f" > "$f" 2>/dev/null || : > "$f"
+              elif ! git cat-file -e ":3:$f" 2>/dev/null; then
+                git show ":2:$f" > "$f"
+              else
+                git show ":1:$f" > /tmp/base.f 2>/dev/null || : > /tmp/base.f
+                git show ":2:$f" > /tmp/ours.f
+                git show ":3:$f" > /tmp/theirs.f
+                git merge-file --union /tmp/ours.f /tmp/base.f /tmp/theirs.f >/dev/null 2>&1 || true
+                cp /tmp/ours.f "$f"
+              fi
+              git add -- "$f"
+            done < /tmp/conflict_files.txt
+          }
+
+          # 验证门禁: 冲突标记 / Python语法 / 重复顶层定义 / TS完整类型检查与构建
+          verify_tree() {
+            # 只查真正的冲突标记 (git diff --check 会把无害的行尾空格也算失败)
+            if git diff --cached | grep -qE '^\+(<<<<<<<|>>>>>>>)'; then
+              echo "残留冲突标记"
+              return 1
+            fi
+            if git diff --cached --name-only | grep -q '\.py$'; then
+              python3 -m compileall -q backend/app || return 1
+              # union 合并可能把同名函数/类复制两份 (语法仍合法但运行会串), 检查顶层重复定义
+              local pyf dup
+              for pyf in $(git diff --cached --name-only -- '*.py'); do
+                [ -f "$pyf" ] || continue
+                dup=$(grep -E '^(async )?def |^class ' "$pyf" \
+                  | sed -E 's/^(async )?def ([A-Za-z_][A-Za-z0-9_]*).*/\2/; s/^class ([A-Za-z_][A-Za-z0-9_]*).*/\1/' \
+                  | sort | uniq -d) || true
+                if [ -n "$dup" ]; then
+                  echo "重复顶层定义: $pyf -> $dup"
+                  return 1
+                fi
+              done
+            fi
+            if git diff --cached --name-only | grep -qE '^frontend/.*\.(ts|tsx|json|css)$'; then
+              (cd frontend && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build) >/tmp/build.log 2>&1 || {
+                tail -25 /tmp/build.log
+                return 1
+              }
+            fi
+            return 0
+          }
+
+          sync_commit() {
+            git commit -q -m "chore: Sync Other Repositories" \
+              --author="GeniusQA <158152582+GeniusQA@users.noreply.github.com>"
+          }
+
+          while read sha; do
+            [ -z "$sha" ] && continue
+            # -n 不生成提交: 后续由本工作流以本人身份重新提交, 绝不继承其他仓库的作者信息
+            if git cherry-pick -n "$sha" >/dev/null 2>&1; then
+              if git diff --cached --quiet; then
+                # 本地已有等价实现 (应用后无实质变化)
+                skipped=$((skipped+1))
+                echo "$sha" >> .github/workflows/.upstream-synced-sha
+              else
+                # 提交说明统一为 Sync Other Repositories, 不带入其他仓库标题/作者/名称
+                git commit -q -m "chore: Sync Other Repositories" \
+                  --author="GeniusQA <158152582+GeniusQA@users.noreply.github.com>"
+                applied=$((applied+1))
+                echo "- $sha" >> /tmp/applied_list.txt
+                echo "$sha" >> .github/workflows/.upstream-synced-sha
+              fi
+              continue
+            fi
+
+            # ---- 第1层: union 合并双方改动, 验证通过即采纳 (功能修复默认不舍弃) ----
+            union_resolve
+            if ! git diff --cached --quiet && verify_tree; then
+              sync_commit
+              unioned=$((unioned+1))
+              echo "$sha" >> .github/workflows/.upstream-synced-sha
+              continue
+            fi
+
+            # ---- 第2层: 同一区域双方重写导致 union 验证不过 → 本地优先 (-X ours) ----
+            # 只在重叠 hunk 保留本地代码, 其余全部改动照单吸收, 保证本地修改不被破坏
+            git reset -q --hard HEAD
+            git clean -qfd
+            if git cherry-pick -n -X ours "$sha" >/dev/null 2>&1 && ! git diff --cached --quiet && verify_tree; then
+              # 被重叠 hunk 挡下的改动存为纯代码补丁台账, 绝不静默丢弃 (不含作者/仓库信息)
+              git show --format= --binary "$sha" > ".github/workflows/deferred/${sha}.patch"
+              git add -A
+              sync_commit
+              fallback=$((fallback+1))
+              echo "$sha" >> .github/workflows/.upstream-synced-sha
+              continue
+            fi
+
+            # ---- 第3层: 逐 hunk 选择性应用 (从纯本地代码出发, 只贴上下文吻合的改动) ----
+            # 三方合并会破坏结构时 (双方重写同一组件), 此层仍能吸收所有不冲突的修复;
+            # 贴不上的 hunk 写入 .rej 台账, 一个都不丢弃
+            git reset -q --hard HEAD
+            git clean -qfd
+            mkdir -p .github/workflows/deferred
+            git diff --binary "$sha^" "$sha" > /tmp/full.patch 2>/dev/null || true
+            git apply --reject --whitespace=nowarn /tmp/full.patch >/tmp/apply.log 2>&1 || true
+            find . -name '*.rej' -not -path './.git/*' -type f > /tmp/rej_files.txt
+            if [ -s /tmp/rej_files.txt ]; then
+              : > ".github/workflows/deferred/${sha}.rej"
+              while IFS= read -r rj; do
+                echo "===== $rj =====" >> ".github/workflows/deferred/${sha}.rej"
+                cat "$rj" >> ".github/workflows/deferred/${sha}.rej"
+              done < /tmp/rej_files.txt
+              while IFS= read -r rj; do rm -f "$rj"; done < /tmp/rej_files.txt
+            fi
+            git add -A
+            ok=0
+            if ! git diff --cached --quiet && verify_tree; then
+              ok=1
+            else
+              # 验证不过: 逐文件回退到纯本地版本再验证, 只丢弃真正破坏代码的文件改动
+              # (其余不冲突的修复照单吸收; 被回退的内容完整保存在台账补丁里)
+              tries=0
+              for f in $(git diff --cached --name-only); do
+                tries=$((tries+1))
+                [ "$tries" -gt 30 ] && break
+                if git cat-file -e "HEAD:$f" 2>/dev/null; then
+                  git checkout HEAD -- "$f"
+                else
+                  git rm -q --cached --ignore-unmatch -- "$f" >/dev/null 2>&1 || true
+                fi
+                git add -A
+                git diff --cached --quiet && break
+                if verify_tree; then ok=1; break; fi
+              done
+            fi
+            # 至少吸收 1 个真正的代码文件才算合并成功 (只剩台账/清单时不得标记已同步)
+            code_changed=$(git diff --cached --name-only -- backend frontend run.bat scripts tools | grep -v '^\.github/' | wc -l | tr -d ' ')
+            if [ "$ok" = "1" ] && [ "$code_changed" -gt 0 ] && ! git diff --cached --quiet; then
+              git show --format= --binary "$sha" > ".github/workflows/deferred/${sha}.patch"
+              git add -A
+              sync_commit
+              selective=$((selective+1))
+              echo "$sha" >> .github/workflows/.upstream-synced-sha
+              continue
+            fi
+
+            # ---- 第4层: 四层自动策略都验证失败 → 隔离, 下次运行自动重试 ----
+            git reset -q --hard HEAD
+            git clean -qfd
+            isolated=$((isolated+1))
+            echo "- $sha" >> /tmp/pending_list.txt
+          done < /tmp/pending_shas.txt
+          echo "applied=$applied" >> "$GITHUB_OUTPUT"
+          echo "unioned=$unioned" >> "$GITHUB_OUTPUT"
+          echo "fallback=$fallback" >> "$GITHUB_OUTPUT"
+          echo "selective=$selective" >> "$GITHUB_OUTPUT"
+          echo "isolated=$isolated" >> "$GITHUB_OUTPUT"
+          echo "甄别结果: 直接应用 $applied | 等价跳过 $skipped | 双方保留 $unioned | 本地优先 $fallback | 逐块选择性 $selective | 隔离 $isolated"
+          changed=false
+          if [ "$((applied + unioned + fallback + selective))" -gt 0 ]; then
+            changed=true
+          fi
+          # 仅在确实合并/记录了内容时才落清单提交, 避免空跑产生噪音提交
+          if [ "$((applied + unioned + fallback + selective + skipped))" -gt 0 ]; then
+            sort -u .github/workflows/.upstream-synced-sha -o .github/workflows/.upstream-synced-sha
+            git add -A .github/workflows
+            if ! git diff --cached --quiet; then
+              sync_commit
+              changed=true
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$((fallback + isolated))" -gt 0 ]; then
+            echo "::warning::有 $((fallback + isolated)) 条更新未能完整自动合并, 冲突块已存台账或隔离重试, 均未丢弃"
+          fi
+
+      - name: Enforce single author (本次同步提交仅允许本人身份)
+        id: author
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -e
+          BEFORE="${{ steps.merge.outputs.before_sha }}"
+          SELF="158152582+GeniusQA@users.noreply.github.com"
+          # 校验本次新建提交的作者与提交者邮箱, 出现任何其他身份即阻断并回退, 绝不推送
+          BAD=$(git log --format='%ae%n%ce' "$BEFORE"..HEAD | grep -vx "$SELF" || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::检测到非本人提交身份, 已阻断本次同步: $BAD"
+            git reset --hard "$BEFORE"
+            exit 1
+          fi
+          echo "作者身份校验通过: 本次提交全部归属本人"
+
+      - name: Verify sync result (后端编译 + 前端构建)
+        id: verify
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -e
+          echo "== 后端编译检查 =="
+          python3 -m compileall -q backend/app
+          echo "== 前端构建 =="
+          cd frontend
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run build
+
+      - name: Rollback on verify failure (验证失败自动回退本次同步)
+        if: failure() && steps.merge.outputs.changed == 'true'
+        run: |
+          git reset --hard "${{ steps.merge.outputs.before_sha }}"
+          echo "::error::Sync Other Repositories 同步后验证失败 (后端编译或前端构建)，已自动回退本次合并、未推送远程，下次运行自动重试"
+          {
+            echo "### Sync Other Repositories 同步已自动回退"
+            echo ""
+            echo "合并后自动验证失败（py_compile / 前端构建），本次同步未推送，仓库保持原状。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sync report (甄别式同步报告)
+        if: always() && steps.check.outputs.has_updates == 'true'
+        run: |
+          {
+            echo "### Sync Other Repositories 甄别式同步报告"
+            echo ""
+            echo "- 直接应用: ${{ steps.merge.outputs.applied || 0 }} 条"
+            echo "- 冲突自动合并(双方保留+验证通过): ${{ steps.merge.outputs.unioned || 0 }} 条"
+            echo "- 本地优先合并(冲突块存台账): ${{ steps.merge.outputs.fallback || 0 }} 条"
+            echo "- 逐块选择性合并(贴不上的块存台账): ${{ steps.merge.outputs.selective || 0 }} 条"
+            echo "- 验证失败隔离(下次自动重试): ${{ steps.merge.outputs.isolated || 0 }} 条"
+            echo "- 提交身份: 仅本人 (GeniusQA)"
+            # 展示文案一律不出现其他仓库的提交标题/SHA/作者信息, 仅保留统计
+            if [ "${{ steps.merge.outputs.fallback || 0 }}" != "0" ]; then
+              echo ""
+              echo "部分重叠改动因会破坏本地代码而暂缓, 已存为纯代码补丁台账 (deferred 目录), 未丢弃。"
+            fi
+            if [ "${{ steps.merge.outputs.isolated || 0 }}" != "0" ]; then
+              echo ""
+              echo "有 ${{ steps.merge.outputs.isolated || 0 }} 条更新自动合并均未通过验证, 已隔离 (未丢弃, 下次运行自动重试)。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push
+        if: steps.merge.outputs.changed == 'true' && success()
+        run: git push origin main

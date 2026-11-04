@@ -1,0 +1,810 @@
+@import "tailwindcss";
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/**
+ * Semi Design Token 与 Tailwind CSS v4 集成
+ * 
+ * 原理：
+ * 1. @theme 中用 var(--semi-xxx) 占位，让 Tailwind 生成对应的工具类
+ * 2. body 中重新定义这些变量，指向 Semi 的真实 Token，确保在 Semi 注入 :root 变量后生效
+ * 
+ * 使用示例：
+ *   bg-semi-color-primary      -> 主色背景
+ *   bg-semi-color-fill-0       -> 浅色容器填充
+ *   text-semi-color-text-0     -> 主要文字颜色
+ *   text-semi-color-text-2     -> 次级文字颜色
+ *   border-semi-color-border   -> 标准边框
+ *   rounded-semi-border-radius-medium -> 中等圆角
+ */
+
+@theme {
+  /* ========== 基础色 ========== */
+  --color-semi-color-white: var(--semi-color-white);
+  --color-semi-color-black: var(--semi-color-black);
+
+  /* ========== Primary 主色 ========== */
+  --color-semi-color-primary: var(--semi-color-primary);
+  --color-semi-color-primary-hover: var(--semi-color-primary-hover);
+  --color-semi-color-primary-active: var(--semi-color-primary-active);
+  --color-semi-color-primary-disabled: var(--semi-color-primary-disabled);
+  --color-semi-color-primary-light-default: var(--semi-color-primary-light-default);
+  --color-semi-color-primary-light-hover: var(--semi-color-primary-light-hover);
+  --color-semi-color-primary-light-active: var(--semi-color-primary-light-active);
+
+  /* ========== Secondary 次要色 ========== */
+  --color-semi-color-secondary: var(--semi-color-secondary);
+  --color-semi-color-secondary-hover: var(--semi-color-secondary-hover);
+  --color-semi-color-secondary-active: var(--semi-color-secondary-active);
+  --color-semi-color-secondary-disabled: var(--semi-color-secondary-disabled);
+  --color-semi-color-secondary-light-default: var(--semi-color-secondary-light-default);
+  --color-semi-color-secondary-light-hover: var(--semi-color-secondary-light-hover);
+  --color-semi-color-secondary-light-active: var(--semi-color-secondary-light-active);
+
+  /* ========== Tertiary 第三色 ========== */
+  --color-semi-color-tertiary: var(--semi-color-tertiary);
+  --color-semi-color-tertiary-hover: var(--semi-color-tertiary-hover);
+  --color-semi-color-tertiary-active: var(--semi-color-tertiary-active);
+  --color-semi-color-tertiary-light-default: var(--semi-color-tertiary-light-default);
+  --color-semi-color-tertiary-light-hover: var(--semi-color-tertiary-light-hover);
+  --color-semi-color-tertiary-light-active: var(--semi-color-tertiary-light-active);
+
+  /* ========== Default 默认色 ========== */
+  --color-semi-color-default: var(--semi-color-default);
+  --color-semi-color-default-hover: var(--semi-color-default-hover);
+  --color-semi-color-default-active: var(--semi-color-default-active);
+
+  /* ========== Info 信息色 ========== */
+  --color-semi-color-info: var(--semi-color-info);
+  --color-semi-color-info-hover: var(--semi-color-info-hover);
+  --color-semi-color-info-active: var(--semi-color-info-active);
+  --color-semi-color-info-disabled: var(--semi-color-info-disabled);
+  --color-semi-color-info-light-default: var(--semi-color-info-light-default);
+  --color-semi-color-info-light-hover: var(--semi-color-info-light-hover);
+  --color-semi-color-info-light-active: var(--semi-color-info-light-active);
+
+  /* ========== Success 成功色 ========== */
+  --color-semi-color-success: var(--semi-color-success);
+  --color-semi-color-success-hover: var(--semi-color-success-hover);
+  --color-semi-color-success-active: var(--semi-color-success-active);
+  --color-semi-color-success-disabled: var(--semi-color-success-disabled);
+  --color-semi-color-success-light-default: var(--semi-color-success-light-default);
+  --color-semi-color-success-light-hover: var(--semi-color-success-light-hover);
+  --color-semi-color-success-light-active: var(--semi-color-success-light-active);
+
+  /* ========== Danger 危险色 ========== */
+  --color-semi-color-danger: var(--semi-color-danger);
+  --color-semi-color-danger-hover: var(--semi-color-danger-hover);
+  --color-semi-color-danger-active: var(--semi-color-danger-active);
+  --color-semi-color-danger-light-default: var(--semi-color-danger-light-default);
+  --color-semi-color-danger-light-hover: var(--semi-color-danger-light-hover);
+  --color-semi-color-danger-light-active: var(--semi-color-danger-light-active);
+
+  /* ========== Warning 警告色 ========== */
+  --color-semi-color-warning: var(--semi-color-warning);
+  --color-semi-color-warning-hover: var(--semi-color-warning-hover);
+  --color-semi-color-warning-active: var(--semi-color-warning-active);
+  --color-semi-color-warning-light-default: var(--semi-color-warning-light-default);
+  --color-semi-color-warning-light-hover: var(--semi-color-warning-light-hover);
+  --color-semi-color-warning-light-active: var(--semi-color-warning-light-active);
+
+  /* ========== 功能色 ========== */
+  --color-semi-color-focus-border: var(--semi-color-focus-border);
+  --color-semi-color-disabled-text: var(--semi-color-disabled-text);
+  --color-semi-color-disabled-border: var(--semi-color-disabled-border);
+  --color-semi-color-disabled-bg: var(--semi-color-disabled-bg);
+  --color-semi-color-disabled-fill: var(--semi-color-disabled-fill);
+  --color-semi-color-shadow: var(--semi-color-shadow);
+
+  /* ========== Link 链接色 ========== */
+  --color-semi-color-link: var(--semi-color-link);
+  --color-semi-color-link-hover: var(--semi-color-link-hover);
+  --color-semi-color-link-active: var(--semi-color-link-active);
+  --color-semi-color-link-visited: var(--semi-color-link-visited);
+
+  /* ========== Border 边框 ========== */
+  --color-semi-color-border: var(--semi-color-border);
+  --color-semi-color-border-subtle: var(--semi-color-border);
+
+  /* ========== Background 背景色 ========== */
+  --color-semi-color-nav-bg: var(--semi-color-nav-bg);
+  --color-semi-color-overlay-bg: var(--semi-color-overlay-bg);
+  --color-semi-color-bg-0: var(--semi-color-bg-0);
+  --color-semi-color-bg-1: var(--semi-color-bg-1);
+  --color-semi-color-bg-2: var(--semi-color-bg-2);
+  --color-semi-color-bg-3: var(--semi-color-bg-3);
+  --color-semi-color-bg-4: var(--semi-color-bg-4);
+
+  /* ========== Fill 填充色 ========== */
+  --color-semi-color-fill-0: var(--semi-color-fill-0);
+  --color-semi-color-fill-1: var(--semi-color-fill-1);
+  --color-semi-color-fill-2: var(--semi-color-fill-2);
+
+  /* ========== Text 文字色 ========== */
+  --color-semi-color-text-0: var(--semi-color-text-0);
+  --color-semi-color-text-1: var(--semi-color-text-1);
+  --color-semi-color-text-2: var(--semi-color-text-2);
+  --color-semi-color-text-3: var(--semi-color-text-3);
+
+  /* ========== Highlight 高亮色 ========== */
+  --color-semi-color-highlight-bg: var(--semi-color-highlight-bg);
+  --color-semi-color-highlight: var(--semi-color-highlight);
+
+  /* ========== Border Radius 圆角 ========== */
+  --radius-semi-border-radius-extra-small: var(--semi-border-radius-extra-small);
+  --radius-semi-border-radius-small: var(--semi-border-radius-small);
+  --radius-semi-border-radius-medium: var(--semi-border-radius-medium);
+  --radius-semi-border-radius-large: var(--semi-border-radius-large);
+  --radius-semi-border-radius-circle: var(--semi-border-radius-circle);
+  --radius-semi-border-radius-full: var(--semi-border-radius-full);
+}
+
+body {
+  /* 运行时变量覆盖，保证在 Semi 的 :root 变量注入后生效 */
+  --color-semi-color-white: var(--semi-color-white);
+  --color-semi-color-black: var(--semi-color-black);
+  --color-semi-color-primary: var(--semi-color-primary);
+  --color-semi-color-primary-hover: var(--semi-color-primary-hover);
+  --color-semi-color-primary-active: var(--semi-color-primary-active);
+  --color-semi-color-primary-disabled: var(--semi-color-primary-disabled);
+  --color-semi-color-primary-light-default: var(--semi-color-primary-light-default);
+  --color-semi-color-primary-light-hover: var(--semi-color-primary-light-hover);
+  --color-semi-color-primary-light-active: var(--semi-color-primary-light-active);
+  --color-semi-color-secondary: var(--semi-color-secondary);
+  --color-semi-color-secondary-hover: var(--semi-color-secondary-hover);
+  --color-semi-color-secondary-active: var(--semi-color-secondary-active);
+  --color-semi-color-secondary-disabled: var(--semi-color-secondary-disabled);
+  --color-semi-color-secondary-light-default: var(--semi-color-secondary-light-default);
+  --color-semi-color-secondary-light-hover: var(--semi-color-secondary-light-hover);
+  --color-semi-color-secondary-light-active: var(--semi-color-secondary-light-active);
+  --color-semi-color-tertiary: var(--semi-color-tertiary);
+  --color-semi-color-tertiary-hover: var(--semi-color-tertiary-hover);
+  --color-semi-color-tertiary-active: var(--semi-color-tertiary-active);
+  --color-semi-color-tertiary-light-default: var(--semi-color-tertiary-light-default);
+  --color-semi-color-tertiary-light-hover: var(--semi-color-tertiary-light-hover);
+  --color-semi-color-tertiary-light-active: var(--semi-color-tertiary-light-active);
+  --color-semi-color-default: var(--semi-color-default);
+  --color-semi-color-default-hover: var(--semi-color-default-hover);
+  --color-semi-color-default-active: var(--semi-color-default-active);
+  --color-semi-color-info: var(--semi-color-info);
+  --color-semi-color-info-hover: var(--semi-color-info-hover);
+  --color-semi-color-info-active: var(--semi-color-info-active);
+  --color-semi-color-info-disabled: var(--semi-color-info-disabled);
+  --color-semi-color-info-light-default: var(--semi-color-info-light-default);
+  --color-semi-color-info-light-hover: var(--semi-color-info-light-hover);
+  --color-semi-color-info-light-active: var(--semi-color-info-light-active);
+  --color-semi-color-success: var(--semi-color-success);
+  --color-semi-color-success-hover: var(--semi-color-success-hover);
+  --color-semi-color-success-active: var(--semi-color-success-active);
+  --color-semi-color-success-disabled: var(--semi-color-success-disabled);
+  --color-semi-color-success-light-default: var(--semi-color-success-light-default);
+  --color-semi-color-success-light-hover: var(--semi-color-success-light-hover);
+  --color-semi-color-success-light-active: var(--semi-color-success-light-active);
+  --color-semi-color-danger: var(--semi-color-danger);
+  --color-semi-color-danger-hover: var(--semi-color-danger-hover);
+  --color-semi-color-danger-active: var(--semi-color-danger-active);
+  --color-semi-color-danger-light-default: var(--semi-color-danger-light-default);
+  --color-semi-color-danger-light-hover: var(--semi-color-danger-light-hover);
+  --color-semi-color-danger-light-active: var(--semi-color-danger-light-active);
+  --color-semi-color-warning: var(--semi-color-warning);
+  --color-semi-color-warning-hover: var(--semi-color-warning-hover);
+  --color-semi-color-warning-active: var(--semi-color-warning-active);
+  --color-semi-color-warning-light-default: var(--semi-color-warning-light-default);
+  --color-semi-color-warning-light-hover: var(--semi-color-warning-light-hover);
+  --color-semi-color-warning-light-active: var(--semi-color-warning-light-active);
+  --color-semi-color-focus-border: var(--semi-color-focus-border);
+  --color-semi-color-disabled-text: var(--semi-color-disabled-text);
+  --color-semi-color-disabled-border: var(--semi-color-disabled-border);
+  --color-semi-color-disabled-bg: var(--semi-color-disabled-bg);
+  --color-semi-color-disabled-fill: var(--semi-color-disabled-fill);
+  --color-semi-color-shadow: var(--semi-color-shadow);
+  --color-semi-color-link: var(--semi-color-link);
+  --color-semi-color-link-hover: var(--semi-color-link-hover);
+  --color-semi-color-link-active: var(--semi-color-link-active);
+  --color-semi-color-link-visited: var(--semi-color-link-visited);
+  --color-semi-color-border: var(--semi-color-border);
+  --color-semi-color-border-subtle: var(--semi-color-border);
+  --color-semi-color-nav-bg: var(--semi-color-nav-bg);
+  --color-semi-color-overlay-bg: var(--semi-color-overlay-bg);
+  --color-semi-color-bg-0: var(--semi-color-bg-0);
+  --color-semi-color-bg-1: var(--semi-color-bg-1);
+  --color-semi-color-bg-2: var(--semi-color-bg-2);
+  --color-semi-color-bg-3: var(--semi-color-bg-3);
+  --color-semi-color-bg-4: var(--semi-color-bg-4);
+  --color-semi-color-fill-0: var(--semi-color-fill-0);
+  --color-semi-color-fill-1: var(--semi-color-fill-1);
+  --color-semi-color-fill-2: var(--semi-color-fill-2);
+  --color-semi-color-text-0: var(--semi-color-text-0);
+  --color-semi-color-text-1: var(--semi-color-text-1);
+  --color-semi-color-text-2: var(--semi-color-text-2);
+  --color-semi-color-text-3: var(--semi-color-text-3);
+  --color-semi-color-highlight-bg: var(--semi-color-highlight-bg);
+  --color-semi-color-highlight: var(--semi-color-highlight);
+  --radius-semi-border-radius-extra-small: var(--semi-border-radius-extra-small);
+  --radius-semi-border-radius-small: var(--semi-border-radius-small);
+  --radius-semi-border-radius-medium: var(--semi-border-radius-medium);
+  --radius-semi-border-radius-large: var(--semi-border-radius-large);
+  --radius-semi-border-radius-circle: var(--semi-border-radius-circle);
+  --radius-semi-border-radius-full: var(--semi-border-radius-full);
+
+  background-color: var(--semi-color-bg-0);
+  color: var(--semi-color-text-0);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+}
+
+/* Semi Design 响应式平滑滚动与滚动条美化 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--semi-color-fill-2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--semi-color-fill-1);
+}
+
+/* Semi Design 动效与微交互系统 */
+@keyframes pulseSubtle {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.88;
+    transform: scale(1.02);
+  }
+}
+
+.animate-page-enter {
+  animation: semiPageFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-pulse-subtle {
+  animation: pulseSubtle 2.5s ease-in-out infinite;
+}
+
+/* Semi 卡片悬浮动效：仅保留柔和投影与边框色变，禁止任何物理 translateY 位移以防字体发虚与晃动 */
+.semi-card-elevate {
+  transition: box-shadow 0.2s ease,
+              border-color 0.2s ease;
+}
+
+.semi-card-elevate:hover {
+  box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.06), 0 2px 6px -1px rgba(0, 0, 0, 0.03);
+}
+
+/* 顶部栏高斯模糊毛玻璃效果 */
+.semi-glass-header {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* 选中高亮光环效果 */
+.semi-active-ring {
+  box-shadow: 0 0 0 2px var(--semi-color-primary), 0 8px 20px -4px rgba(255, 107, 0, 0.16);
+}
+
+/* 确保所有 Semi 图标与 SVG 元素在任何渲染时机下均具有稳定尺寸，避免重排闪烁 */
+.semi-icon {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.semi-icon > svg {
+  display: inline-block !important;
+  width: 1em !important;
+  height: 1em !important;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+/* GSAP 卡片预留平滑过渡与性能加速 */
+.gsap-card-item {
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+}
+
+/* Semi Dropdown 下拉选项宽度自适应：解除 280px 硬编码限制，支持全宽展开与长地址平铺 */
+.semi-dropdown-menu .semi-dropdown-item {
+  max-width: none !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+/* 侧边栏收起时 Logo 居中对齐与容器修整 */
+.semi-navigation-collapsed .semi-navigation-header,
+.semi-navigation-header-collapsed {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.semi-navigation-collapsed .semi-navigation-header-logo,
+.semi-navigation-header-collapsed .semi-navigation-header-logo {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  margin: 0 auto !important;
+  padding: 0 !important;
+  width: 100% !important;
+}
+
+/* 微信 ClawBot 弹窗步骤条完整文本展示，解除过早截断限制 */
+.clawbot-steps .semi-steps-item-title-text,
+.clawbot-steps .semi-steps-item-title {
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+  white-space: nowrap !important;
+}
+
+.clawbot-steps .semi-steps-item-description {
+  max-width: none !important;
+  width: auto !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+  white-space: nowrap !important;
+}
+
+.clawbot-steps.semi-steps-basic.semi-steps-horizontal .semi-steps-item {
+  min-width: 0;
+}
+
+/* Semi Design Checkbox 与 Radio 内部对齐与垂直居中修正 */
+.semi-checkbox {
+  align-items: center !important;
+}
+
+.semi-checkbox-inner {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  /* 关键: 勾选框本体不得被拉伸, 否则会把右侧文字推到最远端形成巨大间距 */
+  flex: 0 0 auto !important;
+}
+
+.semi-checkbox-inner-display {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 1 !important;
+  flex: 0 0 auto !important;
+}
+
+.semi-checkbox-inner-display .semi-icon {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: baseline !important;
+  line-height: 1 !important;
+}
+
+.semi-checkbox-inner-display .semi-icon svg {
+  display: block !important;
+  margin: auto !important;
+}
+
+.semi-checkbox-content {
+  display: flex !important;
+  align-items: center !important;
+}
+
+/* ==================== 勾选项统一布局 ====================
+   修复部分页面复选框与文字之间被容器拉伸出巨大空白的问题:
+   强制 checkbox 宽度自适应 + 内容左对齐紧贴 */
+label.semi-checkbox,
+.semi-checkbox {
+  width: fit-content !important;
+  max-width: 100%;
+  justify-content: flex-start !important;
+}
+
+.semi-checkbox > .semi-checkbox-addon,
+.semi-checkbox-addon {
+  margin-left: 8px !important;
+  flex: 0 0 auto !important;
+}
+
+.semi-radio {
+  align-items: center !important;
+}
+
+.semi-radio-inner {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+/* ==================== 移动端竖屏适配 (主流手机 360~430px) ==================== */
+@media screen and (max-width: 640px) {
+  /* 卡片内边距与圆角收紧, 提升信息密度 */
+  .semi-card-body {
+    padding: 10px 12px !important;
+  }
+
+  /* 表格紧凑化: 缩小单元格内边距与字号 */
+  .semi-table-row-cell {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    font-size: 12px !important;
+  }
+
+  .semi-table-thead .semi-table-row-cell {
+    font-size: 12px !important;
+  }
+
+  /* 弹窗在窄屏占满可用宽度 */
+  .semi-modal {
+    max-width: 94vw !important;
+  }
+
+  /* 页面标题与副标题缩小 */
+  .semi-typography-h3 {
+    font-size: 18px !important;
+  }
+}
+
+/* ==================== 移动端横屏模式 (手机倒置后自动切换) ==================== */
+@media screen and (orientation: landscape) and (max-height: 560px) {
+  html.is-mobile .semi-card-body {
+    padding: 8px 12px !important;
+  }
+
+  /* 横屏高度有限: 压缩纵向留白, 避免频繁滚动 */
+  html.is-mobile .mobile-compact-gap {
+    gap: 8px !important;
+  }
+
+  html.is-mobile .semi-typography-h3 {
+    font-size: 16px !important;
+  }
+
+  /* 横屏下弹窗限制高度并内部滚动 */
+  html.is-mobile .semi-modal-content {
+    max-height: 78vh !important;
+    overflow-y: auto !important;
+  }
+}
+
+/* 横屏模式: 内容区允许更紧凑的横向排布 */
+html.is-landscape .flex.flex-col.gap-3 {
+  gap: 10px !important;
+}
+
+/* ==================== 移动端整页自然滚动 (修复竖屏/横屏无法滑动、侧边栏菜单不可滚动) ==================== */
+@media screen and (max-width: 900px) {
+  html.is-mobile,
+  html.is-mobile body,
+  html.is-mobile #root {
+    height: auto !important;
+    min-height: 100% !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 根布局与主布局: 解除固定视口高度锁, 允许整页滚动 */
+  html.is-mobile .app-root-layout,
+  html.is-mobile .app-main-layout,
+  html.is-mobile .semi-layout {
+    height: auto !important;
+    min-height: 100vh !important;
+    overflow: visible !important;
+  }
+
+  /* 内容区与页面容器: 高度自适应内容, 不再裁切 */
+  html.is-mobile .app-page-host,
+  html.is-mobile .app-page-container,
+  html.is-mobile [data-tab] {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  /* 页面内部固定高度/隐藏溢出的容器一并放开, 让内容自然撑开 */
+  html.is-mobile [data-tab] > div {
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+  }
+
+  /* 侧边栏: 随内容自然高度展开, 菜单项全部可见并可随整页滚动 */
+  html.is-mobile .semi-layout-sider,
+  html.is-mobile .side-nav-root,
+  html.is-mobile .semi-navigation {
+    height: auto !important;
+    min-height: 100vh !important;
+    overflow: visible !important;
+  }
+
+  html.is-mobile .semi-navigation-list-wrapper {
+    overflow-y: visible !important;
+  }
+
+  /* 表格类页面允许横向滑动查看完整列 */
+  html.is-mobile .semi-table-wrapper,
+  html.is-mobile .semi-table-body {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 我的订单: 解除桌面端固定内滚高度锁, 表格按分页条数自然铺满、整页滚动展示全部数据
+     (移动端行高更大, 锁死 --table-scroll-y 只能露出约2行, 表现为「分页10条只显示2条」) */
+  html.is-mobile .orders-table-container .semi-table-body {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow-y: visible !important;
+  }
+  html.is-mobile .orders-table-container .semi-table-placeholder {
+    height: auto !important;
+    min-height: 120px !important;
+  }
+}
+
+/* 触屏设备: 保证按钮最小点击热区 */
+@media (pointer: coarse) {
+  .semi-button {
+    min-height: 28px;
+  }
+
+  /* 触屏滚动条更细 */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+
+
+
+
+/* Tab 图标与文案垂直对齐 (Semi Tabs 内 SVG 默认基线偏移导致图标偏高/偏低) */
+.semi-tabs-tab {
+  display: inline-flex !important;
+  align-items: center !important;
+}
+.semi-tabs-tab .semi-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  vertical-align: middle;
+}
+.semi-tabs-tab > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 账号详情抽屉: 压缩选项卡, 保证 4 个标签单行容纳 (不换行挤到下一行) */
+.detail-drawer-tabs .semi-tabs-tab {
+  padding: 6px 6px !important;
+  font-size: 13px;
+}
+.detail-drawer-tabs .semi-tabs-tab > span {
+  gap: 4px;
+}
+
+/* 会员专属订单免单弹窗: 补贴计算步骤逐条浮现 + 免单印章盖入 + 红包弹出 */
+.free-step {
+  opacity: 0;
+  transform: translateY(10px);
+  animation: freeStepIn 0.45s ease-out forwards;
+}
+@keyframes freeStepIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+.free-stamp {
+  animation: freeStampIn 0.5s cubic-bezier(0.22, 1.2, 0.36, 1) 1.35s both;
+}
+@keyframes freeStampIn {
+  from { opacity: 0; transform: rotate(-12deg) scale(2.2); }
+  to { opacity: 0.85; transform: rotate(-12deg) scale(1); }
+}
+.free-pop {
+  animation: freePopIn 0.5s cubic-bezier(0.22, 1.4, 0.36, 1) both;
+}
+@keyframes freePopIn {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ==================== 全站移动端适配 (mobile-fit) ====================
+   目标: 主流手机 320~430px 竖屏 / 横屏, 平板 <=900px。
+   布局层: 移动端隐藏常驻 Sider, 由顶部「菜单」条 + 抽屉导航替代 (App.tsx)。
+   组件层: 按钮组换行、固定列栅格降级、Modal 宽度自适应、固定内联宽度不溢出、
+           表格横滚、文本自动折行。
+   ==================================================================== */
+
+/* 移动端组件 (仅 is-mobile 视口显示) */
+.app-mobile-bar { display: none; }
+.app-mobile-nav-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, .45);
+  display: flex;
+}
+.app-mobile-nav-panel {
+  width: min(80vw, 288px); height: 100%;
+  background: var(--semi-color-bg-1, #fff);
+  box-shadow: 4px 0 24px rgba(0, 0, 0, .18);
+  overflow-y: auto;
+  padding-left: env(safe-area-inset-left);
+}
+
+@media screen and (max-width: 900px) {
+  /* --- 布局层 --- */
+  html.is-mobile .app-sider { display: none !important; }
+  html.is-mobile .app-mobile-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 10px;
+    padding-left: calc(10px + env(safe-area-inset-left));
+    border-bottom: 1px solid var(--semi-color-border, #e5e7eb);
+    background: var(--semi-color-bg-0, #fff);
+    position: relative; z-index: 1;
+  }
+  html.is-mobile .app-mobile-menu-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border-radius: 8px;
+    border: 1px solid var(--semi-color-border, #e5e7eb);
+    background: var(--semi-color-fill-0, #f7f8fa);
+    color: var(--semi-color-text-1, #333);
+    font-size: 13px; cursor: pointer;
+  }
+  html.is-mobile .app-mobile-bar-title {
+    font-weight: 600; font-size: 14px;
+    color: var(--semi-color-text-0, #111);
+  }
+
+  /* --- 顶栏: 收紧间距, 隐藏次要项, 允许换行 --- */
+  html.is-mobile .app-top-header {
+    height: auto !important; min-height: 48px;
+    padding: 6px 10px !important;
+    gap: 6px; flex-wrap: wrap;
+  }
+  html.is-mobile .app-header-sidebar-toggle,
+  html.is-mobile .app-header-divider { display: none !important; }
+  html.is-mobile .app-header-space {
+    flex-wrap: wrap !important; justify-content: flex-end;
+    row-gap: 6px !important; max-width: 100%;
+  }
+  html.is-mobile .app-location-badge { max-width: 100%; min-width: 0; }
+
+  /* --- 内容区: 收紧内边距 --- */
+  html.is-mobile .app-page-host { padding: 8px !important; }
+
+  /* --- 所有工具行/按钮组: 换行而非挤压裁切 --- */
+  html.is-mobile .flex.justify-between.items-center,
+  html.is-mobile .flex.items-center.justify-between {
+    flex-wrap: wrap !important; gap: 8px !important;
+  }
+  html.is-mobile .semi-space,
+  html.is-mobile .semi-space-horizontal {
+    flex-wrap: wrap !important; row-gap: 8px !important;
+    max-width: 100%;
+  }
+  html.is-mobile .semi-space-item { max-width: 100%; min-width: 0; }
+
+  /* --- 固定宽度元素: 一律不超出其容器 (内联 style.width 亦如此) --- */
+  html.is-mobile [style*="width:"] { max-width: 100% !important; }
+  html.is-mobile .semi-card,
+  html.is-mobile .semi-card-body,
+  html.is-mobile .semi-input-wrapper,
+  html.is-mobile .semi-select,
+  html.is-mobile .semi-datepicker,
+  html.is-mobile .semi-modal-content { max-width: 100% !important; }
+
+  /* --- 弹窗: 占满可用宽度并内部滚动 --- */
+  html.is-mobile .semi-modal {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    margin: 12px auto !important;
+  }
+  html.is-mobile .semi-modal-content { max-height: 86vh; overflow-y: auto; }
+  html.is-mobile .semi-modal-footer .semi-space { justify-content: flex-end; }
+
+  /* --- 侧抽屉(SideSheet): 固定 width(620px 等) 同样收编, 否则右上角关闭按钮被挤出屏外 --- */
+  html.is-mobile .semi-sidesheet {
+    width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px) !important;
+    min-width: 0 !important;
+  }
+  html.is-mobile .semi-sidesheet .semi-sidesheet-inner-wrap,
+  html.is-mobile .semi-sidesheet .semi-modal-content { max-width: 100% !important; }
+  /* 官方 .semi-sidesheet-title 为 flex:1 0 auto (不可收缩), 标题行内容过长时会把关闭按钮推出抽屉外;
+     移动端允许收缩 + header 换行, 标题内部由页面自身的 flex-wrap 完成折行 */
+  html.is-mobile .semi-sidesheet .semi-sidesheet-header { flex-wrap: wrap; row-gap: 4px; justify-content: space-between; }
+  html.is-mobile .semi-sidesheet .semi-sidesheet-title {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    max-width: calc(100% - 36px);
+  }
+
+  /* --- 表格操作列: 多按钮组纵向堆叠占满单元格, 防止双按钮横向溢出被固定列/视口裁剪 (店铺抢单/预约任务等) --- */
+  html.is-mobile .semi-table td .flex.flex-nowrap:has(> .semi-button),
+  html.is-mobile .semi-table td .flex.items-center.gap-1:has(> .semi-button) {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    row-gap: 6px !important;
+  }
+  html.is-mobile .semi-table td .flex.flex-nowrap:has(> .semi-button) > .semi-button,
+  html.is-mobile .semi-table td .flex.items-center.gap-1:has(> .semi-button) > .semi-button {
+    width: 100% !important;
+  }
+
+  /* --- 固定列栅格: 3 列及以上降为 2 列, 避免卡片内容压缩 --- */
+  html.is-mobile .grid.grid-cols-3,
+  html.is-mobile .grid.grid-cols-4,
+  html.is-mobile .grid.grid-cols-5,
+  html.is-mobile .grid.grid-cols-6,
+  html.is-mobile .grid.grid-cols-12 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+
+  /* --- 文本自动折行, 不撑破窄容器 --- */
+  html.is-mobile .semi-typography,
+  html.is-mobile h1, html.is-mobile h2, html.is-mobile h3, html.is-mobile h4 {
+    overflow-wrap: anywhere;
+  }
+  html.is-mobile .clawbot-steps * { white-space: normal !important; }
+}
+
+@media screen and (max-width: 480px) {
+  /* 小屏手机: 顶栏时间隐藏, 位置徽标完整换行展示 (不再 truncate 裁切) */
+  html.is-mobile .app-header-time { display: none !important; }
+  html.is-mobile .app-header-space { width: 100%; }
+  html.is-mobile .app-location-badge {
+    max-width: 100% !important; min-width: 0;
+    flex: 1 1 auto; flex-wrap: wrap;
+  }
+  html.is-mobile .app-location-badge span.truncate {
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+}
+
+/* 弹窗/抽屉标题行: 标题与右上角关闭按钮(X)同为 flex 子项, 内容过长时保证 X 不被挤没 */
+html.is-mobile .semi-modal-header { flex-wrap: wrap; row-gap: 4px; }
+html.is-mobile .semi-modal-header .semi-modal-title { flex: 1 1 auto; min-width: 0; max-width: calc(100% - 36px); }
+html.is-mobile .semi-modal-header .semi-modal-close { flex: 0 0 auto; }
+html.is-mobile .semi-modal-title { max-width: calc(100% - 36px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 抽屉内导航始终完整展开, 不出现文字竖排 */
+.app-mobile-nav-panel .semi-navigation { width: 100% !important; }
+.app-mobile-nav-panel .semi-navigation-list-wrapper { overflow-y: auto !important; }

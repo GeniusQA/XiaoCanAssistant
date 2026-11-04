@@ -1,0 +1,16 @@
+fastapi>=0.115.0
+uvicorn>=0.30.0
+httptools>=0.8.0
+python-dotenv>=0.13
+watchfiles>=0.20
+websockets>=13.0
+httpx[http2]>=0.27.0
+apscheduler>=3.10.4
+pydantic>=2.8.0
+python-multipart>=0.0.9
+aiofiles>=24.1.0
+qrcode[pil]>=8.0
+cryptography>=43.0.0
+PyJWT>=2.8.0
+# TLS 指纹伪装层 (GitHub issue #14): okhttp JA3 自定义指纹; 未安装时 app/protocol/client.py 自动回退 httpx
+curl-cffi>=0.9

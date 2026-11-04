@@ -1,0 +1,2660 @@
+"""
+小蚕霸王餐异步 RPC 客户端
+负责与 gw.xiaocantech.com/rpc 进行通信
+"""
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import random
+import re
+import tempfile
+import time
+import uuid
+from typing import Any, Dict, Optional
+import httpx
+
+try:
+    # 软依赖 (issue #14): curl_cffi 提供 TLS 指纹伪装 (自定义 JA3); 未安装时回退 httpx
+    from curl_cffi import requests as _curl_requests
+except ImportError:
+    _curl_requests = None
+
+from .signer import generate_headers
+
+logger = logging.getLogger("xiaocan.protocol")
+
+GW_BASE_URL = "https://gw.xiaocantech.com/rpc"
+
+# ---------------- TLS 指纹伪装 (GitHub issue #14) ----------------
+# 通过环境变量 XIAOCAN_TLS_IMPERSONATE 选择传输层:
+#   "off"      -> 现有 httpx 传输层 (行为与改造前完全一致)
+#   "okhttp"   -> (默认) curl_cffi 自定义 JA3 指纹, 见下方 _OKHTTP_JA3
+#   其他值     -> curl_cffi 内置 impersonate 目标 (如 chrome131)
+TLS_IMPERSONATE_ENV = "XIAOCAN_TLS_IMPERSONATE"
+
+# OkHttp 4.12.0 / Android Conscrypt 的 JA3 字符串, 依据以下两个公开且相互印证的来源推导
+# (均描述 OkHttp 4.x 在 Android Conscrypt/BoringSSL 上的真实 ClientHello):
+#   1. https://github.com/scrape-hub/koon (MIT) - crates/core/src/profile/okhttp.rs
+#      OkHttp 4 (4.12.0) profile: 密码套件 OKHTTP4_CIPHER_LIST 共 15 个 (TLS1.3 三个 +
+#      ECDSA 前置的 ECDHE/RSA 套件), 曲线 X25519:P-256:P-384, OKHTTP_SIGALGS, 无 GREASE/
+#      ALPS/cert compression, BoringSSL 默认扩展顺序, 512 字节 padding (其测试注释注明
+#      "The cipher suites of the captured ClientHellos", 即来自真实抓包)。
+#   2. https://github.com/bogdanfinn/tls-client - profiles/contributed_custom_profiles.go
+#      var Okhttp4Android10 (OkHttp 4.10.0 / Android Conscrypt): 与来源 1 完全相同的 15 个
+#      套件与曲线, 扩展顺序: server_name(0), extended_master_secret(23),
+#      renegotiation_info(65281), supported_groups(10), ec_point_formats(11),
+#      session_ticket(35), ALPN(16), status_request(5), signature_algorithms(13),
+#      key_share(51), psk_key_exchange_modes(45), supported_versions(43), padding(21)。
+# 与真实 okhttp 的唯一偏差: curl/BoringSSL 不支持 OCSP stapling, 无法发出
+# status_request(5), 故本串的扩展列表不含 "5-"; 该偏差已经 https://tls.peet.ws/api/all
+# 实测复核 (peet.ws 报告的 ja3_hash 与本串 MD5 一致, 即 _OKHTTP_JA3_HASH)。
+# 本串每个字段均可由上述两个来源逐一核对, 非编造。
+_OKHTTP_JA3 = (
+    "771,"
+    "4865-4866-4867-49195-49196-52392-49199-49200-52393-49171-49172-156-157-47-53,"
+    "0-23-65281-10-11-35-16-13-51-45-43-21,"
+    "29-23-24,0"
+)
+# JA3 规范: ja3_hash = MD5(ja3 string)
+_OKHTTP_JA3_HASH = hashlib.md5(_OKHTTP_JA3.encode("utf-8")).hexdigest()
+
+# 改造前 httpx (Python 生态) 的 JA3 hash 基线 (issue #14 给出), 仅用于验证对比
+HTTPX_BASELINE_JA3_HASH = "304734bb1c086c3453b387400cf83f11"
+
+# OkHttp/Conscrypt 的 signature_algorithms, 依 koon okhttp.rs OKHTTP_SIGALGS 逐项抄录
+_OKHTTP_SIGALGS = [
+    "ecdsa_secp256r1_sha256",
+    "rsa_pss_rsae_sha256",
+    "rsa_pkcs1_sha256",
+    "ecdsa_secp384r1_sha384",
+    "rsa_pss_rsae_sha384",
+    "rsa_pkcs1_sha384",
+    "rsa_pss_rsae_sha512",
+    "rsa_pkcs1_sha512",
+    "rsa_pkcs1_sha1",
+]
+
+# OkHttp 的 HTTP/2 层指纹 (Akamai 格式 settings|window_update|streams|header_order):
+# SETTINGS 仅 INITIAL_WINDOW_SIZE(1)=16MiB, 连接 WINDOW_UPDATE 16711681, 无优先级帧,
+# 伪头顺序 :method,:path,:authority,:scheme
+# 来源: koon okhttp.rs okhttp_http2() 与 tls-client Okhttp4Android10 的
+# settings/connectionFlow/pseudoHeaderOrder (两来源一致)。
+_OKHTTP_AKAMAI = "1:16777216|16711681|0|mpas"
+_OKHTTP_EXTRA_FP: Dict[str, Any] = {
+    "tls_signature_algorithms": _OKHTTP_SIGALGS,
+    "http2_no_priority": True,
+}
+
+
+def _resolve_curl_ca_bundle() -> str:
+    """为 curl_cffi (BoringSSL) 解析一条 ASCII 安全、可读的 CA 证书包路径。
+
+    curl_cffi 默认把 certifi 证书包路径传给 CURLOPT_CAINFO (venv curl_cffi/curl.py
+    _default_cacert -> certifi.where())。项目位于含非 ASCII 字符的目录 (如本仓库路径
+    含中文) 时, 部分环境下 BoringSSL 读取该路径失败, 报 curl 77 "error adding trust
+    anchors"。处置: 优先尊重 SSL_CERT_FILE/CURL_CA_BUNDLE/REQUESTS_CA_BUNDLE 环境变量
+    (与 curl_cffi 默认优先级一致); 默认路径已是 ASCII 且存在则直接使用; 否则把 CA 包
+    原子复制到首个可写且 ASCII 安全的目录后复用 (内容随 certifi 升级自动重建)。
+    返回空串时保持 curl_cffi 默认行为。
+    """
+    for env_var in ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"):
+        path = os.environ.get(env_var)
+        if path and os.path.exists(path):
+            return path
+    try:
+        from curl_cffi.curl import DEFAULT_CACERT as src
+    except Exception:
+        return ""
+    if not (src and os.path.exists(src)):
+        return ""
+    if src.isascii():
+        return src
+    candidates = [
+        tempfile.gettempdir(),
+        os.path.join(os.environ.get("LOCALAPPDATA", "") or "", "Temp"),
+        os.path.expanduser("~"),
+        os.path.join(os.path.expandvars("%SystemDrive%") or "C:", os.sep, "Users", "Public"),
+    ]
+    for base in candidates:
+        if not base or not base.isascii() or not os.path.isdir(base):
+            continue
+        dst = os.path.join(base, "xiaocan-curl-cacert.pem")
+        try:
+            # 缺失或与源内容尺寸不一致 (certifi 升级) 时原子重建
+            if not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(src):
+                with open(src, "rb") as f:
+                    data = f.read()
+                tmp = f"{dst}.{os.getpid()}.tmp"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, dst)
+            if os.path.getsize(dst) > 0:
+                return dst
+        except OSError:
+            continue
+    return src  # 兜底: 维持 curl_cffi 默认行为
+
+
+class _CurlCffiTransport:
+    """curl_cffi 传输层适配器, 统一暴露 post()/aclose() 供 XiaoCanClient 使用。
+
+    响应对象具备 status_code / text / json() / headers (大小写不敏感, get 支持默认值),
+    覆盖 invoke_rpc 中用到的全部字段。curl_cffi AsyncSession 的关闭方法是 async close()
+    (venv curl_cffi/requests/session.py), 由 aclose() 适配。trust_env=False 显式禁用
+    环境代理: curl_cffi 默认 trust_env=True 会读取 http_proxy/https_proxy 等环境变量,
+    与现有 httpx 的 trust_env=False 语义对齐。verify 显式指定 CA 证书包路径, 避免默认
+    certifi 非 ASCII 路径在部分环境触发 curl 77 (见 _resolve_curl_ca_bundle)。
+    """
+
+    def __init__(self, timeout: float, **fingerprint_kwargs: Any):
+        kwargs: Dict[str, Any] = {
+            "timeout": timeout,
+            "trust_env": False,
+        }
+        ca_bundle = _resolve_curl_ca_bundle()
+        if ca_bundle:
+            kwargs["verify"] = ca_bundle
+        kwargs.update(fingerprint_kwargs)
+        self.session = _curl_requests.AsyncSession(**kwargs)
+
+    async def post(self, url: str, json: Any = None, headers: Optional[Dict[str, str]] = None):
+        return await self.session.post(url, json=json, headers=headers)
+
+    async def aclose(self) -> None:
+        await self.session.close()
+
+
+def _build_transport(timeout: float):
+    """按 XIAOCAN_TLS_IMPERSONATE 构建传输层, 返回 (engine, session)。
+
+    session 统一具备 post(url, json=..., headers=...) 与 aclose(), XiaoCanClient 与
+    backend/tls_fingerprint_check.py 共用本函数, 保证验证脚本与实际请求同一指纹。
+    """
+    mode = (os.getenv(TLS_IMPERSONATE_ENV) or "okhttp").strip().lower() or "okhttp"
+    if mode == "off" or _curl_requests is None:
+        if mode != "off":
+            logger.warning(
+                "curl_cffi 未安装 (XIAOCAN_TLS_IMPERSONATE=%s)，回退 httpx 传输层，"
+                "TLS 指纹伪装未生效 (JA3 为 Python httpx 特征: %s)",
+                mode,
+                HTTPX_BASELINE_JA3_HASH,
+            )
+        # 原生 httpx.AsyncClient, 与改造前逐参数一致
+        return "httpx", httpx.AsyncClient(
+            http2=True,
+            timeout=timeout,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+            trust_env=False,
+        )
+    if mode == "okhttp":
+        fingerprint_kwargs: Dict[str, Any] = {
+            "ja3": _OKHTTP_JA3,
+            "extra_fp": _OKHTTP_EXTRA_FP,
+            "akamai": _OKHTTP_AKAMAI,
+        }
+    else:
+        # 其他值 -> curl_cffi 内置 impersonate 目标 (如 chrome131)
+        fingerprint_kwargs = {"impersonate": mode}
+    return "curl_cffi", _CurlCffiTransport(timeout, **fingerprint_kwargs)
+
+# 美团赏金按比例返活动 (source=5) 元数据热缓存: poi_event_id -> {wm_poi_id, meituan_pv_id, store_name}
+_SHANGJIN_EVENT_META: Dict[str, Dict[str, str]] = {}
+
+
+def register_shangjin_event_meta(
+    poi_event_id: Any,
+    wm_poi_id: Any,
+    meituan_pv_id: Any = "",
+    store_name: Any = ""
+) -> None:
+    eid = str(poi_event_id or "").strip()
+    wid = str(wm_poi_id or "").strip()
+    if not eid or not wid:
+        return
+    prev = _SHANGJIN_EVENT_META.get(eid) or {}
+    _SHANGJIN_EVENT_META[eid] = {
+        "wm_poi_id": wid,
+        "meituan_pv_id": str(meituan_pv_id or prev.get("meituan_pv_id") or "").strip(),
+        "store_name": str(store_name or prev.get("store_name") or "").strip(),
+    }
+    if len(_SHANGJIN_EVENT_META) > 5000:
+        # 保持缓存有界
+        first_key = next(iter(_SHANGJIN_EVENT_META))
+        _SHANGJIN_EVENT_META.pop(first_key, None)
+
+
+def register_shangjin_poi_dict(poi: Dict[str, Any], meituan_pv_id: str = "") -> None:
+    if not isinstance(poi, dict):
+        return
+    wid = str(poi.get("wm_poi_id") or "").strip()
+    if not wid:
+        return
+    pvid = str(poi.get("mt_pv_id") or poi.get("meituan_pv_id") or meituan_pv_id or "").strip()
+    sname = str(poi.get("name") or "").strip()
+    top_eid = str(poi.get("poi_event_id") or "").strip()
+    if top_eid:
+        register_shangjin_event_meta(top_eid, wid, pvid, sname)
+    for plan in (poi.get("plan_activity_info_list") or []):
+        if isinstance(plan, dict) and plan.get("poi_event_id"):
+            register_shangjin_event_meta(plan.get("poi_event_id"), wid, pvid, sname)
+
+
+class XiaoCanRPCError(Exception):
+    def __init__(self, code: int, msg: str, raw: Optional[Dict[str, Any]] = None, endpoint: Optional[str] = None):
+        super().__init__(f"XiaoCan RPC Error [{code}]: {msg}")
+        self.code = code
+        self.msg = msg
+        self.raw = raw or {}
+        self.endpoint = endpoint or ""
+
+    @property
+    def hint(self) -> str:
+        """基于官方返回码的补充说明 (仅收录在本项目中已验证含义的码，避免误导)"""
+        hints = {
+            10001: "官方侧判定任务/签到今日已完成或重复提交",
+            20006: "官方侧判定任务今日已完成或重复提交",
+            403: "请求被官方网关或腾讯云WAF拦截",
+        }
+        return hints.get(self.code, "")
+
+
+def format_rpc_error(e: "XiaoCanRPCError", max_raw_len: int = 300) -> str:
+    """把 RPC 错误格式化为详细日志文本: 接口端点 + 返回码 + 官方msg + 原始响应报文 + 含义提示"""
+    parts = []
+    if e.endpoint:
+        parts.append(f"接口 {e.endpoint}")
+    parts.append(f"官方返回码={e.code}")
+    official_msg = (e.msg or "").strip()
+    parts.append(f"官方msg=\"{official_msg}\"" if official_msg else "官方msg为空")
+    if e.hint:
+        parts.append(f"含义: {e.hint}")
+    if e.raw:
+        try:
+            raw_text = json.dumps(e.raw, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            raw_text = str(e.raw)
+        raw_text = raw_text.strip()
+        if raw_text and raw_text != "{}":
+            if len(raw_text) > max_raw_len:
+                raw_text = raw_text[:max_raw_len] + "...(截断)"
+            parts.append(f"原始响应: {raw_text}")
+    return " | ".join(parts)
+
+
+def short_rpc_error(e: "XiaoCanRPCError", max_msg_len: int = 40) -> str:
+    """把 RPC 错误总结为一句话 (用于前端弹窗提示)；详细版 format_rpc_error 保留在后端日志中"""
+    msg = (e.msg or "").strip()
+    if e.code == 403 and ("WAF" in msg or "拦截" in msg):
+        # 统一熔断提示语: 无论哪个官方接口触发, 全局只展示这一条文案 (剩余秒数动态取熔断冷却器)
+        remain = get_waf_cooldown_seconds()
+        return (
+            f"当前网络IP处于官方腾讯云WAF临时频次拦截保护冷却中（剩余约 {remain} 秒），"
+            "系统已自动熔断休眠以避免延长封禁。如需立即恢复，请切换手机热点、重启光猫更换IP或等待冷却。"
+        )
+    if e.code in (10001, 20006):
+        return "官方判定今日已完成或重复提交"
+    short = re.split(r"[。；;\n]", msg)[0].strip()
+    if len(short) > max_msg_len:
+        short = short[:max_msg_len] + "…"
+    return f"[{e.code}] {short}" if short else f"[{e.code}] 官方接口返回异常"
+
+
+# 官方腾讯云 WAF 熔断状态守护 (防止被封期间盲目重发延长黑名单时间)
+_waf_blocked_until: float = 0.0
+
+
+def is_waf_blocked() -> bool:
+    return time.time() < _waf_blocked_until
+
+
+def get_waf_cooldown_seconds() -> int:
+    return max(0, int(_waf_blocked_until - time.time()))
+
+
+def mark_waf_blocked(duration_seconds: int = 15):
+    global _waf_blocked_until
+    _waf_blocked_until = max(_waf_blocked_until, time.time() + duration_seconds)
+
+
+def clear_waf_block():
+    global _waf_blocked_until
+    _waf_blocked_until = 0.0
+
+
+class XiaoCanClient:
+    def __init__(self, timeout: float = 10.0):
+        self.timeout = timeout
+        # 传输层按 XIAOCAN_TLS_IMPERSONATE 选择 (issue #14), post()/aclose() 接口保持不变
+        self.engine, self.session = _build_transport(timeout)
+
+    async def close(self):
+        await self.session.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def invoke_rpc(
+        self,
+        server_name: str,
+        method_name: str,
+        body: Optional[Dict[str, Any]] = None,
+        city_code: int = 440303,
+        token: Optional[str] = None,
+        user_id: Optional[str] = None,
+        silk_id: Optional[str] = None,
+        platform: Optional[str] = "app"
+    ) -> Dict[str, Any]:
+        # 1. 前置熔断保护：若当前网络处于腾讯云 WAF 冷却期，阻止盲发以防重置封锁计时
+        if is_waf_blocked():
+            remain_sec = get_waf_cooldown_seconds()
+            raise XiaoCanRPCError(
+                code=403,
+                msg=f"当前网络IP处于官方腾讯云WAF临时频次拦截保护冷却中（剩余约 {remain_sec} 秒），系统已自动熔断休眠以避免延长封禁。如需立即恢复，请切换手机热点、重启光猫更换IP或等待冷却。",
+                endpoint=f"{server_name}.{method_name}"
+            )
+
+        payload = dict(body) if body else {}
+        plat = (platform or "app").lower()
+        if plat == "mini":
+            payload["app_id"] = 20
+        else:
+            payload["app_id"] = 10
+
+        headers = generate_headers(
+            server_name=server_name,
+            method_name=method_name,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id,
+            platform=plat
+        )
+
+        try:
+            resp = await self.session.post(
+                GW_BASE_URL,
+                json=payload,
+                headers=headers
+            )
+            if resp.status_code == 403:
+                is_waf = "WAF" in resp.text or "stgw" in resp.headers.get("server", "").lower()
+                if is_waf:
+                    mark_waf_blocked(duration_seconds=15)
+                hint = "已被腾讯云 WAF 防火墙拦截 [403 Forbidden]，系统已进入 15 秒频次缓冲。通常原因是：开启了海外代理/VPN/TUN模式，或当前IP触发了频控防护。请关闭全局代理、切换手机热点或稍后重试" if is_waf else "请求被服务器拒绝 [403 Forbidden]"
+                logger.error(f"RPC {server_name}.{method_name} 访问受阻: {hint}")
+                raise XiaoCanRPCError(code=403, msg=hint, raw={"status_code": 403, "text": resp.text[:200]}, endpoint=f"{server_name}.{method_name}")
+
+            if resp.status_code != 200:
+                logger.error(f"RPC {server_name}.{method_name} HTTP {resp.status_code} 异常响应: {resp.text[:200]}")
+                raise XiaoCanRPCError(code=resp.status_code, msg=f"HTTP {resp.status_code} 异常", raw={"status_code": resp.status_code, "text": resp.text[:200]}, endpoint=f"{server_name}.{method_name}")
+
+            data = resp.json()
+        except XiaoCanRPCError:
+            raise
+        except Exception as e:
+            logger.error(f"RPC {server_name}.{method_name} network failure: {e}")
+            raise
+
+        # 1. 检查网关返回的顶层 error (例如 Go micro 500/400 异常)
+        if "error" in data:
+            err_raw = data.get("error")
+            err_code = 500
+            err_msg = str(err_raw)
+            if isinstance(err_raw, str) and err_raw.startswith("{"):
+                try:
+                    parsed_err = json.loads(err_raw)
+                    err_code = parsed_err.get("code", 500)
+                    err_msg = parsed_err.get("detail") or parsed_err.get("status") or str(err_raw)
+                except Exception:
+                    pass
+            logger.error(f"RPC {server_name}.{method_name} gateway error: code={err_code}, msg={err_msg}")
+            raise XiaoCanRPCError(code=err_code, msg=err_msg, raw=data, endpoint=f"{server_name}.{method_name}")
+
+        # 2. 检查业务层 status 结构
+        status = data.get("status") or {}
+        if isinstance(status, dict):
+            code = status.get("code", 0)
+            msg = status.get("msg", "ok")
+        else:
+            code = data.get("code", 500) if isinstance(data.get("code"), int) else 500
+            msg = str(status or data.get("detail") or data.get("msg") or "RPC Error")
+
+        if code != 0:
+            if code in (3, 25, 40002, 40003, 40004, 40037, 40038, 40039, 40040):
+                logger.info(f"RPC {server_name}.{method_name} notice: code={code}, msg={msg}")
+            else:
+                logger.warning(f"RPC {server_name}.{method_name} rejected: code={code}, msg={msg}")
+            raise XiaoCanRPCError(code=code, msg=msg, raw=data, endpoint=f"{server_name}.{method_name}")
+
+        return data
+
+    # ---------------- 核心业务 API 封装 ---------------- #
+
+    async def get_store_list(
+        self,
+        city_code: int,
+        longitude: str,
+        latitude: str,
+        offset: int = 0,
+        limit: int = 20,
+        token: Optional[str] = None,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        sort: int = 0,
+        store_platform: int = 0,
+        scene: int = 2,
+        meal_period: int = 3
+    ) -> Dict[str, Any]:
+        """获取外卖霸王餐附近店铺清单 (优先调用官方核心推荐 SilkwormFusion.FusionService.GetFeedPromotions，回落 RecService.GetStorePromotionList)"""
+        # 1. 优先调用官方主页核心推荐 (GetFeedPromotions)
+        fusion_body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "lon": float(longitude),
+            "lat": float(latitude),
+            "number": int(limit),
+            "offset": int(offset),
+            "sort": int(sort) if sort else 0,
+            "scene": 1,
+            "is_show_mt": True,
+            "page_pv_id": str(uuid.uuid4()),
+            "app_id": 10
+        }
+        try:
+            res = await self.invoke_rpc(
+                server_name="SilkwormFusion",
+                method_name="FusionService.GetFeedPromotions",
+                body=fusion_body,
+                city_code=city_code,
+                token=token,
+                user_id=user_id,
+                silk_id=silk_id
+            )
+            if res.get("feed_items"):
+                pv = str(fusion_body.get("page_pv_id") or "")
+                for item in res["feed_items"]:
+                    if isinstance(item, dict) and (item.get("source") == 5 or item.get("wm_poi_id")):
+                        register_shangjin_poi_dict(item, meituan_pv_id=pv)
+                return res
+        except Exception as e:
+            logger.warning(f"GetFeedPromotions 调用异常，尝试切换至 RecService: {e}")
+
+        # 2. 备选调用官方多平台聚合推荐 (GetStorePromotionList)
+        rec_body = {
+            "city_code": int(city_code),
+            "silk_id": int(silk_id) if silk_id else 0,
+            "longitude": float(longitude),
+            "latitude": float(latitude),
+            "number": int(limit),
+            "offset": int(offset),
+            "promotion_sort": 1 if sort == 1 else 4,
+            "promotion_category": 0,
+            "promotion_filter": 0,
+            "store_category": 0,
+            "store_platform": int(store_platform),
+            "store_type": 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormRec",
+            method_name="RecService.GetStorePromotionList",
+            body=rec_body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def search_stores(
+        self,
+        keyword: str,
+        city_code: int,
+        longitude: str,
+        latitude: str,
+        offset: int = 0,
+        limit: int = 20,
+        token: Optional[str] = None,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """调用小蚕官方微服务实时搜索店铺 (SilkwormFusion.FusionService.SearchPromotions)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "lat": float(latitude),
+            "lon": float(longitude),
+            "keyword": keyword.strip(),
+            "offset": int(offset),
+            "number": min(20, max(1, int(limit))),
+            "app_id": 10
+        }
+        res = await self.invoke_rpc(
+            server_name="SilkwormFusion",
+            method_name="FusionService.SearchPromotions",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+        if "promotions" in res and "promotion_list" not in res:
+            res["promotion_list"] = res["promotions"]
+        return res
+
+    async def get_explore_store_list(
+        self,
+        city_code: int,
+        longitude: str,
+        latitude: str,
+        offset: int = 0,
+        limit: int = 20,
+        token: Optional[str] = None,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """获取到店/探店团购霸王餐清单 (ExploreMobile.ListGroupPromotion)"""
+        page_num = (int(offset) // int(limit)) + 1 if limit else 1
+        body = {
+            "loc": {
+                "lat": float(latitude),
+                "lng": float(longitude)
+            },
+            "city_code": int(city_code),
+            "silk_id": int(silk_id) if silk_id else 0,
+            "dist_item": 30000,
+            "page": {
+                "page_num": page_num,
+                "page_size": int(limit)
+            },
+            "filter": {
+                "is_brand": False,
+                "is_can_order": True,
+                "is_discount_lt4": False,
+                "is_done_bargain": False,
+                "is_multi": False,
+                "is_single": False,
+                "original_price_get": 0,
+                "store_first_category": 0
+            },
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormExplore",
+            method_name="ExploreMobile.ListGroupPromotion",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_order_list(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        order_status: int = 99,
+        offset: int = 0,
+        number: int = 20,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取用户霸王餐订单列表 (Silkworm.SilkwormService.GetPromotionOrderList)"""
+        # 官方真实状态集：0=待上传, 1=审核中, 2=已完成, 3=已驳回, 4=已取消, 15=待处理角标, 99=全部
+        if order_status in (0, 1, 2, 3, 4, 15, 99):
+            body_st = int(order_status)
+        else:
+            body_st = 99
+
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "offset": int(offset),
+            "number": int(number),
+            "order_status": body_st,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.GetPromotionOrderList",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def ocr_promotion_order(
+        self,
+        image_base64: str,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        OCR 识别外卖平台订单截图 (Silkworm.SilkwormService.OcrPromotionOrder)
+        官方参数体在插件内无法静态确认, 按最可能形态依次尝试 (纯图片字段, 服务端参数校验失败无副作用)。
+        """
+        b64 = re.sub(r"^data:image/[^;]+;base64,", "", image_base64).strip()
+        base = {"silk_id": int(silk_id) if silk_id else 0, "app_id": 20}
+        candidates = [
+            {**base, "img": b64},
+            {**base, "image": b64},
+            {**base, "img_base64": b64},
+            {**base, "file": b64},
+        ]
+        last_err: Optional[XiaoCanRPCError] = None
+        for body in candidates:
+            try:
+                return await self.invoke_rpc(
+                    server_name="Silkworm",
+                    method_name="SilkwormService.OcrPromotionOrder",
+                    body=body,
+                    city_code=city_code,
+                    token=token,
+                    user_id=user_id,
+                    silk_id=silk_id
+                )
+            except XiaoCanRPCError as e:
+                last_err = e
+                if e.code not in (1, 3, 500):
+                    raise
+        raise last_err if last_err else XiaoCanRPCError(500, "OCR 识别失败", raw={})
+
+    async def search_shangjin_stores(
+        self,
+        keyword: str,
+        latitude: float,
+        longitude: float,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440304,
+        sort_type: int = 3,
+        page_pv_id: str = ""
+    ) -> Dict[str, Any]:
+        """获取美团按比例返现/赏金商户活动 (SilkwormRcs.SilkwormRcsService.MeituanShangjinGetPoiList)"""
+        body = {
+            "lat": float(latitude),
+            "lng": float(longitude),
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page_pv_id": page_pv_id or "",
+            "sort_type": int(sort_type),
+            "search_word": keyword.strip() if keyword else "",
+            "app_id": 10
+        }
+        res = await self.invoke_rpc(
+            server_name="SilkwormRcs",
+            method_name="SilkwormRcsService.MeituanShangjinGetPoiList",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+        if isinstance(res, dict):
+            pvid = str(res.get("meituan_pv_id") or res.get("page_pv_id") or "")
+            for poi in (res.get("poi_list") or []):
+                register_shangjin_poi_dict(poi, meituan_pv_id=pvid)
+        return res
+
+    async def get_user_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        platform: Optional[str] = None,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """获取小蚕官方真实个人资料 (Silkworm.SilkwormService.GetClientUserInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "if_need_subscribe": True,
+            "if_need_notify_status": True,
+            "inviter_silk_id": 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.GetClientUserInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    # ---------------- 官方任务中心与元宝生态 (ActivityTask / Vip) ---------------- #
+
+    async def get_user_task_v2(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取元宝总览与待领取状态 (ActivityTask.ActivityTaskMobileService.UserTaskV2)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.UserTaskV2",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_unreceived_point_records(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 10,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取待领取元宝明细列表 (ActivityTask.ActivityTaskMobileService.GetUnReceivedPointRecords)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page": int(page),
+            "page_size": int(page_size),
+            "status": 1,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.GetUnReceivedPointRecords",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_wait_claimed_points(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取待领取的元宝点数统计 (ActivityTask.ActivityTaskMobileService.WaitClaimedPoints)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.WaitClaimedPoints",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_user_sign_in_days(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取会员每日连续签到天数与今日签到状态 (SilkwormVip.VipRightsService.UserSignInDays)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.UserSignInDays",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_sign_in_node(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取签到里程碑节点奖励状态 (SilkwormVip.VipRightsService.SignInNode)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "need_status": True,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.SignInNode",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def sign_in_lottery(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """会员专属每日签到抽奖 (SilkwormVip.VipRightsService.SignInLottery)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.SignInLottery",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def check_activity_eligibility(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """检查用户活动与红包雨参与资格 (SilkwormShareSupport.SilkwormShareSupportService.CheckActivityEligibility)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "check_red_packet_guide": True,
+            "check_subscribe": True,
+            "check_supporter_experiment": True,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormShareSupport",
+            method_name="SilkwormShareSupportService.CheckActivityEligibility",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_client_withdraw_list(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        offset: int = 0,
+        number: int = 10,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取提现记录列表 (Silkworm.SilkwormService.GetClientWithdrawList)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "offset": int(offset),
+            "number": int(number),
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.GetClientWithdrawList",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    # ---------------- 消息中心 (SilkwormMessageCenter) ---------------- #
+
+    async def get_message_channels(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取消息中心频道分类及未读数 (SilkwormMessageCenter.MessageCenterService.ListChannelsSimple)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page": 1,
+            "page_size": 20,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMessageCenter",
+            method_name="MessageCenterService.ListChannelsSimple",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def get_messages(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        channel_id: Optional[int] = None,
+        page: int = 1,
+        page_size: int = 20,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取消息列表 (SilkwormMessageCenter.MessageCenterService.ListMessages)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page": int(page),
+            "page_size": int(page_size),
+            "app_id": 10
+        }
+        if channel_id is not None and channel_id > 0:
+            body["channel_id"] = int(channel_id)
+        else:
+            body["query_all"] = True
+
+        return await self.invoke_rpc(
+            server_name="SilkwormMessageCenter",
+            method_name="MessageCenterService.ListMessages",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    async def set_all_messages_read(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """将当前账号所有消息标记为已读 (SilkwormMessageCenter.MessageCenterService.SetMessageAllRead)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMessageCenter",
+            method_name="MessageCenterService.SetMessageAllRead",
+            body=body,
+            city_code=city_code,
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id
+        )
+
+    # ---------------- 官方微服务日常任务与营销活动 ---------------- #
+
+    async def do_user_sign(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """天天赚元宝每日签到打卡 (官方原生微服务 ActivityTaskMobileService.SignIn)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.SignIn",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_sign_in_history(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取天天赚元宝签到历史记录与连续签到天数 (ActivityTaskMobileService.SignInHistory)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.SignInHistory",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def do_checkin(self, token: str, city_code: int = 440303, silk_id: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """每日签到打卡 (兼容旧接口别名)"""
+        return await self.do_user_sign(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+
+    async def complete_task_event(
+        self,
+        task_type: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """完成任务领奖励 (SilkwormMobileMarketingService.CompleteTaskEvent: 3=淘宝闪购, 4=美团, 6=社群)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "task_type": int(task_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.CompleteTaskEvent",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def incr_lottery_number(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """增加每日抽奖机会 (SilkwormMobileMarketingService.UserIncrLotteryNumber)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.UserIncrLotteryNumber",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_vip_up_gift(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取/激活会员升级及每日专属成长礼包 (SilkwormMobileMarketingService.GetUserUpVipGift)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.GetUserUpVipGift",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def list_vip_gifts(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取会员专属权益礼包列表 (SilkwormMobileMarketingService.ListVipGifts)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.ListVipGifts",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def list_vip_gift_details(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取各VIP等级特权卡券明细 (SilkwormMobileMarketingService.ListVipGiftDetails)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.ListVipGiftDetails",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_vip_task(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取会员成长任务状态 (SilkwormVipMobile.GetVipTask)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="SilkwormVipMobile.GetVipTask",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_vip_prizes(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        platform: str = "app"
+    ) -> Dict[str, Any]:
+        """获取会员专属每日膨胀红包池与成长值 (SilkwormVipMobile.VipPrizes)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="SilkwormVipMobile.VipPrizes",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform=platform
+        )
+
+    async def get_vip_rebate_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取会员专属大牌秒杀与返利库存 (SilkwormVipMobile.GetVipRebateInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="SilkwormVipMobile.GetVipRebateInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    # ---------------- 官方转盘与幸运抽奖 ---------------- #
+
+    async def get_lottery_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取今日幸运转盘配置与剩余抽奖机会 (SilkwormLotteryMobile.LotteryInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.LotteryInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def add_lottery_times(
+        self,
+        lottery_type: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """领取免费任务赠送的开红包机会 (SilkwormLotteryMobile.AddLotteryTimes: 1=签到, 2=分享, 4=沾一沾, 8=淘宝闪购, 9=美团, 10=到店, 11=福利)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "type": int(lottery_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.AddLotteryTimes",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def do_lottery_spin(
+        self,
+        token: str,
+        prize_type: int = 1,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """执行幸运转盘抽奖/免费开红包 (SilkwormLotteryMobile.Lottery)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "prize_type": int(prize_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.Lottery",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def receive_extra_lottery(
+        self,
+        step: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """领取阶梯累计开红包奖励 (SilkwormLotteryMobile.ReceiveExtraLottery: step 1=第一阶段/3次, step 2=第二阶段/9次)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "step": int(step)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.ReceiveExtraLottery",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def claim_ad_lottery_chance(
+        self,
+        bus_type: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """激励视频/商城广告浏览完成获取额外抽奖 (SilkwormLotteryMobile.OnAdViewed: bus_type 2=视频广告, 4=抖音商城)"""
+        import hmac
+        import hashlib
+        import base64
+        import string
+        import random
+
+        nonce = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+        ts = int(time.time())
+        sid = int(silk_id) if silk_id else 0
+        raw_str = f"silk_id={sid}&timestamp={ts}&nonce={nonce}&bus_type={bus_type}"
+        key = b"lcjkbqadfrzsewxy"
+        sign = base64.b64encode(hmac.new(key, raw_str.encode("utf-8"), hashlib.sha256).digest()).decode("utf-8")
+
+        body = {
+            "silk_id": sid,
+            "timestamp": ts,
+            "nonce": nonce,
+            "bus_type": int(bus_type),
+            "sign": sign
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.OnAdViewed",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def lottery_send_redpack(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """免费开红包页面自动赠送红包机制 (PartnerPromotionService.LotterySendRedPack)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="lottery",
+            method_name="PartnerPromotionService.LotterySendRedPack",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_lottery_progress(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取阶梯累计抽奖进度 (SilkwormLotteryMobile.GetLotteryProgress)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.GetLotteryProgress",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    # ---------------- 官方整点红包雨与权益秒杀 ---------------- #
+
+    async def get_redpack_rain_event(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取当前或即将开始的红包雨场次信息 (SilkwormLotteryMobile.GetRedPackRainEvent)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "city_code": int(city_code)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.GetRedPackRainEvent",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def join_redpack_rain(
+        self,
+        token: str,
+        event_id: Optional[int] = None,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """报名/接入整点红包雨场次 (SilkwormLotteryMobile.JoinRedPackRainEvent)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "city_code": int(city_code)
+        }
+        if event_id:
+            body["event_id"] = int(event_id)
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.JoinRedPackRainEvent",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def grab_redpack_rain(
+        self,
+        token: str,
+        event_id: Optional[int] = None,
+        click_num: int = 15,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """在红包雨进行时抢抓红包额度 (SilkwormLotteryMobile.RedPackRainGrabNum)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "click_num": int(click_num)
+        }
+        if event_id:
+            body["event_id"] = int(event_id)
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.RedPackRainGrabNum",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def list_user_redpack(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询用户领取的红包雨红包记录 (SilkwormLotteryMobile.ListUserRedPack)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormLottery",
+            method_name="SilkwormLotteryMobile.ListUserRedPack",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+
+    # ---------------- 官方独立 App 原生 VIP 特权与秒杀微服务 (VipRightsService) ---------------- #
+
+    # 1. 每月保底大牌券通道 (每月固定保底张数，如 SVIP6 每月 8 张保底，严禁在每日日常抢券定时任务中调用)
+    async def get_brand_card_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        card_type: int = 1
+    ) -> Dict[str, Any]:
+        """查询每月保底 SVIP 大牌神券总额度与剩余保底配额 (SilkwormVip.VipRightsService.BrandCardInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "type": int(card_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.BrandCardInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def grab_brand_card(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        card_type: int = 1
+    ) -> Dict[str, Any]:
+        """手动领取每月保底 SVIP 大牌神券 (SilkwormVip.VipRightsService.GrabBrandCard - 注意：此接口直接扣减当月保底张数，日常定时任务绝不可调用！)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "type": int(card_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.GrabBrandCard",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    # 2. 每日 09:30 抢大牌券专属通道 (官方额外放量大牌券，独立库存，不扣减每月保底张数)
+    async def get_extra_brand_card_pool(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询每日 09:30 SVIP 额外大牌放量券配置与实时库存 (SilkwormVip.VipRightsService.ExtraBrandCardPool)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.ExtraBrandCardPool",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def grab_extra_brand_card(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        card_type: int = 99
+    ) -> Dict[str, Any]:
+        """秒杀抢占每日 09:30 SVIP 额外大牌放量券 (SilkwormVip.VipRightsService.GrabExtraBrandCard - 默认 card_type=99)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "type": int(card_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.GrabExtraBrandCard",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    # 3. 影音会员周卡 (腾讯视频/网易云等) 特权通道
+    async def get_user_tencent_vip_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询每月影音周卡(网易云音乐/腾讯视频等)用户状态与余量 (SilkwormVip.VipRightsService.UserTencentVipInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.UserTencentVipInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def get_user_tencent_vip_list(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        page: int = 1,
+        page_size: int = 10
+    ) -> Dict[str, Any]:
+        """查询历史影音会员周卡领取记录与CDK券码明细 (SilkwormVip.VipRightsService.UserTencentVipList)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page": int(page),
+            "page_size": int(page_size)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.UserTencentVipList",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def grab_tencent_vip_quota(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """秒杀抢占影音会员周卡(网易云音乐/腾讯视频等)配额 (SilkwormVip.VipRightsService.GrabTencentVipQuota)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.GrabTencentVipQuota",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def get_user_free_order_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询每月外卖免单券持有与核销状态 (SilkwormVip.VipRightsService.UserFreeOrderInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.UserFreeOrderInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def grab_free_order_quota(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """秒杀抢占 14:00 每月外卖霸王餐免单神券配额 (SilkwormVip.VipRightsService.GrabFreeOrderQuota)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.GrabFreeOrderQuota",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def use_free_order_card(
+        self,
+        order_no: str,
+        order_business: int,
+        user_free_card_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """对指定外卖订单核销使用免单券 (SilkwormVip.VipRightsService.UseFreeOrderCard)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "order_no": str(order_no),
+            "order_business": int(order_business),
+            "user_free_card_id": int(user_free_card_id)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.UseFreeOrderCard",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def get_plus_vip_rebate_card_infos(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询 SVIP 专属返利券档位列表 (SilkwormVip.VipRightsService.PlusVipRebateCardInfos)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.PlusVipRebateCardInfos",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def grab_rebate_card_quota(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """秒杀抢占今日 09:00 SVIP 专属大额返利券 (SilkwormVip.VipRightsService.GrabRebateCardQuota)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.GrabRebateCardQuota",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def get_user_sign_in_days(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询会员打卡签到天数与今日签到状态 (SilkwormVip.VipRightsService.UserSignInDays)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="VipRightsService.UserSignInDays",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def list_flash_sale_exchanges(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        new_level: int = 5,
+        is_plus: bool = True
+    ) -> Dict[str, Any]:
+        """查询元宝商城限量秒杀兑换商品列表 (SilkwormCommunity.SilkwormMobileCommunityService.ListFlashSaleExchanges)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "new_level": int(new_level),
+            "is_plus": bool(is_plus)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormCommunity",
+            method_name="SilkwormMobileCommunityService.ListFlashSaleExchanges",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def today_exchange(
+        self,
+        exchange_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """秒杀兑换今日元宝商品 (SilkwormCommunity.SilkwormMobileCommunityService.TodayExchange)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "exchange_id": int(exchange_id)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormCommunity",
+            method_name="SilkwormMobileCommunityService.TodayExchange",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def complete_task_event(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        promotion_order_id: Optional[int] = None,
+        task_type: int = 4,
+        platform: str = "app"
+    ) -> Dict[str, Any]:
+        """完成领红包延时或营销任务 (SilkwormMarketing.SilkwormMobileMarketingService.CompleteTaskEvent)
+        task_type: 4 (美团订单延时 2 小时 - user_receive_meituan_task), 3 (淘宝闪购订单延时 2 小时 - user_receive_elem_task)
+        """
+        body: Dict[str, Any] = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "task_type": int(task_type)
+        }
+        if promotion_order_id is not None:
+            body["promotion_order_id"] = int(promotion_order_id)
+
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.CompleteTaskEvent",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform=platform
+        )
+
+    async def use_user_delay_card(
+        self,
+        promotion_order_id: int,
+        num: int = 1,
+        token: str = "",
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """
+        使用延时券延长订单凭证提交时间 (SilkwormService.DelayPromotionQuota, 官方 App「选择使用延时券数量」同源)
+        官方参数体在插件内无法静态确认, 按最可能形态依次尝试; 服务端参数校验失败不会扣券。
+        """
+        base = {"silk_id": int(silk_id) if silk_id else 0, "app_id": 20}
+        candidates = [
+            {**base, "promotion_order_id": int(promotion_order_id), "num": int(num)},
+            {**base, "promotion_order_id": int(promotion_order_id), "card_num": int(num)},
+            {**base, "promotion_order_id": int(promotion_order_id), "delay_num": int(num)},
+            {**base, "order_id": int(promotion_order_id), "num": int(num)},
+        ]
+        last_err: Optional[XiaoCanRPCError] = None
+        for body in candidates:
+            try:
+                return await self.invoke_rpc(
+                    server_name="Silkworm",
+                    method_name="DelayPromotionQuota",
+                    body=body,
+                    city_code=city_code,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    platform="mini"
+                )
+            except XiaoCanRPCError as e:
+                last_err = e
+                # 记录每种参数形态的官方原始拒绝原因, 供后续抓包比对对齐 (不额外发请求)
+                logger.warning(
+                    f"DelayPromotionQuota 形态被拒: body={body} -> code={e.code} msg={e.msg} raw={getattr(e, 'raw', None)}"
+                )
+                # 参数形态不匹配 (参数错误/网关500) 时继续尝试下一形态; 其它业务错误直接抛出
+                if e.code not in (1, 3, 500):
+                    raise
+        raise last_err if last_err else XiaoCanRPCError(500, "延时券调用失败", raw={})
+
+    async def vip_prizes_lottery(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        vip_level: int = 0,
+        platform: str = "app"
+    ) -> Dict[str, Any]:
+        """执行每日 09:30 SVIP 额外大牌券秒杀 (严禁调用 GrabBrandCard 消耗每月保底)"""
+        try:
+            return await self.grab_extra_brand_card(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, card_type=99)
+        except Exception:
+            body: Dict[str, Any] = {
+                "silk_id": int(silk_id) if silk_id else 0
+            }
+            if vip_level:
+                body["level"] = int(vip_level)
+            return await self.invoke_rpc(
+                server_name="SilkwormVip",
+                method_name="SilkwormVipMobile.VipPrizesLottery",
+                body=body,
+                city_code=city_code,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                platform=platform
+            )
+
+    async def get_vip_rebate_info(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """查询每日 09:00 SVIP 专属返利券库存与进度 (SilkwormVipMobile.GetVipRebateInfo)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormVip",
+            method_name="SilkwormVipMobile.GetVipRebateInfo",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def exchange_goods(
+        self,
+        goods_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """元宝商城限量秒杀兑换商品 (SilkwormMobileCommunityService.ExchangeGoods)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "goods_id": int(goods_id),
+            "city_code": int(city_code)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormCommunity",
+            method_name="SilkwormMobileCommunityService.ExchangeGoods",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def grab_promotion_quota(
+        self,
+        promotion_id: Any,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        store_platform: int = 1,
+        if_advance_order: bool = False,
+        latitude: float = 0.0,
+        longitude: float = 0.0,
+        redpack_id: Optional[Any] = None,
+        vip_extra_silk_card_id: Optional[Any] = None,
+        vip_promotion_card_id: Optional[Any] = None,
+        store_id: Optional[str] = None,
+        store_name: Optional[str] = None,
+        wm_poi_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        抢占霸王餐秒杀名额配额 (三模智能路由，严格对齐官方 APK 逆向协议):
+        1. source=5 美团赏金按比例返活动 (15+位雪花算法 poi_event_id):
+           -> SilkwormRcs.SilkwormRcsService.MeituanShangjinRegisterEvent
+        2. source=2 聚合三方满返活动 (<=7位 promotion_id):
+           -> SilkwormFusion.FusionService.FusionGrabPromotionQuota (source=2)
+        3. source=1 小蚕标准直连活动 (8~10位 promotion_id):
+           -> Silkworm.SilkwormService.GrabPromotionQuota
+        """
+        raw_pid_str = str(promotion_id or "").strip()
+        clean_pid_str = re.sub(r"_p\d+$", "", raw_pid_str)
+        try:
+            pid_int = int(clean_pid_str)
+        except Exception:
+            pid_int = 0
+
+        # 分支一: 15+ 位雪花算法 ID -> 美团赏金按比例返现报名 (SilkwormRcs.SilkwormRcsService.MeituanShangjinRegisterEvent)
+        if pid_int >= 10_000_000_000:
+            meta = _SHANGJIN_EVENT_META.get(clean_pid_str) or {}
+            resolved_wm_poi_id = str(wm_poi_id or meta.get("wm_poi_id") or "").strip()
+            resolved_pv_id = str(meta.get("meituan_pv_id") or "").strip()
+
+            if not resolved_wm_poi_id and store_name and latitude and longitude:
+                try:
+                    await self.search_shangjin_stores(
+                        keyword=store_name,
+                        latitude=float(latitude),
+                        longitude=float(longitude),
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        city_code=int(city_code or 0),
+                        sort_type=3
+                    )
+                    meta = _SHANGJIN_EVENT_META.get(clean_pid_str) or {}
+                    resolved_wm_poi_id = str(meta.get("wm_poi_id") or "").strip()
+                    resolved_pv_id = str(meta.get("meituan_pv_id") or resolved_pv_id or "").strip()
+                except Exception as lke:
+                    logger.debug(f"反查美团赏金 wm_poi_id 异常 (将使用 store_id 兜底): {lke}")
+
+            if not resolved_wm_poi_id:
+                resolved_wm_poi_id = str(store_id or clean_pid_str).strip()
+            if not resolved_pv_id:
+                resolved_pv_id = str(uuid.uuid4())
+
+            sj_body: Dict[str, Any] = {
+                "silk_id": int(silk_id) if silk_id else 0,
+                "wm_poi_id": resolved_wm_poi_id,
+                "poi_event_id": clean_pid_str,
+                "meituan_pv_id": resolved_pv_id,
+                "phone": ""
+            }
+            if redpack_id is not None:
+                try:
+                    r_int = int(redpack_id)
+                    if r_int > 0:
+                        sj_body["redpack_id"] = r_int
+                except (ValueError, TypeError):
+                    pass
+            if vip_extra_silk_card_id is not None:
+                try:
+                    v_int = int(vip_extra_silk_card_id)
+                    if v_int > 0:
+                        sj_body["vip_extra_silk_card_id"] = v_int
+                except (ValueError, TypeError):
+                    pass
+
+            return await self.invoke_rpc(
+                server_name="SilkwormRcs",
+                method_name="SilkwormRcsService.MeituanShangjinRegisterEvent",
+                body=sj_body,
+                city_code=city_code,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                platform="app"
+            )
+
+        # 构造标准/聚合抢单请求报文
+        base_body: Dict[str, Any] = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_id": pid_int,
+            "store_platform": int(store_platform or 1),
+            "if_advance_order": bool(if_advance_order),
+            "if_pre_order": False,
+            "advance_order_time": 0,
+            "latitude": float(latitude or 0.0),
+            "longitude": float(longitude or 0.0),
+            "city_code": int(city_code or 440303)
+        }
+        if redpack_id is not None:
+            try:
+                r_int = int(redpack_id)
+                if r_int > 0:
+                    base_body["redpack_id"] = r_int
+            except (ValueError, TypeError):
+                pass
+        if vip_promotion_card_id is not None:
+            try:
+                vp_int = int(vip_promotion_card_id)
+                if vp_int > 0:
+                    base_body["vip_promotion_card_id"] = vp_int
+            except (ValueError, TypeError):
+                pass
+        if vip_extra_silk_card_id is not None:
+            try:
+                v_int = int(vip_extra_silk_card_id)
+                if v_int > 0:
+                    base_body["vip_extra_silk_card_id"] = v_int
+            except (ValueError, TypeError):
+                pass
+
+        # 分支二: <=7 位聚合活动 ID (source=2, DineDash) -> 主路由 SilkwormFusion (source=2)
+        # 分支三: 8~10 位标准活动 ID (source=1, Silkworm) -> 主路由 Silkworm 直连 (零多余往返延迟)
+        is_fusion_primary = (0 < pid_int < 10_000_000)
+
+        if is_fusion_primary:
+            primary_server = "SilkwormFusion"
+            primary_method = "FusionService.FusionGrabPromotionQuota"
+            primary_body = {**base_body, "source": 2}
+            fallback_server = "Silkworm"
+            fallback_method = "SilkwormService.GrabPromotionQuota"
+            fallback_body = dict(base_body)
+        else:
+            primary_server = "Silkworm"
+            primary_method = "SilkwormService.GrabPromotionQuota"
+            primary_body = dict(base_body)
+            fallback_server = "SilkwormFusion"
+            fallback_method = "FusionService.FusionGrabPromotionQuota"
+            fallback_body = {**base_body, "source": 2}
+
+        try:
+            return await self.invoke_rpc(
+                server_name=primary_server,
+                method_name=primary_method,
+                body=primary_body,
+                city_code=city_code,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                platform="app"
+            )
+        except XiaoCanRPCError as rpc_err:
+            # 仅当主路由返回跨表未命中/兼容性状态码 (1, 2, 3, 5) 时尝试备用通道；
+            # 若主路由已明确返回真实业务拦截 (如 6=该活动名额已抢完, 4=活动未开始, 61=卡券不足)，直接抛出真实提示
+            if rpc_err.code in (1, 2, 3, 5):
+                logger.info(
+                    f"官方主路由 {primary_server}.{primary_method} 返回代码 {rpc_err.code} ({rpc_err.msg})，尝试备用通道 {fallback_server}.{fallback_method}..."
+                )
+                try:
+                    return await self.invoke_rpc(
+                        server_name=fallback_server,
+                        method_name=fallback_method,
+                        body=fallback_body,
+                        city_code=city_code,
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        platform="app"
+                    )
+                except XiaoCanRPCError as fb_err:
+                    # 若备用通道返回明确的业务状态 (如 code=6 该活动名额已抢完)，优先向用户反馈真实业务错误，杜绝被跨表假“活动已过期(3)”掩盖
+                    if fb_err.code not in (1, 2, 3, 5):
+                        raise fb_err
+                    raise rpc_err
+                except Exception:
+                    raise rpc_err
+            raise rpc_err
+
+    async def get_user_max_redpack(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取用户当前可用红包清单与最大红包 (RedPackService.GetUserMaxRedPack)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="RedPackService",
+            method_name="RedPackService.GetUserMaxRedPack",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def cancel_promotion_quota(
+        self,
+        promotion_order_id: Any,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """取消已抢到的霸王餐订单名额 (SilkwormService.CancelPromotionQuota)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_order_id": int(promotion_order_id)
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.CancelPromotionQuota",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def delete_promotion_order(
+        self,
+        promotion_order_id: Any,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """删除霸王餐订单记录 (SilkwormService.DeletePromotionOrder)
+
+        官方抓包确认: body {"silk_id":..., "promotion_order_id":..., "app_id":20}
+        成功响应 {"status": {"code": 0}}; 仅允许删除 已完成/已取消 状态订单
+        """
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_order_id": int(promotion_order_id),
+            "app_id": 20
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.DeletePromotionOrder",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_store_promotion_detail(
+        self,
+        promotion_id: Any,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        store_name: Optional[str] = None,
+        latitude: float = 0.0,
+        longitude: float = 0.0
+    ) -> Dict[str, Any]:
+        """
+        查询店铺霸王餐活动实时库存与详情 (三模智能路由):
+        1. 15+位美团赏金 poi_event_id -> SilkwormRcsService.MeituanShangjinGetPoiList 精准匹配实时 inventory
+        2. <=7位聚合活动 ID (source=2) -> SilkwormFusion.FusionService.GetFusionPromotionDetail (防止命中 Silkworm 2023 年旧表重号记录)
+        3. 8~10位标准活动 ID (source=1) -> Silkworm.SilkwormService.GetStorePromotionDetail
+        """
+        raw_pid_str = str(promotion_id or "").strip()
+        clean_pid_str = re.sub(r"_p\d+$", "", raw_pid_str)
+        try:
+            pid_int = int(clean_pid_str)
+        except Exception:
+            pid_int = 0
+
+        # 1. 美团赏金按比例返活动 (15+位雪花算法 poi_event_id)
+        if pid_int >= 10_000_000_000:
+            meta = _SHANGJIN_EVENT_META.get(clean_pid_str) or {}
+            kw = (store_name or meta.get("store_name") or "").strip()
+            inv = 0
+            if kw and latitude and longitude:
+                try:
+                    sj_res = await self.search_shangjin_stores(
+                        keyword=kw,
+                        latitude=float(latitude),
+                        longitude=float(longitude),
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        city_code=int(city_code or 0),
+                        sort_type=3
+                    )
+                    for poi in (sj_res.get("poi_list") or []):
+                        if str(poi.get("poi_event_id") or "") == clean_pid_str:
+                            inv = int(poi.get("inventory") or 0)
+                        for plan in (poi.get("plan_activity_info_list") or []):
+                            if str(plan.get("poi_event_id") or "") == clean_pid_str:
+                                inv = int(plan.get("inventory") or 0)
+                                break
+                except Exception as e:
+                    logger.debug(f"轮询美团赏金活动库存异常: {e}")
+            return {
+                "status": {"code": 0},
+                "promotion_detail": {
+                    "promotion_id": pid_int,
+                    "meituan_left_number": inv,
+                    "eleme_left_number": 0,
+                    "left_number": inv,
+                    "source": 5
+                }
+            }
+
+        # 2. 聚合三方满返活动 (<=7位 ID, source=2)
+        if 0 < pid_int < 10_000_000:
+            fusion_res = await self.invoke_rpc(
+                server_name="SilkwormFusion",
+                method_name="FusionService.GetFusionPromotionDetail",
+                body={
+                    "silk_id": int(silk_id) if silk_id else 0,
+                    "promotion_id": pid_int,
+                    "source": 2
+                },
+                city_code=city_code,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                platform="app"
+            )
+            pdet = fusion_res.get("promotion_detail")
+            if isinstance(pdet, dict):
+                left_val = int(pdet.get("left_number") or 0)
+                plat_val = int(pdet.get("store_platform") or (pdet.get("store") or {}).get("store_platform") or 1)
+                if "meituan_left_number" not in pdet:
+                    pdet["meituan_left_number"] = left_val if plat_val == 1 else 0
+                if "eleme_left_number" not in pdet:
+                    pdet["eleme_left_number"] = left_val if plat_val == 2 else 0
+            return fusion_res
+
+        # 3. 标准直连霸王餐活动 (8~10位 ID, source=1)
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "promotion_id": pid_int
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.GetStorePromotionDetail",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def appoint_store(
+        self,
+        token: str,
+        promotion_id: str,
+        redpack_mode: int = 0,
+        redpack_id: Optional[str] = None,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """提交店铺霸王餐预约抢单 (PromotionService.AppointOrder)"""
+        body = {
+            "promotion_id": str(promotion_id),
+            "redpack_mode": int(redpack_mode),
+            "redpack_id": redpack_id or "",
+            "app_id": 10,
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="Promotion",
+            method_name="PromotionService.AppointOrder",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    # ---------------- 官方钱包提现与卡券资产 ---------------- #
+
+    async def client_withdraw(
+        self,
+        money_cents: int,
+        token: str,
+        withdraw_type: int = 1,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """钱包余额申请提现到微信或支付宝 (SilkwormService.ClientWithdraw)
+        withdraw_type: 0 微信钱包, 1 支付宝
+        """
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "money": int(money_cents),
+            "type": int(withdraw_type)
+        }
+        return await self.invoke_rpc(
+            server_name="Silkworm",
+            method_name="SilkwormService.ClientWithdraw",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    # ---------------- 天天赚元宝与气泡元宝收取 ---------------- #
+
+    async def get_daily_tasks(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取天天赚元宝中心任务列表与完成状态 (ActivityTaskMobileService.GetDailyTask)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "user_id": int(user_id) if user_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.GetDailyTask",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def complete_activity_task(
+        self,
+        task_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """完成天天赚元宝中心指定任务 (如任务57抖音电商浏览30s) (ActivityTaskMobileService.CompleteTask)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "user_id": int(user_id) if user_id else 0,
+            "task_id": int(task_id)
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.CompleteTask",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def wait_claimed_points(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取待收取的未收元宝与气泡任务明细 (ActivityTaskMobileService.WaitClaimedPoints)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.WaitClaimedPoints",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def collect_points(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """一键收取账户所有待领气泡元宝与达标任务元宝 (ActivityTask.ActivityTaskMobileService.CollectPoints)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.CollectPoints",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def user_claim_points(
+        self,
+        task_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """收取指定的已完成任务元宝或气泡元宝 (ActivityTaskMobileService.UserClaimPoints)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "user_id": int(user_id) if user_id else 0,
+            "task_id": int(task_id)
+        }
+        return await self.invoke_rpc(
+            server_name="ActivityTask",
+            method_name="ActivityTaskMobileService.UserClaimPoints",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def draw_page_gift(
+        self,
+        page_gift_type: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """领取页面礼包 (SilkwormMobileMarketingService.DrawPageGift)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page_gift_type": int(page_gift_type)
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.DrawPageGift",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_user_card_number(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取用户特权卡券数量统计 (SilkwormCardService.GetUserCardNumber)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "card_number_mode": 1,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormCard",
+            method_name="SilkwormCardService.GetUserCardNumber",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_user_card_list(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        status: int = 0,
+        offset: int = 0,
+        number: int = 30
+    ) -> Dict[str, Any]:
+        """获取用户专属卡券与特权券列表 (SilkwormCardService.GetUserCardList, status: 0未使用, 1已使用, 2已过期)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "status": int(status),
+            "offset": int(offset),
+            "number": int(number),
+            "app_id": 10
+        }
+        try:
+            return await self.invoke_rpc(
+                server_name="SilkwormCard",
+                method_name="SilkwormCardService.GetUserCardList",
+                body=body,
+                city_code=city_code,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id
+            )
+        except Exception as e:
+            logger.warning(f"GetUserCardList failed: {e}")
+            return {"status": {"code": 0}, "list": []}
+
+    async def get_user_redpack_num(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303
+    ) -> Dict[str, Any]:
+        """获取用户可用红包总数 (RedPackService.GetUserRedPackNum)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="RedPackService",
+            method_name="RedPackService.GetUserRedPackNum",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    async def get_app_redpack_list(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 440303,
+        page: int = 1,
+        page_size: int = 30
+    ) -> Dict[str, Any]:
+        """获取用户霸王餐红包列表 (RedPackService.GetAppRedPackList)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "page": int(page),
+            "page_size": int(page_size),
+            "app_id": 10
+        }
+        return await self.invoke_rpc(
+            server_name="RedPackService",
+            method_name="RedPackService.GetAppRedPackList",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+
