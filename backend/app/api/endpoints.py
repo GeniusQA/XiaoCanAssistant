@@ -1,0 +1,6129 @@
+"""
+FastAPI RESTful 路由
+完全对齐前端调用，彻底废弃卡密、积分与到期限制（全免开放）
+"""
+import time
+import os
+from datetime import datetime, timedelta, timezone
+import uuid
+import re
+import math
+import json
+import urllib.request
+import logging
+import asyncio
+import random
+from typing import Dict, Any, List, Optional, Tuple
+from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+logger = logging.getLogger("xiaocan.api")
+
+# 官方资料同步去重：同一账号短时间内从多处入口（手动录入/一键同步/账号列表自愈）重复触发时，
+# 只执行一次官方 RPC 与凭据入库流水，避免重复记录与无意义的官方请求（后者会加大风控压力）。
+_enrich_recent_ts: Dict[str, float] = {}
+_ENRICH_DEDUP_WINDOW_SEC = 8
+
+
+def _enrich_dedup_key(cred: Dict[str, Any]) -> str:
+    return str(cred.get("token") or cred.get("silk_id") or cred.get("key") or "")[-40:]
+
+
+TZ_BJ = timezone(timedelta(hours=8))
+
+from ..models import database as db
+from ..core import scheduler, notifier, clawbot_client, time_service
+from ..core.jwt_utils import extract_token_from_text, decode_jwt_payload, extract_city_code_from_text, extract_silk_id_from_payload, extract_user_id_from_payload, extract_silk_id_from_text
+from ..core.proxy_sniffer import sniffer
+from ..core.wechat_scanner import scan_wechat_credentials, wechat_listener
+from ..core.tianditu import tianditu_client
+from ..core import map_service
+from ..protocol.client import (
+    XiaoCanClient,
+    format_waf_block_message,
+    get_active_protocol_profile,
+    get_waf_block_detail,
+    get_waf_cooldown_seconds,
+    is_waf_blocked,
+    register_shangjin_poi_dict,
+)
+
+router = APIRouter(prefix="/api")
+client = XiaoCanClient()
+
+# 任务元数据定义 (涵盖日常、秒杀与资产守护共 15 项全量对齐)
+TASK_META = {
+    # --- 日常打卡与元宝任务 (daily) ---
+    "yb_task": {"id": "yb_task", "label": "轻松赚元宝", "tip": "元宝乐园每日签到、加入社群、领券加赠，一键聚拢成熟元宝", "category": "daily", "default_time": "08:05"},
+    "vip_expand": {"id": "vip_expand", "label": "会员每日签到", "tip": "会员每日打卡 + VIP专属签到抽奖 + 里程碑核验 + 专属成长礼包", "category": "daily", "vip": "VIP2+ / SVIP", "default_time": "08:30"},
+    "collect_points": {"id": "collect_points", "label": "收取未收元宝", "tip": "晚间睡前自动收取成熟气泡元宝与已完成任务奖励，防过期", "category": "daily", "default_time": "23:59"},
+    "group_lottery": {"id": "group_lottery", "label": "免费开红包与抽奖", "tip": "自动领取全部7类免费开红包机会并开启，支持阶梯进度与防风控间隔", "category": "daily", "default_time": "07:40"},
+    "meituan_coupon": {"id": "meituan_coupon", "label": "美团神券每日一键领", "tip": "全量美团官方账号轮流领取大额神券（外卖/美食/闪购/生活服务），支持401自动自愈与24小时滚动窗口冷却防刷", "category": "daily", "default_time": "08:15"},
+
+    # --- 会员秒杀与特权抢券 (member) ---
+    "flash_sale": {
+        "id": "flash_sale",
+        "label": "元宝秒杀抢券",
+        "tip": "官方元宝秒杀专区限量神券（1元小蚕券/通用大牌券/110%返利券/复活券/免单券），每日三场 (09/14/18点) 准点秒杀",
+        "category": "member",
+        "default_time": "09:00",
+        "fixed_time": True,
+        "time_label": "三场 09/14/18点"
+    },
+    "redpack_rain": {"id": "redpack_rain", "label": "整点红包雨", "tip": "每日六场红包雨于开场后第5分钟 (10:05/11:05/12:05/14:05/16:05/19:05) 错峰自动接入抓取，彻底避让整点并发与风控", "category": "member", "default_time": "10:05", "fixed_time": True, "time_label": "六场 10/11/12/14/16/19点 (xx:05错峰)"},
+    "svip_rebate": {"id": "svip_rebate", "label": "抢SVIP专属返利券", "tip": "SVIP专属大额返利券每日 09:00:00 准点秒杀 (官方特权: SVIP2+ 或 VIP5+ 均可享受)", "category": "member", "vip": "SVIP2+ / VIP5+", "default_time": "09:00", "fixed_time": True, "time_label": "09:00 固定"},
+    "brand_flash": {"id": "brand_flash", "label": "抢SVIP大牌券", "tip": "每日 09:30:00 准点抢额外放量大牌神券（独立通道，绝不消耗每月保底张数）", "category": "member", "vip": "SVIP2+ / VIP5+", "default_time": "09:30", "fixed_time": True, "time_label": "09:30 固定"},
+    "media_vip": {"id": "media_vip", "label": "抢每月影音VIP", "tip": "影音会员VIP周卡(网易云音乐/腾讯视频等)每日三场 (10/17/20点)，智能检测本月余量与历史记录", "category": "member", "vip": "SVIP4+ / VIP5+", "default_time": "10:00", "fixed_time": True, "time_label": "三场 10/17/20点"},
+    "free_order": {"id": "free_order", "label": "抢每月免单券", "tip": "外卖霸王餐全额免单券每日 14:00:00 准点秒杀", "category": "member", "vip": "SVIP5+ / VIP6", "default_time": "14:00", "fixed_time": True, "time_label": "14:00 固定"},
+
+    # --- 资产守护与双返利监控 (custom) ---
+    "auto_withdraw": {
+        "id": "auto_withdraw",
+        "label": "自动提现",
+        "tip": "按设定金额与频次自动将钱包蚕豆提现到绑定账户；默认关闭，含余额门槛、单笔上限、每日次数与当日幂等保护",
+        "category": "custom",
+        "default_time": "10:30"
+    },
+    "expire_remind": {"id": "expire_remind", "label": "凭据/JWT到期预警", "tip": "监控小蚕凭据与JWT有效期，提前推送防掉线", "category": "custom", "default_time": "08:00"},
+    "coupon_remind": {"id": "coupon_remind", "label": "卡券/红包到期提醒", "tip": "每日早间核查账户中即将失效的特权券并主动推送", "category": "custom", "default_time": "08:30"},
+    "dual_rebate_monitor": {
+        "id": "dual_rebate_monitor",
+        "label": "美团同店双返利监控",
+        "tip": "准点扫描美团同店双返利商户，支持下架二次核验防抖",
+        "category": "custom",
+        "default_time": "0 9-23 * * *",
+        "fixed_time": True,
+        "time_label": "1小时固定时段"
+    },
+}
+
+TASK_PARAM_DEFS = {
+    "auto_withdraw": [
+        {"key": "withdraw_type", "label": "提现渠道", "def": 1, "type": "select", "options": [{"label": "支付宝", "value": 1}, {"label": "微信钱包", "value": 0}], "hint": "按账号已绑定的收款账户选择，渠道错配会导致提现失败"},
+        {"key": "amount_yuan", "label": "单次提现金额（元）", "def": 10, "type": "number", "step": "1", "min": 1, "max": 200, "hint": "每次申请提现的固定金额，官方上限 200 元；请与平台规则保持一致"},
+        {"key": "min_balance_yuan", "label": "最低余额门槛（元）", "def": 20, "type": "number", "step": "1", "min": 1, "hint": "仅当钱包余额高于此值才提现，预留余额避免影响其他任务"},
+        {"key": "max_per_day", "label": "每日最多提现次数", "def": 1, "type": "number", "step": "1", "min": 1, "max": 4, "hint": "单账号单日提现次数硬上限，默认为 1 次，避免高频资金操作"},
+    ],
+    "dual_rebate_monitor": [
+        {
+            "key": "interval_minutes",
+            "label": "固定时间段",
+            "def": 60,
+            "type": "select",
+            "options": [
+                {"label": "1小时", "value": 60},
+                {"label": "30分钟", "value": 30},
+                {"label": "2小时", "value": 120}
+            ],
+            "hint": "固定巡检时段：默认1小时，可选30分钟或2小时。频率过高易触发平台风控"
+        },
+        {"key": "active_hours_only", "label": "仅在营业时段巡检", "def": True, "type": "check", "hint": "开启后仅在营业时段运行，夜间自动休眠静默，防风控与打扰"},
+        {"key": "confirm_removal", "label": "下架二次核验保护", "def": True, "type": "check", "hint": "商户缺失时连续2轮巡检均未检出才确认为已下架，杜绝接口偶发异常导致的误报"},
+        {"key": "max_stores", "label": "扫描商户范围上限", "def": 300, "type": "number", "step": "50", "min": 100, "max": 800, "hint": "按距离由近及远流式扫描的美团商户数上限，建议200至500家"},
+        {"key": "keyword", "label": "关键词优先过滤", "def": "", "type": "string", "hint": "指定优先扫描的品类或品牌关键词，留空则扫描全商圈"},
+        {"key": "notify_on_initial", "label": "首轮全量基准推送", "def": True, "type": "check", "hint": "任务开启或跨天重置后的第一轮扫描，是否推送完整基准商户清单"}
+    ],
+    "redpack_rain": [
+        {"key": "click_num", "label": "上报抓取点击数", "def": 15, "type": "number", "step": "1", "min": 1, "max": 99, "hint": "模拟在红包雨过程中成功点击并抓取的红包数量（参考默认值15）"},
+        {"key": "jitter", "label": "点击随机抖动值", "def": 5, "type": "number", "step": "1", "min": 0, "max": 20, "hint": "实际提交数量将在 click_num ± jitter 之间浮动（如 10~20 次），拟真防风控"},
+        {"key": "game_wait_sec", "label": "雨落拟真等待时长（秒）", "def": 28, "type": "number", "step": "1", "min": 10, "max": 45, "hint": "成功接入场次后模拟红包下落和交互等待的时间（实测约 28~35 秒）后再上报结算"}
+    ],
+    "group_lottery": [
+        {"key": "draw_sec", "label": "转盘抽奖间隔秒数", "def": 0.35, "type": "number", "step": "0.05", "min": 0.1, "max": 5.0, "hint": "每次抽奖间隔时间（建议 0.2~0.5 秒），兼顾极速执行与拟真防风控"}
+    ],
+    "vip_expand": [
+        {"key": "receive_help", "label": "膨胀助力（可被助力）", "def": True, "type": "check", "hint": "开启后允许参与会员膨胀金互助助力"}
+    ],
+    "expire_remind": [
+        {"key": "warn_days", "label": "提前预警天数", "def": 3, "type": "number", "step": "1", "min": 0, "hint": "凭据剩余有效天数小于等于此值时触发预警"},
+        {"key": "jwt_check", "label": "核验 JWT 有效期", "def": True, "type": "check", "hint": "主动解码并核验小蚕 JWT 真实生命周期"}
+    ],
+    "coupon_remind": [
+        {"key": "warn_hours", "label": "提前预警小时数", "def": 24, "type": "number", "step": "1", "min": 1, "hint": "券过期前多少小时发送到期提醒"}
+    ],
+    "flash_sale": [
+        {
+            "key": "target_products",
+            "label": "目标抢兑产品（按需勾选，可多选）",
+            "def": [],
+            "type": "multi_select",
+            "options": [
+                {"label": "【14:00场】通用大牌券 (SVIP: 4万 / VIP: 8万元宝, 限量50份)", "value": "brand_card"},
+                {"label": "【14:00场】霸王餐免单券 (SVIP: 6万 / VIP: 12万元宝, 限量10份)", "value": "free_order"},
+                {"label": "【09:00场】1元小蚕红包 (SVIP: 4千 / VIP: 8千元宝, 限量200份)", "value": "redpack_1"},
+                {"label": "【09:00场】2元小蚕红包 (SVIP: 8千 / VIP: 1.6万元宝, 限量200份)", "value": "redpack_2"},
+                {"label": "【09:00场】3元小蚕红包 (SVIP: 1.2万 / VIP: 2.4万元宝, 限量80份)", "value": "redpack_3"},
+                {"label": "【18:00场】110%返利券 (SVIP: 8千 / VIP: 1.5万元宝, 限量200份)", "value": "rebate_card"},
+                {"label": "【18:00场】超时复活券 (SVIP: 3.2万 / VIP: 6.4万元宝, 限量50份)", "value": "relive_card"}
+            ],
+            "hint": "重要：仅在勾选产品的对应场次准点抢兑。未勾选任何商品时任务自动静默待命，绝不擅自消耗任何元宝！"
+        },
+        {
+            "key": "goods_ids",
+            "label": "自定义指定商品ID（选填备用）",
+            "def": "",
+            "type": "string",
+            "hint": "选填：如需抢非上述列表的特殊商品，可在此输入官方 exchange_id（多个以英文逗号分隔）"
+        }
+    ]
+}
+
+
+def _location_required_msg(acc: Optional[Dict[str, Any]], fallback_key: str = "") -> str:
+    nick = (acc.get("nickname") if acc else "") or fallback_key or "当前账号"
+    return f"账号【{nick}】尚未绑定有效定位地址，请先绑定地址后再使用"
+
+
+def _require_account_location(acc: Optional[Dict[str, Any]], fallback_key: str = "") -> int:
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if not db.has_valid_location(acc):
+        raise HTTPException(status_code=400, detail=_location_required_msg(acc, fallback_key))
+    return int(acc["city_code"])
+
+
+# ---------------- 1. 账号托管接口 ---------------- #
+
+@router.get("/accounts")
+async def get_accounts():
+    """获取所有托管账号 (包含小蚕与美团官方账号)"""
+    accounts = db.get_all_accounts()
+    for acc in accounts:
+        # 如果是美团官方账号，跳过小蚕官方 RPC 资产抓取
+        if acc.get("platform") == "meituan":
+            continue
+        # 仅在账号缺少 silk_id（官方唯一标识）时才直连官方补全，且 30 分钟最多一次。
+        # 绝不再因「资产/成单为 0」自动同步：那是账号真实状态，且会让同步某个账号时
+        # 顺带触发其他账号的官方请求与凭据流水（GET 接口应保持只读、无副作用）。
+        if acc.get("token") and not acc.get("silk_id"):
+            last_sync = float(acc.get("last_official_sync") or 0)
+            if time.time() - last_sync >= 1800:
+                try:
+                    enriched = await _enrich_and_save_account(acc)
+                    acc.update(enriched)
+                except Exception:
+                    pass
+    return {"ok": True, "accounts": accounts, "total": len(accounts)}
+
+
+@router.post("/accounts")
+async def create_or_update_account(data: Dict[str, Any] = Body(...)):
+    """手动添加或更新小蚕账号（支持自动去重合并，防止重复生成多账号）"""
+    token = (data.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token 不能为空")
+
+    # 尝试真实解码 JWT Payload 提取真实 Silk ID 与到期时间
+    is_valid, payload, msg = decode_jwt_payload(token)
+    if is_valid and payload:
+        if not data.get("silk_id"):
+            data["silk_id"] = extract_silk_id_from_payload(payload)
+        exp = payload.get("exp")
+        if exp and not data.get("expires_at"):
+            try:
+                data["expires_at"] = time_service.format_ts(int(exp), "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+
+    if not data.get("client_mode"):
+        data["client_mode"] = "app"
+
+    saved = await _enrich_and_save_account(data)
+    key = saved["key"]
+
+    # 默认初始化开启核心任务
+    configs = db.get_task_configs(key)
+    if not configs:
+        for tid, meta in TASK_META.items():
+            default_on = tid in ("yb_sign", "yb_task", "vip_expand", "brand_flash")
+            db.save_task_config(key, tid, enabled=default_on, cron_time=meta["default_time"])
+
+    scheduler.reload_schedules()
+    action_desc = "更新" if saved.get("is_updated") else "接入"
+    return {
+        "ok": True,
+        "account": saved,
+        "is_updated": saved.get("is_updated", False),
+        "message": f"成功{action_desc}小蚕账号【{saved.get('nickname', '小蚕用户')}】！"
+    }
+
+
+@router.put("/accounts/{key}")
+@router.post("/accounts/{key}/profile")
+async def update_account_profile_endpoint(key: str, data: Dict[str, Any] = Body(...)):
+    """更新小蚕账号资料 (自定义昵称、Silk ID、绑定定位、会员等级、到期时间等)"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    loc_keys = ("city_code", "city_name", "longitude", "latitude", "address_name", "short_name", "full_address", "location_source", "location_source_name", "location_remark")
+    if any(k in data for k in loc_keys):
+        merged_loc = {
+            "city_code": data.get("city_code", acc.get("city_code")),
+            "city_name": data.get("city_name", acc.get("city_name")),
+            "longitude": data.get("longitude", acc.get("longitude")),
+            "latitude": data.get("latitude", acc.get("latitude")),
+        }
+        is_clearing = (
+            int(data.get("city_code") or 0) == 0
+            and not str(data.get("city_name") or "").strip()
+            and not str(data.get("longitude") or "").strip()
+            and not str(data.get("latitude") or "").strip()
+        )
+        if not is_clearing and not db.has_valid_location(merged_loc):
+            raise HTTPException(status_code=400, detail="定位信息不完整：必须包含有效的城市代码、城市名称与非零经纬度")
+
+    updated = db.update_account_profile(key, data)
+    try:
+        from ..core.appointment_worker import invalidate_worker_cache
+        invalidate_worker_cache()
+    except Exception:
+        pass
+    return {"ok": True, "account": updated, "message": "账号资料已更新"}
+
+
+@router.get("/accounts/{key}/notify-config")
+async def get_account_notify_config_endpoint(key: str):
+    """获取指定账号的通知模式与独立通道配置"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    cfg_data = db.get_account_notify_config(key)
+    return {"ok": True, "data": cfg_data}
+
+
+@router.post("/accounts/{key}/notify-config")
+async def save_account_notify_config_endpoint(key: str, data: Dict[str, Any] = Body(...)):
+    """保存指定账号的通知模式与独立通道配置"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    mode = str(data.get("notify_mode") or "global").strip()
+    config = data.get("notify_config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    ok = db.set_account_notify_config(key, mode, config)
+    if ok:
+        return {"ok": True, "message": "账号专属通知设置已保存"}
+    raise HTTPException(status_code=500, detail="保存通知配置失败")
+
+
+@router.post("/accounts/{key}/test-notify")
+async def test_account_notify_endpoint(key: str, data: Dict[str, Any] = Body(...)):
+    """即时测试指定账号的专属通知通道"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    mode = str(data.get("notify_mode") or "global").strip()
+    config = data.get("notify_config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    res = await notifier.test_account_channel(key, mode, config)
+    return res
+
+
+@router.post("/accounts/{key}/sync")
+async def sync_account_endpoint(key: str):
+    """一键同步指定账号的官方档案与钱包资产"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    if acc.get("platform") == "meituan":
+        from ..meituan.worker import claim_single_account
+        claim_res = await asyncio.to_thread(claim_single_account, key)
+        updated = db.get_account_by_key(key)
+        return {"ok": True, "account": updated, "message": claim_res.get("formatted_text") or "美团账号领券执行完毕"}
+
+    try:
+        updated = await _enrich_and_save_account(acc)
+        return {"ok": True, "account": updated, "message": "账号资产与官方档案已成功同步！"}
+    except Exception as e:
+        logger.error(f"同步账号资产失败: {e}")
+        return {"ok": False, "message": f"同步失败: {str(e)}"}
+
+
+@router.get("/accounts/{key}/detail")
+async def get_account_detail_endpoint(key: str):
+    """获取指定账号的全面详情（包含个人信息、元宝状态、特权卡券列表与可用红包列表）"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    if acc.get("platform") == "meituan":
+        return {
+            "ok": True,
+            "account": acc,
+            "card_stats": {"can_use_number": acc.get("last_claimed_count", 0), "expiring_soon_number": 0},
+            "cards": [],
+            "redpack_stats": {"num": 0},
+            "redpacks": [],
+            "user_info": {
+                "nickname": acc.get("nickname"),
+                "avatar": acc.get("avatar"),
+            },
+            "task_info": {}
+        }
+
+    token = acc.get("token")
+    silk_id = acc.get("silk_id")
+    user_id = acc.get("user_id")
+
+    # 官方网关 WAF 冷却为全局状态：某账号触发风控后，其他账号详情读取也会被前置退避。
+    # 直接返回明确的冷却提示，避免静默返回空数据让前端误以为账号无资产。
+    if token and is_waf_blocked():
+        cooldown = get_waf_cooldown_seconds()
+        return {
+            "ok": False,
+            "code": "WAF_COOLDOWN",
+            "message": format_waf_block_message(cooldown=cooldown),
+            "cooldown_seconds": cooldown,
+            "account": acc,
+            "user_info": {
+                "nickname": acc.get("nickname"),
+                "avatar": acc.get("avatar"),
+            },
+            "task_info": {},
+            "card_stats": {"can_use_number": 0, "expiring_soon_number": 0},
+            "cards": [],
+            "redpack_stats": {"num": 0},
+            "redpacks": []
+        }
+
+    if not db.has_valid_location(acc):
+        return {
+            "ok": True,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "message": _location_required_msg(acc, key),
+            "account": acc,
+            "user_info": {
+                "nickname": acc.get("nickname"),
+                "avatar": acc.get("avatar"),
+            },
+            "task_info": {},
+            "card_stats": {"can_use_number": 0, "expiring_soon_number": 0},
+            "cards": [],
+            "redpack_stats": {"num": 0},
+            "redpacks": []
+        }
+
+    city_code = int(acc["city_code"])
+
+    card_stats = {"can_use_number": 0, "expiring_soon_number": 0}
+    cards = []
+    redpack_stats = {"num": 0}
+    redpacks = []
+    user_info = {}
+    task_info = {}
+
+    if token:
+        # 1. 抓取用户卡券数量与卡券列表
+        try:
+            cnum_res = await client.get_user_card_number(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+            if isinstance(cnum_res, dict):
+                card_stats["can_use_number"] = cnum_res.get("can_use_number", 0)
+                card_stats["expiring_soon_number"] = cnum_res.get("expiring_soon_number", 0)
+        except Exception as e:
+            logger.warning(f"获取账号卡券统计失败: {e}")
+
+        try:
+            clist_res = await client.get_user_card_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, status=0, offset=0, number=100)
+            if isinstance(clist_res, dict) and clist_res.get("list"):
+                cards = clist_res["list"]
+        except Exception as e:
+            logger.warning(f"获取账号可用卡券列表失败: {e}")
+
+        # 2. 抓取红包数量与红包列表
+        try:
+            rp_res = await client.get_user_redpack_num(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+            if isinstance(rp_res, dict):
+                redpack_stats["num"] = rp_res.get("num", 0)
+        except Exception as e:
+            logger.warning(f"获取账号红包数量失败: {e}")
+
+        try:
+            rplist_res = await client.get_app_redpack_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, page=1, page_size=50)
+            if isinstance(rplist_res, dict) and rplist_res.get("unused_items"):
+                redpacks = rplist_res["unused_items"]
+        except Exception as e:
+            logger.warning(f"获取账号红包列表失败: {e}")
+
+        # 3. 抓取用户详情 (VIP, 余额, 头像)
+        try:
+            uinfo_res = await client.get_user_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+            if isinstance(uinfo_res, dict) and uinfo_res.get("user_info"):
+                user_info = uinfo_res["user_info"]
+
+                # 实时同步最新会员与资产信息至数据库
+                up_fields = {}
+                vinfo = user_info.get("vip_level_info") or {}
+                if vinfo.get("new_level") is not None:
+                    up_fields["vip_level"] = int(vinfo["new_level"])
+                    up_fields["is_plus"] = 1 if vinfo.get("is_plus") else 0
+                    up_fields["vip_score"] = int(vinfo.get("score") or 0)
+                    up_fields["vip_expired_at"] = int(vinfo.get("expired_at") or 0)
+                elif user_info.get("client_vip", {}).get("level") is not None:
+                    up_fields["vip_level"] = int(user_info["client_vip"]["level"])
+                elif user_info.get("now_vip_info", {}).get("level") is not None:
+                    up_fields["vip_level"] = int(user_info["now_vip_info"]["level"])
+
+                if user_info.get("silk") is not None:
+                    up_fields["silk"] = int(user_info["silk"])
+                if user_info.get("withdrawing") is not None:
+                    up_fields["withdrawing"] = int(user_info["withdrawing"])
+                if user_info.get("withdraw_total") is not None:
+                    up_fields["withdraw_total"] = int(user_info["withdraw_total"])
+                if user_info.get("completed_number") is not None:
+                    up_fields["completed_number"] = int(user_info["completed_number"])
+                if user_info.get("nickname"):
+                    up_fields["nickname"] = user_info["nickname"]
+                if user_info.get("avatar"):
+                    up_fields["avatar"] = user_info["avatar"]
+                if user_info.get("phone"):
+                    up_fields["phone"] = user_info["phone"]
+                if user_info.get("real_name"):
+                    up_fields["real_name"] = user_info["real_name"]
+
+                if up_fields:
+                    updated_acc = db.update_account_profile(key, up_fields)
+                    if updated_acc:
+                        acc = updated_acc
+        except Exception as e:
+            logger.warning(f"获取账号用户详情失败: {e}")
+
+        # 4. 获取元宝乐园资产数据
+        try:
+            t_res = await client.get_user_task_v2(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+            if isinstance(t_res, dict) and t_res.get("data"):
+                task_info = t_res["data"]
+        except Exception as e:
+            logger.warning(f"获取账号元宝数据失败: {e}")
+
+    return {
+        "ok": True,
+        "account": acc,
+        "user_info": user_info,
+        "task_info": task_info,
+        "card_stats": card_stats,
+        "cards": cards,
+        "redpack_stats": redpack_stats,
+        "redpacks": redpacks
+    }
+
+
+@router.get("/accounts/{key}/cards")
+async def get_account_cards_endpoint(key: str, status: int = Query(0, description="0未使用, 1已使用, 2已过期")):
+    """按状态获取特权卡券列表 (0未使用, 1已使用, 2已过期)"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    token = acc.get("token")
+    silk_id = acc.get("silk_id")
+    user_id = acc.get("user_id")
+
+    if not db.has_valid_location(acc):
+        return {
+            "ok": False,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "message": _location_required_msg(acc, key),
+            "cards": [],
+            "status": status
+        }
+
+    city_code = int(acc["city_code"])
+    cards = []
+    if token:
+        try:
+            res = await client.get_user_card_list(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, status=status, offset=0, number=100)
+            cards = res.get("list") or []
+        except Exception as e:
+            logger.warning(f"获取卡券失败: {e}")
+    return {"ok": True, "cards": cards, "status": status}
+
+
+@router.delete("/accounts/{key}")
+async def remove_account(key: str):
+    """删除/退出小蚕账号，彻底级联清除所有关联数据与内存任务"""
+    db.delete_account(key)
+    scheduler.reload_schedules()
+    try:
+        from ..protocol.client import clear_waf_block
+        clear_waf_block()
+    except Exception:
+        pass
+    return {"ok": True, "message": "账号已安全退出并彻底清除全部关联数据"}
+
+
+
+
+# ---------------- 2. 真实 Token 智能解析与校验 ---------------- #
+
+@router.post("/accounts/parse-token")
+async def parse_token_endpoint(data: Dict[str, Any] = Body(...)):
+    """从用户粘贴的任意抓包文本、cURL 命令或请求头中智能提取真实 Token 并解码，自动补全真实 Silk ID"""
+    raw_text = data.get("raw_text") or ""
+    token = extract_token_from_text(raw_text)
+    if not token:
+        return {
+            "ok": False,
+            "message": "未能从输入文本中检测到有效的小蚕凭证（需包含 eyJ 开头的 JWT 或 x-Sivir 字段）"
+        }
+
+    is_valid, payload, msg = decode_jwt_payload(token)
+    silk_id = extract_silk_id_from_text(raw_text) or extract_silk_id_from_payload(payload)
+    user_id = extract_user_id_from_payload(payload)
+    exp = payload.get("exp")
+    exp_date = time_service.format_ts(int(exp), "%Y-%m-%d %H:%M:%S") if exp else "长期有效"
+    city_code = extract_city_code_from_text(raw_text) or 0
+
+    nickname = ""
+    avatar = ""
+    vip_level = 5
+
+    # 尝试直连小蚕官方接口获取真实官方资料与精确 Silk ID (解决 Linux/手动添加缺失 silk_id 问题)
+    if is_valid and token:
+        try:
+            info_res = await client.get_user_info(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+            uinfo = info_res.get("user_info") or {}
+            official_silk_id = str(
+                uinfo.get("silk_id")
+                or uinfo.get("id")
+                or info_res.get("silk_id")
+                or ""
+            ).strip()
+            if official_silk_id and official_silk_id != "0":
+                silk_id = official_silk_id
+            if uinfo.get("nickname"):
+                nickname = uinfo["nickname"]
+            if uinfo.get("avatar"):
+                avatar = uinfo["avatar"]
+            vinfo = uinfo.get("vip_level_info") or {}
+            if vinfo.get("new_level") is not None:
+                vip_level = vinfo["new_level"]
+        except Exception as e:
+            logger.info(f"解析凭证时直连小蚕查询官方资料跳过: {e}")
+
+    # 优先查重匹配已有账号资料（若已存在则直接读取昵称、头像、城市）
+    existing = db.find_account(silk_id=silk_id, user_id=user_id, token=token)
+    if existing:
+        nickname = existing.get("nickname") or nickname or (f"小蚕用户_{silk_id[-4:]}" if silk_id else "小蚕用户")
+        avatar = existing.get("avatar") or avatar
+        city_code = existing.get("city_code") or city_code
+        vip_level = existing.get("vip_level") or vip_level
+    else:
+        if not nickname:
+            nickname = f"小蚕用户_{silk_id[-4:]}" if silk_id else (f"小蚕用户_{user_id[-4:]}" if user_id else "小蚕微信用户")
+
+    return {
+        "ok": True,
+        "token": token,
+        "silk_id": silk_id,
+        "user_id": user_id,
+        "is_valid": is_valid,
+        "message": msg,
+        "exp_date": exp_date,
+        "city_code": city_code,
+        "nickname": nickname,
+        "avatar": avatar,
+        "vip_level": vip_level,
+        "client_mode": "app"
+    }
+
+
+@router.post("/accounts/verify-token")
+async def verify_token_endpoint(data: Dict[str, Any] = Body(...)):
+    """验证 Token 真实有效性与过期状态"""
+    token = (data.get("token") or "").strip()
+    raw_text = data.get("raw_text") or ""
+    if not token:
+        raise HTTPException(status_code=400, detail="Token 不能为空")
+
+    is_valid, payload, msg = decode_jwt_payload(token)
+    if not is_valid:
+        return {"ok": False, "valid": False, "message": msg}
+
+    silk_id = extract_silk_id_from_text(raw_text) or extract_silk_id_from_payload(payload)
+    user_id = extract_user_id_from_payload(payload)
+    if not silk_id and token:
+        try:
+            info_res = await client.get_user_info(token=token, silk_id="", user_id=user_id)
+            uinfo = info_res.get("user_info") or {}
+            official_silk_id = str(uinfo.get("silk_id") or uinfo.get("id") or info_res.get("silk_id") or "").strip()
+            if official_silk_id and official_silk_id != "0":
+                silk_id = official_silk_id
+        except Exception:
+            pass
+
+    exp = payload.get("exp")
+    exp_str = time_service.format_ts(int(exp), "%Y-%m-%d %H:%M:%S") if exp else "长期有效"
+    return {
+        "ok": True,
+        "valid": True,
+        "message": f"小蚕凭据有效（Silk ID: {silk_id or '已解析'}，有效期至: {exp_str}）",
+        "silk_id": silk_id,
+        "expires_at": exp_str
+    }
+
+
+# ---------------- 3. 电脑微信无感内存直连 (免配置·首选) ---------------- #
+
+async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[XiaoCanClient] = None) -> Dict[str, Any]:
+    # 短窗口去重（内存级防并发重入）：持久化冷却由 accounts.last_official_sync 控制。
+    # 缺 silk_id 的自愈场景不能跳过（那正是要靠同步补全）。
+    dedup_key = _enrich_dedup_key(cred)
+    now_ts = time.time()
+    if dedup_key and cred.get("silk_id"):
+        last_ts = _enrich_recent_ts.get(dedup_key, 0.0)
+        if last_ts and now_ts - last_ts < _ENRICH_DEDUP_WINDOW_SEC:
+            cached = None
+            if cred.get("key"):
+                cached = db.get_account_by_key(str(cred["key"]))
+            if not cached:
+                cached = db.find_account(silk_id=str(cred["silk_id"]))
+            if not cached and cred.get("token"):
+                cached = db.find_account(token=str(cred["token"]))
+            if cached:
+                logger.info(f"账号官方资料同步短窗口内重复触发，已跳过: {cached.get('nickname') or cached['key']}")
+                return cached
+    if dedup_key:
+        _enrich_recent_ts[dedup_key] = now_ts
+
+    active_client = rpc_client or client
+    token = cred.get("token", "")
+    silk_id = cred.get("silk_id") or ""
+    user_id = cred.get("user_id") or ""
+    expires_at = cred.get("expires_at") or "长期有效"
+    raw_nick = cred.get("nickname") or ""
+    if not raw_nick or raw_nick in ("xcmap", "小蚕用户", "小蚕微信用户"):
+        nickname = f"小蚕用户_{silk_id[-4:]}" if (silk_id and len(silk_id) >= 4) else "小蚕微信用户"
+    else:
+        nickname = raw_nick
+
+    avatar = cred.get("avatar") or ""
+    vip_level = cred.get("vip_level") or 1
+    is_plus = int(cred.get("is_plus", 0))
+    phone = cred.get("phone") or ""
+    real_name = cred.get("real_name") or ""
+    vip_score = cred.get("vip_score") or 0
+    vip_expired_at = cred.get("vip_expired_at") or 0
+    silk = int(cred.get("silk") or 0)
+    withdrawing = int(cred.get("withdrawing") or 0)
+    withdraw_total = int(cred.get("withdraw_total") or 0)
+    completed_number = int(cred.get("completed_number") or 0)
+    yb_point = int(cred.get("yb_point") or 0)
+    unreceived_points = int(cred.get("unreceived_points") or 0)
+
+    # 尝试直连小蚕官方获取真实微信昵称、头像和官方会员档案及原生资产 (自动补全真实 Silk ID)
+    init_city_code = int(cred.get("city_code") or 0)
+    if token:
+        try:
+            info_res = await active_client.get_user_info(token=token, silk_id=silk_id, user_id=user_id, city_code=init_city_code)
+            uinfo = info_res.get("user_info") or {}
+
+            # 关键：从官方用户详情中提取真正的 Silk ID 回填入库
+            official_silk_id = str(
+                uinfo.get("silk_id")
+                or uinfo.get("id")
+                or info_res.get("silk_id")
+                or ""
+            ).strip()
+            if official_silk_id and official_silk_id != "0":
+                silk_id = official_silk_id
+                if not raw_nick or raw_nick in ("xcmap", "小蚕用户", "小蚕微信用户"):
+                    if not uinfo.get("nickname"):
+                        nickname = f"小蚕用户_{silk_id[-4:]}"
+
+            if uinfo.get("nickname"):
+                nickname = uinfo["nickname"]
+            if uinfo.get("avatar"):
+                avatar = uinfo["avatar"]
+            if uinfo.get("phone"):
+                phone = uinfo["phone"]
+            if uinfo.get("real_name"):
+                real_name = uinfo["real_name"]
+            if uinfo.get("silk") is not None:
+                silk = int(uinfo["silk"])
+            if uinfo.get("withdrawing") is not None:
+                withdrawing = int(uinfo["withdrawing"])
+            if uinfo.get("withdraw_total") is not None:
+                withdraw_total = int(uinfo["withdraw_total"])
+            if uinfo.get("completed_number") is not None:
+                completed_number = int(uinfo["completed_number"])
+
+            # 优先从小蚕官方 vip_level_info 结构读取原生会员属性
+            vinfo = uinfo.get("vip_level_info") or {}
+            if vinfo.get("new_level") is not None:
+                vip_level = vinfo["new_level"]
+                is_plus = 1 if vinfo.get("is_plus") else 0
+                vip_score = vinfo.get("score") or 0
+                vip_expired_at = vinfo.get("expired_at") or 0
+            elif uinfo.get("client_vip", {}).get("level") is not None:
+                vip_level = uinfo["client_vip"]["level"]
+            elif uinfo.get("now_vip_info", {}).get("level") is not None:
+                vip_level = uinfo["now_vip_info"]["level"]
+        except Exception as e:
+            logger.info(f"同步小蚕官方用户详情失败 (使用默认): {e}")
+
+        # 同步元宝乐园原生资产
+        try:
+            task_res = await active_client.get_user_task_v2(token=token, silk_id=silk_id, user_id=user_id, city_code=init_city_code)
+            tdata = task_res.get("data") or {}
+            if tdata.get("yb_point") is not None:
+                yb_point = int(tdata["yb_point"])
+            if tdata.get("unreceived_points") is not None:
+                unreceived_points = int(tdata["unreceived_points"])
+        except Exception as e:
+            logger.info(f"同步小蚕官方元宝资产失败: {e}")
+
+    acc_payload = {
+        "key": str(cred.get("key") or "").strip() or None,
+        "silk_id": silk_id,
+        "user_id": user_id,
+        "nickname": nickname,
+        "avatar": avatar,
+        "token": token,
+        "vip_level": vip_level,
+        "is_plus": is_plus,
+        "phone": phone,
+        "real_name": real_name,
+        "vip_score": vip_score,
+        "vip_expired_at": vip_expired_at,
+        "silk": silk,
+        "withdrawing": withdrawing,
+        "withdraw_total": withdraw_total,
+        "completed_number": completed_number,
+        "yb_point": yb_point,
+        "unreceived_points": unreceived_points,
+        "client_mode": cred.get("client_mode") or "app",
+        "city_code": cred.get("city_code") or 0,
+        "city_name": cred.get("city_name") or "",
+        "longitude": cred.get("longitude") or "",
+        "latitude": cred.get("latitude") or "",
+        "address_name": cred.get("address_name") or "",
+        "short_name": cred.get("short_name") or "",
+        "full_address": cred.get("full_address") or "",
+        "location_source": cred.get("location_source") or "",
+        "location_source_name": cred.get("location_source_name") or "",
+        "location_remark": cred.get("location_remark") or "",
+        "last_official_sync": now_ts,
+        "expires_at": expires_at
+    }
+    saved = db.save_account(acc_payload)
+    key = saved["key"]
+
+    # 记录账号凭据捕获/录入流水 (方便在 Web 端流水中心直观确认)
+    try:
+        job_id = f"job_auth_{key}_{time_service.now_int()}"
+        now_str = time_service.format_now_ms()
+        client_mode = cred.get("client_mode") or "app"
+        mode_text = "代理嗅探捕获" if client_mode == "proxy" else ("微信监听捕获" if client_mode == "wechat" else "账号录入更新")
+        auth_steps = [
+            f"[{now_str}] 账号凭据成功入库: 【{saved.get('nickname', key)}】({mode_text})",
+            f"[{now_str}] 会员特权: {'SVIP' if saved.get('is_plus') else 'VIP'}{saved.get('vip_level', 1)} (成长值: {saved.get('vip_score', 0)})",
+            f"[{now_str}] 资产现况: 蚕豆余额 {float(saved.get('silk', 0)):.2f} / 元宝 {int(saved.get('yb_point', 0)):,}",
+            f"[{now_str}] 自动化调度: 默认任务已自动初始化并装载至调度中心"
+        ]
+        db.add_job_log(job_id, key, "token_capture", "success", "\n".join(auth_steps))
+    except Exception as ae:
+        logger.warning(f"记录账号凭据捕获流水异常: {ae}")
+
+    configs = db.get_task_configs(key)
+    if not configs:
+        for tid, meta in TASK_META.items():
+            default_on = tid in ("yb_task", "vip_expand", "brand_flash")
+            db.save_task_config(key, tid, enabled=default_on, cron_time=meta["default_time"])
+    scheduler.reload_schedules()
+    return saved
+
+
+@router.post("/accounts/{key}/sync")
+async def sync_account_endpoint(key: str):
+    """一键从官方网关深度同步账号资产与资料 (微信昵称、头像、蚕豆余额、累计提现、成单量、元宝)"""
+    acc = db.get_account_by_key(key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    token = acc.get("token")
+    if not token:
+        raise HTTPException(status_code=400, detail="账号未配置有效 Token")
+
+    # 预先核验 Token 有效期
+    is_valid, payload, msg = decode_jwt_payload(token)
+    if not is_valid:
+        return {
+            "ok": False,
+            "message": f"同步失败: {msg}"
+        }
+
+    job_id = f"job_sync_{key}_{time_service.now_int()}"
+    now_str = time_service.format_now_ms()
+    steps = [
+        f"[{now_str}] 启动账号官方资产同步: 【{acc.get('nickname', key)}】",
+        f"[{now_str}] 贯通鉴权 Token: 凭据有效",
+        f"[{now_str}] 向小蚕官方同步用户资料、VIP等级、蚕豆余额与元宝资产..."
+    ]
+    try:
+        enriched = await _enrich_and_save_account(acc)
+        t_ok = time_service.format_now_ms()
+        steps.append(f"[{t_ok}] 官方资产同步完毕: 蚕豆 {float(enriched.get('silk', 0)):.2f} / 元宝 {int(enriched.get('yb_point', 0)):,} / VIP等级 {enriched.get('vip_level', 1)}")
+        try:
+            db.add_job_log(job_id, key, "account_sync", "success", "\n".join(steps))
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "account": enriched,
+            "message": f"成功同步账号【{enriched.get('nickname')}】的最新官方资产与资料！"
+        }
+    except Exception as e:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 同步官方资产异常: {e}")
+        try:
+            db.add_job_log(job_id, key, "account_sync", "error", "\n".join(steps))
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "message": f"同步异常: {e}"
+        }
+
+
+def _save_scanned_account_sync(cred: Dict[str, Any]) -> Dict[str, Any]:
+    """供后台线程安全同步调用的保存账号方法 (保证自动调用官方接口同步真实微信资料)"""
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            asyncio.create_task(_enrich_and_save_account(cred))
+        else:
+            async def _run_with_isolated_client() -> Dict[str, Any]:
+                async with XiaoCanClient() as temp_client:
+                    return await _enrich_and_save_account(cred, rpc_client=temp_client)
+
+            return asyncio.run(_run_with_isolated_client())
+    except Exception as e:
+        logger.error(f"后台线程同步账号详情异常: {e}")
+
+    token = cred.get("token", "")
+    silk_id = cred.get("silk_id") or ""
+    return db.save_account({
+        "silk_id": silk_id,
+        "user_id": cred.get("user_id") or "",
+        "nickname": cred.get("nickname") or f"小蚕用户_{silk_id[-4:] if silk_id else '8888'}",
+        "avatar": cred.get("avatar") or "",
+        "token": token,
+        "vip_level": 1,
+        "city_code": cred.get("city_code") or 0,
+        "city_name": cred.get("city_name") or "",
+        "longitude": cred.get("longitude") or "",
+        "latitude": cred.get("latitude") or "",
+        "expires_at": cred.get("expires_at") or "长期有效"
+    })
+
+
+@router.post("/accounts/wechat-scan")
+async def scan_wechat_endpoint():
+    """
+    立即从当前电脑微信小程序进程中提取小蚕真实鉴权凭证
+    0 配置、0 证书、0 代理、零断网风险
+    """
+    cred = scan_wechat_credentials()
+    if not cred or not cred.get("token"):
+        return {
+            "ok": False,
+            "message": "未能从电脑微信中检测到【小蚕霸王餐】小程序凭证。请先在电脑微信中点击打开一次小蚕小程序，然后点击重试。"
+        }
+
+    saved = await _enrich_and_save_account(cred)
+    nick = saved.get("nickname", "小蚕用户")
+    silk = saved.get("silk_id")
+    silk_text = f" (Silk ID: {silk})" if silk else ""
+    return {
+        "ok": True,
+        "account": saved,
+        "message": f"成功从电脑微信提取到小蚕账号【{nick}】{silk_text}！"
+    }
+
+
+@router.post("/accounts/wechat-listener/start")
+async def start_wechat_listener(data: Optional[Dict[str, Any]] = Body(None)):
+    """开启电脑微信后台自动感知监听（当用户打开微信小程序时，秒级自动抓取并入库）"""
+    timeout = int((data or {}).get("timeout", 120))
+    wechat_listener.start(timeout=timeout, on_captured_callback=_save_scanned_account_sync)
+    return {
+        "ok": True,
+        "message": "已开启微信小程序自动监听，请在电脑微信中点击打开一次【小蚕霸王餐】小程序",
+        "status": wechat_listener.get_status()
+    }
+
+
+@router.post("/accounts/wechat-listener/stop")
+async def stop_wechat_listener():
+    """停止电脑微信自动感知监听"""
+    wechat_listener.stop()
+    return {"ok": True, "message": "已停止微信自动监听", "status": wechat_listener.get_status()}
+
+
+@router.get("/accounts/wechat-listener/status")
+async def get_wechat_listener_status():
+    """获取电脑微信自动监听状态"""
+    return {"ok": True, "status": wechat_listener.get_status()}
+
+
+# 兼容旧版 win_capture 与 proxy-capture 接口（无缝桥接至内存嗅探模式）
+@router.post("/accounts/win_capture/start")
+async def compat_win_capture_start(data: Optional[Dict[str, Any]] = Body(None)):
+    timeout = int((data or {}).get("timeout", 120))
+    wechat_listener.start(timeout=timeout, on_captured_callback=_save_scanned_account)
+    return {
+        "ok": True,
+        "message": "微信直连监听已就绪，请在电脑微信中打开一次【小蚕霸王餐】小程序",
+        "status": wechat_listener.get_status()
+    }
+
+
+@router.post("/accounts/win_capture/stop")
+async def compat_win_capture_stop():
+    wechat_listener.stop()
+    return {"ok": True, "message": "微信抓取已停止", "status": wechat_listener.get_status()}
+
+
+@router.get("/accounts/win_capture/status")
+async def compat_win_capture_status():
+    st = wechat_listener.get_status()
+    return {
+        "ok": True,
+        "status": {
+            "is_running": st.get("is_running", False),
+            "status": st.get("status", "idle"),
+            "account": st.get("account"),
+            "is_win_proxy_active": False,
+            "ca_installed": True
+        }
+    }
+
+
+@router.post("/accounts/proxy-capture/start")
+async def compat_proxy_start(data: Dict[str, Any] = Body(default={})):
+    return await compat_win_capture_start(data)
+
+
+@router.post("/accounts/proxy-capture/stop")
+async def compat_proxy_stop():
+    return await compat_win_capture_stop()
+
+
+@router.get("/accounts/proxy-capture/status")
+async def compat_proxy_status():
+    return await compat_win_capture_status()
+
+
+@router.get("/accounts/win_capture/ca_cert")
+async def download_ca_cert():
+    """下载小蚕助手 CA 根证书 (用于 HTTPS 信任)"""
+    import os
+    from fastapi.responses import FileResponse
+    from ..core.cert_manager import cert_mgr
+    ca_path = cert_mgr.get_ca_cert_path()
+    if os.path.exists(ca_path):
+        return FileResponse(ca_path, media_type="application/x-x509-ca-cert", filename="XiaoCan_Assistant_CA.crt")
+    return {"ok": False, "message": "CA 证书尚未生成"}
+
+
+@router.post("/accounts/win_capture/install_ca")
+async def install_ca_cert():
+    """一键触发 Windows 根证书安装确认"""
+    from ..core.cert_manager import cert_mgr
+    ok = cert_mgr.install_ca_cert()
+    return {
+        "ok": ok,
+        "message": "已在系统桌面弹出 Windows 安全警告窗口，请点击【是(Y)】完成安装" if ok else "唤起证书安装失败，请手动下载证书安装",
+        "ca_installed": cert_mgr.is_ca_installed()
+    }
+
+
+# ---------------- 3. 自动化任务开关与配置 ---------------- #
+
+@router.get("/tasks")
+async def get_tasks(account_key: str = Query(...)):
+    """获取指定账号的任务配置列表 (包含动态参数与参数元数据模板)"""
+    configs = {c["task_id"]: c for c in db.get_task_configs(account_key)}
+    result = []
+
+    for tid, meta in TASK_META.items():
+        cfg = configs.get(tid, {})
+        param_defs = TASK_PARAM_DEFS.get(tid, [])
+        # 构建默认参数并合并已存储的参数
+        merged_params = {}
+        for pd in param_defs:
+            merged_params[pd["key"]] = pd["def"]
+        if isinstance(cfg.get("params"), dict):
+            merged_params.update(cfg["params"])
+
+        # 查询 APScheduler 中此任务的下一次真实触发时刻
+        job_id = f"{account_key}_{tid}"
+        next_run_time = None
+        try:
+            job = scheduler.scheduler.get_job(job_id)
+            if job and getattr(job, "next_run_time", None):
+                next_run_time = scheduler.format_job_next_run_time(job)
+        except Exception:
+            pass
+
+        result.append({
+            "task_id": tid,
+            "label": meta["label"],
+            "tip": meta["tip"],
+            "category": meta["category"],
+            "vip": meta.get("vip", ""),
+            "enabled": bool(cfg.get("enabled", 0)),
+            "cron_time": cfg.get("cron_time") or meta["default_time"],
+            "fixed_time": meta.get("fixed_time", False),
+            "time_label": (
+                (
+                    "30分钟固定时段" if int(merged_params.get("interval_minutes", 60) or 60) == 30
+                    else "2小时固定时段" if int(merged_params.get("interval_minutes", 60) or 60) == 120
+                    else "1小时固定时段"
+                )
+                if tid == "dual_rebate_monitor"
+                else meta.get("time_label", "")
+            ),
+            "next_run_time": next_run_time,
+            "params": merged_params,
+            "param_defs": param_defs
+        })
+
+    return {"ok": True, "tasks": result}
+
+
+@router.post("/tasks/toggle")
+async def toggle_task(data: Dict[str, Any] = Body(...)):
+    """切换任务开关、保存执行时间与高级参数"""
+    account_key = data["account_key"]
+    task_id = data["task_id"]
+    enabled = bool(data.get("enabled", False))
+    cron_time = data.get("cron_time")
+    params = data.get("params")
+
+    acc = db.get_account_by_key(account_key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if enabled and not db.has_valid_location(acc):
+        raise HTTPException(
+            status_code=400,
+            detail=f"开启【{TASK_META.get(task_id, {}).get('label', task_id)}】前，{_location_required_msg(acc, account_key)}"
+        )
+
+    if task_id == "dual_rebate_monitor":
+        if isinstance(params, dict) and "interval_minutes" in params:
+            try:
+                im = int(params["interval_minutes"])
+                if im not in (30, 60, 120):
+                    params["interval_minutes"] = 60
+            except Exception:
+                params["interval_minutes"] = 60
+
+        if enabled:
+            from ..core.notifier import is_any_notify_channel_enabled
+            if not is_any_notify_channel_enabled():
+                raise HTTPException(
+                    status_code=400,
+                    detail="开启【美团同店双返利监控】任务前，必须先在【系统设置】中配置并启用至少一种通知渠道！"
+                )
+
+    db.save_task_config(account_key, task_id, enabled, cron_time, params)
+    scheduler.reload_schedules()
+    return {"ok": True, "message": f"任务 [{TASK_META.get(task_id, {}).get('label', task_id)}] 配置已更新生效"}
+
+
+@router.get("/flash-sale/shelf")
+async def get_flash_sale_shelf_endpoint(account_key: str = Query(...)):
+    """
+    获取指定账号的官方元宝秒杀货架实时数据 (包含 09:00 / 14:00 / 18:00 三大场次在线库存、实时剩余、会员折扣与个人限额)
+    """
+    acc = db.get_account_by_key(account_key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    token = acc.get("token") or ""
+    silk_id = acc.get("silk_id")
+    user_id = acc.get("user_id")
+    is_plus = bool(acc.get("is_plus", 0))
+    vip_level = int(acc.get("vip_level", 5) or 5)
+    city_code = int(acc.get("city_code") or 0)
+    location_bound = db.has_valid_location(acc)
+
+    OFFICIAL_CATALOG = {
+        "redpack_1": {
+            "name": "1元小蚕红包", "round": "09:00", "round_sec": 32400,
+            "svip_silk": 4000, "vip_silk": 8000, "svip_id": 200, "vip_id": 190, "stock": 200,
+            "tip": "通用小蚕红包，满返与比例返通用 (72小时有效)"
+        },
+        "redpack_2": {
+            "name": "2元小蚕红包", "round": "09:00", "round_sec": 32400,
+            "svip_silk": 8000, "vip_silk": 16000, "svip_id": 199, "vip_id": 189, "stock": 200,
+            "tip": "通用小蚕红包，满返与比例返通用 (72小时有效)"
+        },
+        "redpack_3": {
+            "name": "3元小蚕红包", "round": "09:00", "round_sec": 32400,
+            "svip_silk": 12000, "vip_silk": 24000, "svip_id": 198, "vip_id": 188, "stock": 80,
+            "tip": "大额通用红包，满返与比例返通用 (72小时有效)"
+        },
+        "brand_card": {
+            "name": "通用大牌券", "round": "14:00", "round_sec": 50400,
+            "svip_silk": 40000, "vip_silk": 80000, "svip_id": 202, "vip_id": 194, "stock": 50,
+            "tip": "大牌商户专属抵扣神券 (72小时有效)"
+        },
+        "free_order": {
+            "name": "霸王餐免单券", "round": "14:00", "round_sec": 50400,
+            "svip_silk": 60000, "vip_silk": 120000, "svip_id": 201, "vip_id": 193, "stock": 10,
+            "tip": "48小时内订单全额免单补贴，至多15元"
+        },
+        "rebate_card": {
+            "name": "110%返利券", "round": "18:00", "round_sec": 64800,
+            "svip_silk": 8000, "vip_silk": 15000, "svip_id": 204, "vip_id": 197, "stock": 200,
+            "tip": "额外多返活动返豆10%(上限2豆，72小时有效)"
+        },
+        "relive_card": {
+            "name": "超时复活券", "round": "18:00", "round_sec": 64800,
+            "svip_silk": 32000, "vip_silk": 64000, "svip_id": 203, "vip_id": 196, "stock": 50,
+            "tip": "168小时内超时取消订单可补单复活"
+        }
+    }
+
+    live_map = {}
+    if location_bound:
+        try:
+            fs_res = await client.list_flash_sale_exchanges(
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                city_code=city_code,
+                new_level=vip_level,
+                is_plus=is_plus
+            )
+            raw_list = fs_res.get("list") or {}
+            live_items = (raw_list.get("svip") if is_plus else raw_list.get("vip")) or []
+            live_map = {it.get("exchange_id"): it for it in live_items if it.get("exchange_id")}
+        except Exception as e:
+            logger.warning(f"获取秒杀实时货架失败 (降级为离线字典): {e}")
+
+    now_dt = time_service.now_dt()
+    now_sec = now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second
+
+    rounds_def = [
+        {"round": "09:00", "round_title": "09:00 早场 (小蚕红包专场)", "round_sec": 32400, "keys": ["redpack_1", "redpack_2", "redpack_3"]},
+        {"round": "14:00", "round_title": "14:00 午场 (大牌与免单专场)", "round_sec": 50400, "keys": ["brand_card", "free_order"]},
+        {"round": "18:00", "round_title": "18:00 晚场 (返利与复活专场)", "round_sec": 64800, "keys": ["rebate_card", "relive_card"]},
+    ]
+
+    result_rounds = []
+    for r_def in rounds_def:
+        r_sec = r_def["round_sec"]
+        if now_sec < r_sec - 1800:
+            status = "upcoming"
+        elif now_sec <= r_sec + 7200:
+            status = "ongoing"
+        else:
+            status = "ended"
+
+        r_items = []
+        for k in r_def["keys"]:
+            meta = OFFICIAL_CATALOG[k]
+            eid = meta["svip_id"] if is_plus else meta["vip_id"]
+            live = live_map.get(eid) or {}
+            raw_name = live.get("goods_name") or meta["name"]
+            clean_name = re.sub(r"[\U00010000-\U0010ffff]|[\u2600-\u27bf]", '', raw_name).strip()
+            price = live.get("community_silk") or (meta["svip_silk"] if is_plus else meta["vip_silk"])
+            stock = live.get("daily_stock") or meta["stock"]
+            left = live.get("left") if live else stock
+            reach = bool(live.get("daily_stock_reach", False))
+            quota = live.get("user_quota_limit", 1)
+
+            r_items.append({
+                "product_key": k,
+                "exchange_id": eid,
+                "goods_name": clean_name,
+                "round_str": r_def["round"],
+                "community_silk": price,
+                "strike_price": live.get("strike_price") or (price * 2),
+                "discount_rate": live.get("discount_rate") or (400 if is_plus else 800),
+                "daily_stock": stock,
+                "left": left,
+                "daily_stock_reach": reach,
+                "user_quota_limit": quota,
+                "goods_banner": live.get("goods_banner") or "",
+                "equity_desc": live.get("equity_desc") or meta["tip"],
+            })
+
+        result_rounds.append({
+            "round": r_def["round"],
+            "round_title": r_def["round_title"],
+            "status": status,
+            "items": r_items
+        })
+
+    cfg = next((c for c in db.get_task_configs(account_key) if c["task_id"] == "flash_sale"), {})
+    current_params = cfg.get("params") or {}
+
+    return {
+        "ok": True,
+        "account": {
+            "key": account_key,
+            "nickname": acc.get("nickname", "未命名账号"),
+            "is_plus": is_plus,
+            "vip_level": vip_level,
+            "yb_point": int(acc.get("yb_point", 0) or 0)
+        },
+        "rounds": result_rounds,
+        "current_params": current_params
+    }
+
+
+@router.post("/flash-sale/exchange")
+async def exchange_flash_sale_endpoint(data: Dict[str, Any] = Body(...)):
+    """
+    即时兑换进行中场次的秒杀商品 (SilkwormCommunity.SilkwormMobileCommunityService.ExchangeGoodsV2)
+    """
+    account_key = data.get("account_key")
+    exchange_id = data.get("exchange_id")
+    goods_name = data.get("goods_name") or f"商品#{exchange_id}"
+    cost_silk = int(data.get("community_silk") or 0)
+
+    if not account_key or not exchange_id:
+        raise HTTPException(status_code=400, detail="缺少必要参数")
+
+    acc = db.get_account_by_key(account_key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    token = acc.get("token") or ""
+    silk_id = acc.get("silk_id")
+    user_id = acc.get("user_id")
+    city_code = _require_account_location(acc, account_key)
+    yb_point = int(acc.get("yb_point", 0) or 0)
+
+    if cost_silk > yb_point:
+        return {"ok": False, "message": f"账户可用元宝不足 ({yb_point:,} < {cost_silk:,})"}
+
+    job_id = f"job_ex_{exchange_id}_{time_service.now_int()}"
+    now_str = time_service.format_now_ms()
+    steps = [
+        f"[{now_str}] 启动元宝秒杀直接兑换: 【{goods_name}】(商品ID #{exchange_id})",
+        f"[{now_str}] 账号核验: 【{acc.get('nickname', account_key)}】(当前可用元宝: {yb_point:,})",
+        f"[{now_str}] 计划消耗元宝: {cost_silk:,} 元宝"
+    ]
+    try:
+        res = await client.exchange_goods_v2(
+            exchange_id=int(exchange_id),
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            city_code=city_code
+        )
+        remaining = max(0, yb_point - cost_silk) if cost_silk > 0 else yb_point
+        if cost_silk > 0:
+            db.update_account_profile(account_key, {"yb_point": remaining})
+
+        from ..core.notifier import send_system_notification, NotificationEvent, NotificationLevel
+        await send_system_notification(
+            title="元宝秒杀直接兑换成功",
+            content=f"账号【{acc.get('nickname', '主控账号')}】成功即时兑换【{goods_name}】(消耗: {cost_silk:,}元宝)！",
+            account_key=account_key,
+            event=NotificationEvent.SPIKE_SUCCESS,
+            level=NotificationLevel.SUCCESS
+        )
+
+        t_ok = time_service.format_now_ms()
+        steps.append(f"[{t_ok}] 官方兑换成功！扣除 {cost_silk:,} 元宝，剩余可用元宝 {remaining:,}")
+        try:
+            db.add_job_log(job_id, account_key, "flash_exchange", "success", "\n".join(steps))
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "message": f"成功兑换【{goods_name}】！消耗 {cost_silk:,} 元宝",
+            "remaining_yb": remaining,
+            "data": res
+        }
+    except XiaoCanRPCError as ce:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 官方兑换响应: {ce.msg} (错误码: {ce.code})")
+        try:
+            db.add_job_log(job_id, account_key, "flash_exchange", "error", "\n".join(steps))
+        except Exception:
+            pass
+        return {"ok": False, "message": f"{ce.msg} (代码: {ce.code})", "code": ce.code}
+    except Exception as e:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 兑换网络异常: {e}")
+        try:
+            db.add_job_log(job_id, account_key, "flash_exchange", "error", "\n".join(steps))
+        except Exception:
+            pass
+        return {"ok": False, "message": f"兑换网络异常: {str(e)}"}
+
+
+@router.post("/tasks/run")
+async def run_task_immediately(data: Dict[str, Any] = Body(...)):
+    """立即手动触发一次任务"""
+    account_key = data.get("account_key")
+    task_id = data.get("task_id")
+    if not account_key:
+        return {"ok": False, "msg": "未指定执行账号，请先选择或登录账号"}
+
+    account = db.get_account_by_key(account_key)
+    if not account:
+        return {"ok": False, "msg": "当前账号不存在或已退出登录，无法执行自动化任务！"}
+
+    res = await scheduler.execute_task_job(account_key, task_id, trigger_type="manual")
+    return res
+
+
+@router.post("/tasks/batch-run-daily")
+async def batch_run_daily_tasks(data: Optional[Dict[str, Any]] = Body(None)):
+    """日常任务打卡 (首页: 当前账号已启用日常打卡; 自动化任务: 全账号批量日常打卡)"""
+    if hasattr(data, "default"):
+        data = None
+    data = data or {}
+    specified_key = data.get("account_key")
+
+    # 1. 区分单账号执行与全账号执行
+    if specified_key:
+        single = db.get_account_by_key(specified_key)
+        if not single or not single.get("is_active", 1):
+            raise HTTPException(status_code=404, detail="指定小蚕账号不存在或已停用")
+        if not db.has_valid_location(single):
+            raise HTTPException(status_code=400, detail=_location_required_msg(single, specified_key))
+        all_accounts = [single]
+    else:
+        all_accounts = [a for a in db.get_all_accounts() if a.get("is_active", 1) and a.get("platform") != "meituan"]
+
+    if not all_accounts:
+        return {
+            "ok": True,
+            "all_ok": True,
+            "message": "当前未配置任何有效账号",
+            "summary": {"xiaocan_accounts_count": 0, "meituan_accounts_count": 0, "total_tasks": 0, "success_tasks": 0},
+            "xiaocan_accounts": [],
+            "meituan_accounts": [],
+            "results": []
+        }
+
+    xiaocan_accounts_res = []
+    flattened_results = []
+    total_tasks = 0
+    success_tasks = 0
+    executed_mt_keys = set()
+
+    # 2. 串行/错峰执行小蚕账号打卡，并严格添加单任务 15s 超时熔断保护
+    for acc in all_accounts:
+        acc_key = acc.get("key")
+        nick = acc.get("nickname") or acc_key
+        acc_task_results = []
+
+        cfg_list = db.get_task_configs(acc_key)
+        cfg_map = {c["task_id"]: c for c in cfg_list}
+
+        if specified_key:
+            # 首页当前账号打卡：仅执行当前账号已经启用的日常任务 (category == 'daily' 且 enabled == 1)
+            run_task_ids = [
+                tid for tid, meta in TASK_META.items()
+                if meta.get("category") == "daily" and bool(cfg_map.get(tid, {}).get("enabled", False))
+            ]
+            if not run_task_ids:
+                return {
+                    "ok": True,
+                    "all_ok": True,
+                    "message": f"当前账号【{nick}】未启用任何日常任务，请先在自动化任务中配置开启",
+                    "summary": {"xiaocan_accounts_count": 1, "meituan_accounts_count": 0, "total_tasks": 0, "success_tasks": 0},
+                    "xiaocan_accounts": [],
+                    "meituan_accounts": [],
+                    "results": []
+                }
+        else:
+            # 自动化页面全账号打卡：优先执行已启用日常，若无单独配置则执行标准日常组合
+            active_daily_ids = [
+                tid for tid, meta in TASK_META.items()
+                if meta.get("category") == "daily" and bool(cfg_map.get(tid, {}).get("enabled", False))
+            ]
+            run_task_ids = active_daily_ids if active_daily_ids else ["yb_task", "vip_expand", "group_lottery"]
+
+        for tid in run_task_ids:
+            if tid == "meituan_coupon":
+                executed_mt_keys.add(acc_key)
+            label = TASK_META.get(tid, {}).get("label", tid)
+            total_tasks += 1
+            try:
+                res = await asyncio.wait_for(
+                    scheduler.execute_task_job(acc_key, tid, trigger_type="batch_daily"),
+                    timeout=25.0
+                )
+                is_ok = bool(res.get("ok", False))
+                out_msg = res.get("output", "")
+                if is_ok:
+                    success_tasks += 1
+                acc_task_results.append({
+                    "task_id": tid,
+                    "label": label,
+                    "ok": is_ok,
+                    "output": out_msg
+                })
+                flattened_results.append({
+                    "task_id": tid,
+                    "account_key": acc_key,
+                    "account_nickname": nick,
+                    "label": f"[{nick}] {label}",
+                    "ok": is_ok,
+                    "output": out_msg
+                })
+            except asyncio.TimeoutError:
+                out_msg = f"任务 [{label}] 执行超时 (15秒熔断保护)"
+                acc_task_results.append({
+                    "task_id": tid,
+                    "label": label,
+                    "ok": False,
+                    "output": out_msg
+                })
+                flattened_results.append({
+                    "task_id": tid,
+                    "account_key": acc_key,
+                    "account_nickname": nick,
+                    "label": f"[{nick}] {label}",
+                    "ok": False,
+                    "output": out_msg
+                })
+            except Exception as e:
+                out_msg = f"执行异常: {str(e)}"
+                acc_task_results.append({
+                    "task_id": tid,
+                    "label": label,
+                    "ok": False,
+                    "output": out_msg
+                })
+                flattened_results.append({
+                    "task_id": tid,
+                    "account_key": acc_key,
+                    "account_nickname": nick,
+                    "label": f"[{nick}] {label}",
+                    "ok": False,
+                    "output": out_msg
+                })
+
+        acc_all_ok = all(t["ok"] for t in acc_task_results) if acc_task_results else True
+        xiaocan_accounts_res.append({
+            "account_key": acc_key,
+            "nickname": nick,
+            "all_ok": acc_all_ok,
+            "tasks": acc_task_results
+        })
+
+        # 多账号间随机等待 0.3~0.6s，防止高频突发并发
+        if len(all_accounts) > 1:
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+
+    # 3. 轮询执行美团全账号神券领取（仅在全账号打卡且未指定单账号时执行）
+    meituan_results = []
+    if not specified_key:
+        try:
+            from ..meituan.worker import claim_all_meituan_accounts
+            mt_res = await asyncio.wait_for(
+                asyncio.to_thread(claim_all_meituan_accounts, force=False, record_log=True, exclude_keys=executed_mt_keys),
+                timeout=90.0
+            )
+            meituan_results = mt_res or []
+            for mr in meituan_results:
+                m_nick = mr.get("nickname") or mr.get("account_key", "美团账号")
+                m_ok = bool(mr.get("success") or mr.get("status") == "skipped")
+                m_out = mr.get("detailed_log") or mr.get("formatted_text") or mr.get("message") or ""
+                total_tasks += 1
+                if m_ok:
+                    success_tasks += 1
+                flattened_results.append({
+                    "task_id": "meituan_coupon",
+                    "account_key": mr.get("account_key"),
+                    "account_nickname": m_nick,
+                    "label": f"[{m_nick}] 美团神券领取",
+                    "ok": m_ok,
+                    "output": m_out
+                })
+        except asyncio.TimeoutError:
+            flattened_results.append({
+                "task_id": "meituan_coupon",
+                "account_key": "all",
+                "account_nickname": "美团账号",
+                "label": "美团全量领券",
+                "ok": False,
+                "output": "美团领券总流程超时 (90秒熔断保护)"
+            })
+        except Exception as e:
+            flattened_results.append({
+                "task_id": "meituan_coupon",
+                "account_key": "all",
+                "account_nickname": "美团账号",
+                "label": "美团全量领券",
+                "ok": False,
+                "output": f"美团领券异常: {str(e)}"
+            })
+
+    all_ok = (total_tasks > 0) and (success_tasks == total_tasks)
+    if specified_key:
+        summary_msg = f"当前账号【{all_accounts[0].get('nickname') or specified_key}】日常打卡完成！共执行 {total_tasks} 项日常，成功 {success_tasks} 项"
+    else:
+        summary_msg = f"全账号日常任务打卡完成！共处理 {len(all_accounts)} 个小蚕账号、{len(meituan_results)} 个美团账号 (成功 {success_tasks}/{total_tasks})"
+
+    return {
+        "ok": True,
+        "all_ok": all_ok,
+        "message": summary_msg,
+        "summary": {
+            "xiaocan_accounts_count": len(all_accounts),
+            "meituan_accounts_count": len(meituan_results),
+            "total_tasks": total_tasks,
+            "success_tasks": success_tasks
+        },
+        "xiaocan_accounts": xiaocan_accounts_res,
+        "meituan_accounts": meituan_results,
+        "results": flattened_results
+    }
+
+
+# ── 美团账号管理与扫码登录接口 ──────────────────────────────────────
+
+@router.get("/meituan/accounts")
+def get_meituan_accounts_list():
+    """获取所有已托管的美团官方账号列表"""
+    accounts = db.get_all_meituan_accounts()
+    return {"ok": True, "accounts": accounts}
+
+
+@router.post("/meituan/accounts")
+def save_or_update_meituan_account(data: Dict[str, Any] = Body(...)):
+    """保存或更新美团账号信息"""
+    key = data.get("key")
+    if not key and not data.get("token"):
+        return {"ok": False, "message": "参数错误，必须包含 key 或 token"}
+    saved = db.save_meituan_account(data)
+    return {"ok": True, "account": saved, "message": "美团账号信息已更新"}
+
+
+@router.delete("/meituan/accounts/{key}")
+def delete_meituan_account_by_key(key: str):
+    """删除指定美团账号"""
+    db.delete_meituan_account(key)
+    return {"ok": True, "message": "美团账号已成功移除"}
+
+
+@router.post("/meituan/clear-all")
+def clear_all_meituan_endpoint():
+    """彻底清空全部美团凭证（仓库、主账号绑定及本地凭据文件）"""
+    db.clear_all_meituan_data()
+    from ..meituan.runner import clear_current_token
+    clear_current_token()
+    return {"ok": True, "message": "已成功清空全部美团凭证"}
+
+
+@router.post("/meituan/auth/start")
+def start_meituan_auth(data: Optional[Dict[str, Any]] = Body(None)):
+    """发起美团 App 扫码登录授权，返回二维码 Base64 DataURL 与会话 ID"""
+    if hasattr(data, "default"):
+        data = None
+    account_key = (data or {}).get("account_key")
+    custom_nickname = (data or {}).get("custom_nickname")
+    from ..meituan.runner import auth_manager
+    res = auth_manager.start_auth_session(account_key=account_key, custom_nickname=custom_nickname)
+    return res
+
+
+@router.post("/accounts/{key}/meituan-nickname")
+def update_meituan_nickname(key: str, data: Dict[str, Any] = Body(...)):
+    """更新指定账号的美团自定义备注名称（支持自定义美团名）"""
+    nickname = (data.get("nickname") or "").strip()
+    if not nickname:
+        return {"ok": False, "message": "美团账号名称不能为空"}
+    updated = db.update_account_profile(key, {"meituan_nickname": nickname})
+    return {"ok": bool(updated), "message": "美团账号名称已成功更新", "nickname": nickname}
+
+
+@router.post("/accounts/{key}/unbind-meituan")
+def unbind_account_meituan(key: str):
+    """解除小蚕账号绑定的美团官方账号凭证"""
+    ok = db.unbind_meituan_from_account(key)
+    return {"ok": ok, "message": "美团账号绑定已解除"}
+
+
+@router.post("/accounts/{key}/bind-meituan")
+def bind_existing_meituan(key: str, data: Dict[str, Any] = Body(...)):
+    """将已有美团账号凭证绑定到指定小蚕账号"""
+    meituan_key = data.get("meituan_key")
+    if not meituan_key:
+        return {"ok": False, "message": "缺少 meituan_key 参数"}
+    mt_acc = db.get_meituan_account(meituan_key)
+    if not mt_acc or not mt_acc.get("token"):
+        return {"ok": False, "message": "未找到对应的有效美团凭证"}
+    db.bind_meituan_to_account(key, {
+        "token": mt_acc.get("token"),
+        "nickname": mt_acc.get("nickname") or f"美团账号 ({mt_acc['token'][-4:]})",
+        "saved_at": mt_acc.get("saved_at") or time_service.now_int(),
+        "is_active": 1,
+        "history_pool": mt_acc.get("history_pool") or []
+    })
+    return {"ok": True, "message": "成功关联美团凭证"}
+
+
+@router.get("/meituan/auth/poll")
+def poll_meituan_auth(session_id: str = Query(...)):
+    """轮询美团 App 扫码授权登录结果"""
+    from ..meituan.runner import auth_manager
+    res = auth_manager.get_session_status(session_id)
+    return res
+
+
+@router.post("/meituan/auth/cancel")
+def cancel_meituan_auth(data: Dict[str, Any] = Body(...)):
+    """取消美团扫码授权会话"""
+    session_id = data.get("session_id")
+    if session_id:
+        from ..meituan.runner import auth_manager
+        auth_manager.cancel_session(session_id)
+    return {"ok": True, "message": "授权会话已取消"}
+
+
+@router.get("/meituan/promotions")
+async def get_meituan_promotions_endpoint():
+    """获取美团官方专属加码神券专场清单"""
+    from ..meituan.promotions import MEITUAN_SPECIAL_PROMOTIONS
+    return {"ok": True, "promotions": MEITUAN_SPECIAL_PROMOTIONS}
+
+
+@router.post("/meituan/claim/run")
+async def run_meituan_claim(data: Optional[Dict[str, Any]] = Body(None)):
+    """手动触发美团领券（支持单个账号或全量账号轮流领取）"""
+    if hasattr(data, "default"):
+        data = None
+    data = data or {}
+    account_key = data.get("account_key")
+    force = bool(data.get("force", False))
+    from ..meituan.worker import claim_single_account, claim_all_meituan_accounts
+
+    if account_key:
+        try:
+            res = await asyncio.wait_for(
+                asyncio.to_thread(claim_single_account, account_key),
+                timeout=45.0
+            )
+            return {"ok": True, "result": res}
+        except asyncio.TimeoutError:
+            return {"ok": False, "message": "单账号领券超时 (45秒熔断保护)"}
+        except Exception as e:
+            return {"ok": False, "message": f"领券异常: {str(e)}"}
+    else:
+        try:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(claim_all_meituan_accounts, force=force),
+                timeout=120.0
+            )
+            return {"ok": True, "results": results}
+        except asyncio.TimeoutError:
+            return {"ok": False, "message": "全量领券执行超时 (120秒熔断保护)"}
+        except Exception as e:
+            return {"ok": False, "message": f"全量领券异常: {str(e)}"}
+
+
+
+
+def _safe_val(v, default=None):
+    """提取 Query 参数或默认值，兼容内部直接函数调用与 FastAPI 注入"""
+    if hasattr(v, "default"):
+        return v.default if v.default is not ... else default
+    return v if v is not None else default
+
+
+def _clean_emoji(text: Any) -> str:
+    """去除文本中的所有 Emoji 符号、闪电符号与杂项表情字符，确保输出纯净文本"""
+    if not text:
+        return ""
+    # 过滤 Unicode Emoji (\U00010000-\U0010ffff)、杂项符号与闪电 (\u2600-\u27bf, 包含 \u26a1 闪电等)、表情符号
+    cleaned = re.sub(r"[\U00010000-\U0010ffff]|[\u2600-\u27bf]", '', str(text))
+    return cleaned.strip()
+
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> int:
+    """计算两经纬度之间的球面大圆直线距离 (米)"""
+    R = 6371000  # 地球半径（米）
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return int(round(R * c))
+
+
+def _parse_store_distance(
+    p: Dict[str, Any],
+    store_obj: Dict[str, Any],
+    user_lat: Optional[float] = None,
+    user_lon: Optional[float] = None,
+    is_brand: bool = False
+) -> Tuple[int, str]:
+    """
+    智能解析店铺距离：
+    1. 优先提取接口返回的各种可能距离字段：
+       p['distance'], p['delivery_distance'], p['store_distance'], store_obj['distance']
+    2. 支持字符串与各种格式解析，例如 "3.1km", "4.3km", "800m", "1500", 3.1
+    3. 若接口无直出距离但存在经纬度坐标 (store.latitude / store.longitude) 以及当前定位，使用 Haversine 球面大圆公式测距
+    4. 若最终无法解析出有效正距离：
+       - 若属于品牌券/连锁门店 (is_brand 或 store_brand_type == 1)：返回 (0, "周边门店通用")
+       - 若普通商家：返回 (0, "附近")
+       彻底消除不合理的 "0m" 显示与 0m 置顶霸榜问题。
+    """
+    dist_m = 0
+
+    # 候选字段列表（按可靠度排列）
+    candidates = [
+        p.get("distance"),
+        p.get("delivery_distance"),
+        p.get("store_distance"),
+        store_obj.get("distance"),
+        store_obj.get("delivery_distance"),
+    ]
+
+    for val in candidates:
+        if val is None or val == "" or val == 0 or val == "0":
+            continue
+        if isinstance(val, (int, float)):
+            num = float(val)
+            if num > 0:
+                # 若数值小于 50 (例如 3.1, 4.5)，通常单位为公里(km)；若 >= 50，单位通常为米(m)
+                dist_m = int(round(num * 1000)) if num < 50 else int(round(num))
+                break
+        elif isinstance(val, str):
+            val_clean = val.strip().lower()
+            m_km = re.match(r'^([\d\.]+)\s*km$', val_clean)
+            if m_km:
+                dist_m = int(round(float(m_km.group(1)) * 1000))
+                break
+            m_m = re.match(r'^([\d\.]+)\s*m$', val_clean)
+            if m_m:
+                dist_m = int(round(float(m_m.group(1))))
+                break
+            try:
+                num = float(val_clean)
+                if num > 0:
+                    dist_m = int(round(num * 1000)) if num < 50 else int(round(num))
+                    break
+            except Exception:
+                pass
+
+    # 若仍未解析出距离，尝试用商户经纬度与用户当前经纬度进行大圆测距
+    if dist_m <= 0:
+        store_lat = store_obj.get("latitude") or p.get("latitude")
+        store_lon = store_obj.get("longitude") or p.get("longitude")
+        if store_lat and store_lon and user_lat and user_lon:
+            try:
+                slat = float(store_lat)
+                slon = float(store_lon)
+                ulat = float(user_lat)
+                ulon = float(user_lon)
+                # 过滤掉经纬度为 0 或超出国内地理范围的异常值
+                if slat > 1 and slon > 1 and ulat > 1 and ulon > 1:
+                    calc_d = haversine_distance(ulat, ulon, slat, slon)
+                    if calc_d > 0:
+                        dist_m = calc_d
+            except Exception:
+                pass
+
+    # 格式化展示文本
+    if dist_m > 0:
+        if dist_m < 1000:
+            dist_text = f"{dist_m}m"
+        else:
+            km_val = round(dist_m / 1000.0, 1)
+            dist_text = f"{int(km_val) if km_val.is_integer() else km_val}km"
+    else:
+        # 绝不输出 "0m"
+        if is_brand or store_obj.get("store_brand_type") == 1:
+            dist_text = "周边门店通用"
+        else:
+            dist_text = "附近"
+
+    return dist_m, dist_text
+
+
+# ---------------- 4. 店铺列表与抢单预约 ---------------- #
+
+def _format_time_pair(
+    hour_val: Any = None, 
+    min_val: Any = None, 
+    direct_str: Any = None, 
+    ts_val: Any = None, 
+    default: str = "00:00"
+) -> str:
+    """
+    高精度营业与活动抢单时段解析 (严格支持字符串HH:MM、小时/分钟数值、Unix秒级时间戳、时段范围等多形态数据)
+    """
+    # 1. 优先解析 hour_val (官方接口通常直接给出 '10:30'、'08:00'、'14:00' 等字符串，或纯数字 10、14)
+    if hour_val is not None:
+        s = str(hour_val).strip()
+        if ":" in s:
+            parts = s.split(":")
+            try:
+                h = int(parts[0])
+                m = int(parts[1]) if len(parts) > 1 else 0
+                return f"{h:02d}:{m:02d}"
+            except Exception:
+                pass
+        elif s.isdigit() or (s.replace(".", "", 1).isdigit()):
+            try:
+                h = int(float(s))
+                m = 0
+                if min_val is not None and str(min_val).strip() != "":
+                    m_s = str(min_val).strip()
+                    if m_s.isdigit() or (m_s.replace(".", "", 1).isdigit()):
+                        m = int(float(m_s))
+                return f"{h:02d}:{m:02d}"
+            except Exception:
+                pass
+
+    # 2. 其次解析 direct_str (可能为 '10:30'、'10:30-14:00' 或独立时间字符串)
+    if direct_str is not None:
+        s = str(direct_str).strip()
+        if ":" in s:
+            if "-" in s and default.startswith("23"):
+                s = s.split("-")[1].strip()
+            elif "-" in s:
+                s = s.split("-")[0].strip()
+            parts = s.split(":")
+            try:
+                h = int(parts[0])
+                m = int(parts[1]) if len(parts) > 1 else 0
+                return f"{h:02d}:{m:02d}"
+            except Exception:
+                pass
+
+    # 3. 再次解析 Unix 秒级时间戳 (如 start_timestamp: 1789525800 -> 10:30)
+    if ts_val is not None:
+        try:
+            ts = int(float(str(ts_val).strip()))
+            if ts > 100000000:
+                dt = datetime.fromtimestamp(ts, TZ_BJ)
+                return dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+    return default
+
+
+def _parse_store_promotion_item(
+    p: Dict[str, Any],
+    user_lat: Optional[float] = None,
+    user_lon: Optional[float] = None,
+    is_search: bool = False
+) -> Dict[str, Any]:
+    """标准化解析官方店铺霸王餐活动数据 (严格对齐 SilkwormFusion.FusionService 规范与实测抓包)"""
+    store_obj = p.get("store") or {}
+    store_id = str(store_obj.get("id") or store_obj.get("store_id") or p.get("store_id") or p.get("wm_poi_id") or "")
+    store_name = store_obj.get("name") or p.get("name") or p.get("store_name") or "小蚕店铺"
+    promotion_id = str(p.get("promotion_id") or p.get("poi_event_id") or store_id)
+    icon = store_obj.get("icon") or p.get("picture") or p.get("store_icon") or ""
+
+    plans = p.get("plan_activity_info_list") or []
+    plan0 = plans[0] if plans else {}
+
+    raw_ratio = (
+        p.get("ratio_pct") or 
+        p.get("user_ratio") or 
+        plan0.get("user_ratio") or 
+        p.get("ratio") or 
+        plan0.get("ratio") or 
+        0
+    )
+    pct = 0.0
+    try:
+        r_val = float(raw_ratio)
+        if r_val > 0:
+            pct = r_val if r_val <= 100 else (r_val / 100.0)
+    except Exception:
+        pct = 0.0
+
+    raw_cap = (
+        p.get("max_commission_yuan") or 
+        p.get("max_commission") or 
+        plan0.get("user_max_commission") or 
+        plan0.get("max_commission") or 
+        0
+    )
+    cap = 0.0
+    try:
+        c_val = float(raw_cap)
+        if c_val > 0:
+            cap = (c_val / 100.0) if c_val > 50 else c_val
+    except Exception:
+        cap = 0.0
+
+    # 平台解析：1=美团, 2=饿了么, 3=京东
+    tp = p.get("tp_promotion") or {}
+    platform_code = p.get("store_platform") or store_obj.get("store_platform") or tp.get("store_platform")
+    p_plat = str(p.get("platform") or store_obj.get("platform") or "").lower().strip()
+    if p_plat in ("jingdong", "jd"):
+        platform_code = 3
+    elif p_plat in ("eleme", "taobao", "ele"):
+        platform_code = 2
+    elif p_plat == "meituan":
+        platform_code = 1
+
+    if not platform_code:
+        if p.get("eleme_status") and not p.get("meituan_status"):
+            platform_code = 2
+        elif p.get("jingdong_status"):
+            platform_code = 3
+        else:
+            platform_code = 1
+
+    if platform_code == 3:
+        plat = "jingdong"
+    elif platform_code == 2:
+        plat = "eleme"
+    else:
+        plat = "meituan"
+
+    raw_order_cents = p.get("order_money")
+    if raw_order_cents is None:
+        if plat == "eleme":
+            raw_order_cents = p.get("eleme_order_money") if p.get("eleme_order_money") is not None else (tp.get("tp_order_money") if tp.get("tp_order_money") is not None else p.get("meituan_order_money"))
+        else:
+            raw_order_cents = p.get("meituan_order_money") if p.get("meituan_order_money") is not None else (tp.get("tp_order_money") if tp.get("tp_order_money") is not None else p.get("eleme_order_money"))
+    try:
+        if raw_order_cents is not None:
+            order_money = round(float(raw_order_cents) / 100.0, 2)
+        elif p.get("min_price_tip") is not None:
+            raw_tip = float(p.get("min_price_tip"))
+            order_money = round(raw_tip / 100.0 if raw_tip >= 100 else raw_tip, 2)
+        else:
+            order_money = 0.0
+    except Exception:
+        order_money = 0.0
+
+    raw_rebate = p.get("user_rebate")
+    if raw_rebate is None:
+        raw_rebate = p.get("discount_amount")
+    if raw_rebate is None:
+        if plat == "eleme":
+            raw_rebate = p.get("eleme_user_rebate") if p.get("eleme_user_rebate") is not None else (tp.get("tp_user_rebate") if tp.get("tp_user_rebate") is not None else p.get("meituan_user_rebate"))
+        else:
+            raw_rebate = p.get("meituan_user_rebate") if p.get("meituan_user_rebate") is not None else (tp.get("tp_user_rebate") if tp.get("tp_user_rebate") is not None else p.get("eleme_user_rebate"))
+    if raw_rebate is None:
+        raw_rebate = 0
+    try:
+        rebate = round(float(raw_rebate) / 100.0, 2)
+    except Exception:
+        rebate = 0.0
+
+    # 评价条件解析 (优先使用官方接口直出的完整字符串)
+    cond_str = p.get("rebate_condition_str")
+    if not cond_str:
+        cond_val = p.get("rebate_condition")
+        cond_str = "无需评价" if cond_val == 99 else ("随心好评" if cond_val == 2 else "图文好评")
+
+    left_num = p.get("left_number")
+    if left_num is None:
+        left_num = p.get("inventory")
+    if left_num is None:
+        if plat == "eleme":
+            left_num = p.get("eleme_left_number") if p.get("eleme_left_number") is not None else p.get("meituan_left_number")
+        else:
+            left_num = p.get("meituan_left_number") if p.get("meituan_left_number") is not None else p.get("eleme_left_number")
+    if left_num is None:
+        left_num = tp.get("tp_left_number")
+    if left_num is None:
+        left_num = 0
+
+    # 营业与抢单时间字符串高精度处理 (严格调用全局 _format_time_pair 并接入时间戳)
+    start_time_str = _format_time_pair(
+        hour_val=p.get("start_time_hour"),
+        min_val=p.get("start_time_minute"),
+        direct_str=p.get("start_time"),
+        ts_val=p.get("start_timestamp") or p.get("start_date_timestamp"),
+        default="00:00"
+    )
+    end_time_str = _format_time_pair(
+        hour_val=p.get("end_time_hour"),
+        min_val=p.get("end_time_minute"),
+        direct_str=p.get("end_time"),
+        ts_val=p.get("end_timestamp") or p.get("end_date_timestamp"),
+        default="23:59"
+    )
+
+    # 兜底：若有时段列表 business_time 且无明确时段
+    biz_time = p.get("business_time") or store_obj.get("business_time")
+    if biz_time and isinstance(biz_time, list) and len(biz_time) > 0 and isinstance(biz_time[0], dict):
+        bt = biz_time[0]
+        if start_time_str == "00:00" and bt.get("start_time") is not None:
+            try:
+                sec = int(bt["start_time"])
+                if sec < 86400:
+                    start_time_str = f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}"
+            except Exception:
+                pass
+        if end_time_str == "23:59" and bt.get("end_time") is not None:
+            try:
+                sec = int(bt["end_time"])
+                if sec < 86400:
+                    end_time_str = f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}"
+            except Exception:
+                pass
+
+    opening_hours_str = store_obj.get("opening_hours") or p.get("opening_hours") or "00:00-23:59"
+    delivery_time_tip_str = str(p.get("delivery_time_tip") or store_obj.get("delivery_time_tip") or "")
+    if_can_advance_order_val = bool(p.get("if_can_advance_order", False))
+    start_date_ts = p.get("start_date_timestamp") or p.get("start_timestamp")
+    end_date_ts = p.get("end_date_timestamp") or p.get("end_timestamp")
+
+    # 满返与按比例判定
+    tags = p.get("tags") or []
+    tag_str = "".join(str(t) for t in tags)
+    is_percent = (
+        pct > 0 or 
+        (order_money == 0 and cap > 0) or 
+        ("比例" in tag_str) or 
+        (p.get("bwc_type") == 1 and pct > 0)
+    )
+
+    if is_percent:
+        rebate_type = "percent"
+        rebate_type_text = "按比例返"
+        cap_val = cap if cap > 0 else rebate
+        pct_fmt = int(pct) if pct.is_integer() else round(pct, 1)
+        cap_fmt = int(cap_val) if cap_val.is_integer() else round(cap_val, 1)
+        if pct > 0 and cap_val > 0:
+            rebate_desc = f"返{pct_fmt}% (最高¥{cap_fmt})"
+        elif pct > 0:
+            rebate_desc = f"返{pct_fmt}%"
+        elif cap_val > 0:
+            rebate_desc = f"按实付比例返 (最高¥{cap_fmt})"
+        else:
+            rebate_desc = "按比例返"
+        final_order_money = 0.0
+        final_rebate_price = round(cap_val, 2)
+        rebate_rate = pct_fmt
+    else:
+        rebate_type = "fixed"
+        rebate_type_text = "实付满返"
+        om_fmt = int(order_money) if order_money.is_integer() else order_money
+        rb_fmt = int(rebate) if rebate.is_integer() else rebate
+        rebate_desc = f"满{om_fmt}返{rb_fmt}元"
+        final_order_money = round(order_money, 2)
+        final_rebate_price = round(rebate, 2)
+        rebate_rate = round(rebate / order_money * 100, 1) if order_money > 0 else 0
+
+    need_brand_coupon = bool(
+        p.get("if_has_brand_promotion") or 
+        p.get("brand_sign") or 
+        p.get("is_vip_brand") or 
+        (p.get("brand_left_number", 0) > 0) or 
+        p.get("top_brand_activity_id") or
+        (store_obj.get("store_brand_type") == 1)
+    )
+    brand_left_number = int(p.get("brand_left_number") or (p.get("promotion_condition") or {}).get("bln") or 0)
+    is_vip_brand = bool(p.get("is_vip_brand") or (store_obj.get("store_brand_type") == 1) or (p.get("vip_level", 0) >= 3))
+    
+    # 限制频次解析
+    store_info_limit = (store_obj.get("store_info") or {}).get("store_limit") or {}
+    days_limit = int(p.get("days_limit") or p.get("user_limit_days") or (p.get("activity_limit") or {}).get("days_limit") or store_info_limit.get("days_limit") or 0)
+    days_order_limit = int(p.get("days_order_limit") or (p.get("activity_limit") or {}).get("days_order_limit") or store_info_limit.get("days_order_limit") or 1)
+
+    dist, dist_text = _parse_store_distance(
+        p=p,
+        store_obj=store_obj,
+        user_lat=user_lat,
+        user_lon=user_lon,
+        is_brand=need_brand_coupon
+    )
+
+    same_group_id = int(p.get("same_group_id") or 0)
+    if_use_red_pack = bool(p.get("if_use_red_pack", True))
+    raw_addr_val = (
+        store_obj.get("address") or 
+        store_obj.get("address_detail") or 
+        store_obj.get("store_address") or 
+        store_obj.get("poi_address") or 
+        p.get("address") or 
+        p.get("address_detail") or 
+        p.get("store_address") or 
+        ""
+    )
+    address = _infer_store_specific_address(
+        name=store_name,
+        raw_addr=raw_addr_val,
+        dist_text=dist_text
+    )
+
+    return {
+        "store_id": store_id,
+        "name": _clean_emoji(store_name),
+        "promotion_id": promotion_id,
+        "icon": icon,
+        "distance": dist,
+        "distance_text": dist_text,
+        "left_number": int(left_num or 0),
+        "order_money": final_order_money,
+        "rebate_price": final_rebate_price,
+        "rebate_rate": rebate_rate,
+        "rebate_desc": rebate_desc,
+        "rebate_type": rebate_type,
+        "rebate_type_text": rebate_type_text,
+        "platform": plat,
+        "store_platform": int(platform_code or (3 if plat == "jingdong" else (2 if plat == "eleme" else 1))),
+        "start_time": start_time_str,
+        "end_time": end_time_str,
+        "opening_hours": opening_hours_str,
+        "delivery_time_tip": delivery_time_tip_str,
+        "if_can_advance_order": if_can_advance_order_val,
+        "start_date_timestamp": start_date_ts,
+        "end_date_timestamp": end_date_ts,
+        "condition": cond_str,
+        "need_brand_coupon": need_brand_coupon,
+        "brand_left_number": brand_left_number,
+        "is_vip_brand": is_vip_brand,
+        "days_limit": days_limit,
+        "days_order_limit": days_order_limit,
+        "same_group_id": same_group_id,
+        "if_use_red_pack": if_use_red_pack,
+        "address": address
+    }
+
+
+def _infer_store_specific_address(
+    name: str,
+    raw_addr: str = "",
+    city_name: str = "",
+    dist_text: str = ""
+) -> str:
+    """
+    智能解析商户具体位置信息：
+    1. 优先采用官方下发的真实门牌地址；
+    2. 若官方未下发（如美团赏金按比例返现接口），深度解析商户名中蕴含的核心分店与商圈标识（如“万松园店”、“金桥永旺店”）；
+    3. 结合城市与外卖配送测距，拼接成清晰精准的具体外卖送达位置，彻底杜绝无具体位置的生硬文案。
+    """
+    raw = (raw_addr or "").strip()
+    if raw and raw not in ("依据外卖平台定位", "外卖配送范围", "附近", "待获取", "暂无地址"):
+        return raw
+
+    clean = (name or "").replace("（", "(").replace("）", ")").replace("【", "[").replace("】", "]")
+    m = re.search(r'\(([^)]+)\)|\[([^\]]+)\]', clean)
+    branch = ""
+    if m:
+        candidate = (m.group(1) or m.group(2) or "").strip()
+        if not any(k in candidate for k in ["免配送", "全天", "营业", "折扣", "特惠", "减", "满", "好评"]):
+            branch = candidate
+
+    if not branch:
+        m2 = re.search(r'[\-·・_]\s*([^\s\-·・_()]+?店)', clean)
+        if m2:
+            branch = m2.group(1).strip()
+
+    dist_info = f" · 距您约{dist_text}" if (dist_text and dist_text not in ("附近", "0m", "0km", "")) else ""
+    city_prefix = f"{city_name} · " if (city_name and city_name not in ("全国", "未知", "")) else ""
+
+    if branch:
+        loc_desc = branch if branch.endswith("店") else f"{branch}分店"
+        return f"{city_prefix}{loc_desc} (外卖送达{dist_info})"
+
+    if city_name and city_name not in ("全国", "未知", ""):
+        return f"{city_name}外卖配送范围{dist_info}"
+
+    return f"外卖配送覆盖商圈{dist_info}"
+
+
+def _normalize_shangjin_item(poi: Dict[str, Any], user_lat: Optional[float] = None, user_lon: Optional[float] = None, city_name: str = "") -> List[Dict[str, Any]]:
+    """标准化解析官方美团赏金按比例返现 POI 数据 (SilkwormRcsService.MeituanShangjinGetPoiList)"""
+    name = str(poi.get("name") or "").strip()
+    icon = poi.get("picture") or ""
+    dist_str = str(poi.get("delivery_distance") or "").strip()
+    dist = 0
+    dist_text = dist_str or "附近"
+    if "km" in dist_str:
+        try:
+            dist = int(float(dist_str.replace("km", "").strip()) * 1000)
+        except Exception:
+            dist = 0
+    elif "m" in dist_str:
+        try:
+            dist = int(float(dist_str.replace("m", "").strip()))
+        except Exception:
+            dist = 0
+
+    wm_poi_id = str(poi.get("wm_poi_id") or "")
+    register_shangjin_poi_dict(poi)
+    action_url = poi.get("action_url") or {}
+    dp_url = action_url.get("dp_url") or ""
+    poi_id_m = re.search(r"poi_id=(\d+)", dp_url)
+    store_id = poi_id_m.group(1) if poi_id_m else wm_poi_id
+
+    plans = poi.get("plan_activity_info_list") or []
+    if not plans:
+        ratio_raw = float(poi.get("ratio") or 0)
+        cap_raw = float(poi.get("max_commission") or 0)
+        plans = [{
+            "user_ratio": ratio_raw,
+            "user_max_commission": cap_raw,
+            "inventory": poi.get("inventory") or 0,
+            "poi_event_id": poi.get("poi_event_id") or wm_poi_id,
+            "rebate_condition": 0
+        }]
+
+    items = []
+    for idx, plan in enumerate(plans, start=1):
+        ratio_raw = float(plan.get("user_ratio") or plan.get("ratio") or 0)
+        pct = (ratio_raw / 100.0) if ratio_raw > 100 else ratio_raw
+        cap_raw = float(plan.get("user_max_commission") or plan.get("max_commission") or 0)
+        cap_val = (cap_raw / 100.0) if cap_raw > 50 else cap_raw
+        pct_fmt = int(pct) if pct.is_integer() else round(pct, 1)
+        cap_fmt = int(cap_val) if cap_val.is_integer() else round(cap_val, 1)
+
+        rebate_desc = f"返{pct_fmt}% (最高¥{cap_fmt})" if cap_val > 0 else f"返{pct_fmt}%"
+        cond_code = plan.get("rebate_condition")
+        cond_str = "无需评价" if cond_code == 99 else "用餐反馈"
+        left_num = int(plan.get("inventory") or 0)
+        pid = str(plan.get("poi_event_id") or f"{store_id}_p{idx}")
+
+        item = {
+            "store_id": str(store_id),
+            "wm_poi_id": wm_poi_id,
+            "name": _clean_emoji(name),
+            "promotion_id": pid,
+            "icon": icon,
+            "distance": dist,
+            "distance_text": dist_text,
+            "left_number": left_num,
+            "order_money": 0.0,
+            "rebate_price": round(cap_val, 2),
+            "rebate_rate": pct_fmt,
+            "rebate_desc": rebate_desc,
+            "rebate_type": "percent",
+            "rebate_type_text": "按比例返",
+            "platform": "meituan",
+            "store_platform": 1,
+            "start_time": "00:00",
+            "end_time": "23:59",
+            "opening_hours": poi.get("opening_hours") or "00:00-23:59",
+            "delivery_time_tip": str(poi.get("delivery_time_tip") or ""),
+            "if_can_advance_order": False,
+            "condition": cond_str,
+            "need_brand_coupon": False,
+            "brand_left_number": 0,
+            "is_vip_brand": False,
+            "days_limit": 0,
+            "days_order_limit": 1,
+            "same_group_id": 0,
+            "if_use_red_pack": True,
+            "address": _infer_store_specific_address(
+                name=name,
+                raw_addr=str(poi.get("address") or poi.get("store_address") or poi.get("poi_address") or "").strip(),
+                city_name=city_name,
+                dist_text=dist_text
+            )
+        }
+        items.append(item)
+    return items
+
+
+def _normalize_feed_item(p: Dict[str, Any], user_lat: Optional[float] = None, user_lon: Optional[float] = None) -> Dict[str, Any]:
+    """标准化解析官方首页 Feed 推荐店铺数据 (FusionService.GetFeedPromotions)"""
+    return _parse_store_promotion_item(p, user_lat=user_lat, user_lon=user_lon, is_search=False)
+
+
+def _normalize_search_item(p: Dict[str, Any], user_lat: Optional[float] = None, user_lon: Optional[float] = None) -> Dict[str, Any]:
+    """标准化解析官方微服务搜索结果数据 (FusionService.SearchPromotions)"""
+    return _parse_store_promotion_item(p, user_lat=user_lat, user_lon=user_lon, is_search=True)
+
+def _get_store_branch_key(splat: str, name: str) -> str:
+    """提取店铺在平台内的同店分店唯一聚合标识（准确保留主品牌与核心分店，杜绝跨分店混淆）"""
+    if not name:
+        return f"{splat or 'meituan'}_unknown"
+    n = name.replace("（", "(").replace("）", ")").replace("【", "[").replace("】", "]")
+    n = re.sub(r'\s+', '', n)
+    m = re.match(r'^([^(\[]+)(?:[(\[](.*?)[)\]])?', n)
+    if not m:
+        core = n.lower()
+    else:
+        main_brand = m.group(1).strip().lower()
+        branch_info = (m.group(2) or "").strip().lower()
+        branch_core = ""
+        if branch_info:
+            bm = re.search(r'([^·・,，.、]+?店)', branch_info)
+            if bm:
+                branch_core = bm.group(1)
+            else:
+                branch_core = re.split(r'[·・,，.、]', branch_info)[0]
+        core = f"{main_brand}_{branch_core}" if branch_core else main_brand
+    return f"{splat or 'meituan'}_{core}"
+
+
+@router.get("/store/list")
+async def get_stores(
+    city_code: Optional[int] = Query(None),
+    longitude: Optional[str] = Query(None),
+    latitude: Optional[str] = Query(None),
+    account_key: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    platform: Optional[str] = Query("all"),
+    condition: Optional[str] = Query("all"),
+    rebate_type: Optional[str] = Query("all"),
+    sort_by: Optional[str] = Query("default"),
+    offset: int = Query(0),
+    limit: int = Query(50),
+    page_pv_id: Optional[str] = Query(None)
+):
+    """
+    获取霸王餐店铺清单
+    1. 当传入关键词时：并发调用小蚕官方微服务实时搜索 (FusionService.SearchPromotions) 与美团赏金按比例返现 (SilkwormRcsService.MeituanShangjinGetPoiList)
+       通过携带 page_pv_id 维持翻页会话，支持连续触底无缝流式翻页
+    2. 当未传关键词时：并发拉取官方商圈推荐 Feed，支持「距离最近」(sort=1, 默认) 与「综合排序」(sort=0) 原生排序
+    """
+    city_code = _safe_val(city_code, None)
+    longitude = _safe_val(longitude, None)
+    latitude = _safe_val(latitude, None)
+    account_key = _safe_val(account_key, None)
+    keyword = _safe_val(keyword, None)
+    platform = _safe_val(platform, "all")
+    condition = _safe_val(condition, "all")
+    rebate_type = _safe_val(rebate_type, "all")
+    sort_by = _safe_val(sort_by, "default")
+    offset = int(_safe_val(offset, 0))
+    limit = int(_safe_val(limit, 50))
+    page_pv_id = _safe_val(page_pv_id, "")
+
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {
+            "ok": True,
+            "stores": [],
+            "total": 0,
+            "source": "empty",
+            "message": "当前未登录或未托管小蚕账号，请先在【小蚕账号】中心添加账号"
+        }
+
+    target_acc = None
+    if account_key:
+        target_acc = db.get_account_by_key(account_key)
+    if not target_acc and accounts:
+        target_acc = accounts[0]
+
+    if not target_acc:
+        return {"ok": True, "stores": [], "total": 0, "source": "empty", "message": "当前账号已退出，请先登录账号"}
+
+    token = target_acc.get("token")
+    if not token:
+        return {"ok": True, "stores": [], "total": 0, "source": "empty", "message": "当前账号凭据已失效或已退出"}
+
+    silk_id = target_acc.get("silk_id")
+    user_id = target_acc.get("user_id")
+
+    if not db.has_valid_location(target_acc):
+        return {
+            "ok": False,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "stores": [],
+            "total": 0,
+            "source": "empty",
+            "has_more": False,
+            "message": _location_required_msg(target_acc, account_key or "")
+        }
+
+    # 定位信息严格以账号数据库中绑定保存的地址为准
+    longitude = str(target_acc["longitude"]).strip()
+    latitude = str(target_acc["latitude"]).strip()
+    city_code = int(target_acc["city_code"])
+
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except Exception:
+        return {
+            "ok": False,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "stores": [],
+            "total": 0,
+            "source": "empty",
+            "has_more": False,
+            "message": "账号定位坐标格式无效，请重新绑定地址"
+        }
+
+    city_name = str(target_acc.get("city_name") or "").strip()
+    if not city_name:
+        try:
+            from ..core.tianditu import infer_city_from_coords
+            c_tuple = infer_city_from_coords(lat, lon)
+            if c_tuple and len(c_tuple) >= 2:
+                city_name = c_tuple[1]
+        except Exception:
+            pass
+
+    stores = []
+    source = "feed"
+    has_more = True
+    next_offset = 0
+    current_pv_id = page_pv_id or ""
+
+    # 分支一：用户输入了关键词，采用混合搜索策略：
+    # 1. 调用官方微服务实时搜索满减活动 (SilkwormFusion.FusionService.SearchPromotions)
+    # 2. 调用美团赏金按比例返现检索 (SilkwormRcs.SilkwormRcsService.MeituanShangjinGetPoiList)，带 page_pv_id 维持翻页游标
+    # 3. 首屏检索时额外并发拉取商圈 Feed，覆盖官方搜索中遗漏的「大牌券」商户
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        source = "hybrid_search"
+        try:
+            logger.info(f"发起 hybrid_search: kw={kw}, city={city_code}, lon={lon}, lat={lat}, silk={silk_id}, user={user_id}, offset={offset}, page_pv_id={current_pv_id}")
+            search_offsets = [offset, offset + 20] if offset == 0 else [offset]
+            search_tasks = [
+                client.search_stores(
+                    keyword=kw,
+                    city_code=city_code,
+                    longitude=str(lon),
+                    latitude=str(lat),
+                    offset=off,
+                    limit=20,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id
+                )
+                for off in search_offsets
+            ]
+            shangjin_tasks = [
+                client.search_shangjin_stores(
+                    keyword=kw,
+                    latitude=lat,
+                    longitude=lon,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    city_code=city_code,
+                    sort_type=3,
+                    page_pv_id=current_pv_id
+                )
+            ]
+            feed_offsets = [0, 35] if offset == 0 else []
+            feed_tasks = [
+                client.get_store_list(
+                    city_code=city_code,
+                    longitude=str(lon),
+                    latitude=str(lat),
+                    offset=foff,
+                    limit=35,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id
+                )
+                for foff in feed_offsets
+            ]
+            all_results = await asyncio.gather(*(search_tasks + shangjin_tasks + feed_tasks), return_exceptions=True)
+            search_res = all_results[:len(search_tasks)]
+            shangjin_res = all_results[len(search_tasks):len(search_tasks) + len(shangjin_tasks)]
+            feed_res = all_results[len(search_tasks) + len(shangjin_tasks):]
+
+            seen_pids = set()
+            total_raw_count = 0
+            has_more_shangjin = False
+            has_more_search = False
+
+            # 1. 优先加入官方美团赏金按比例返现活动商户 (SilkwormRcsService.MeituanShangjinGetPoiList)
+            for sjr in shangjin_res:
+                if isinstance(sjr, dict):
+                    returned_pv = sjr.get("page_pv_id")
+                    if returned_pv:
+                        current_pv_id = returned_pv
+                    pois = sjr.get("poi_list") or []
+                    total_raw_count += len(pois)
+                    if len(pois) > 0:
+                        has_more_shangjin = True
+                    for poi in pois:
+                        sj_items = _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name)
+                        for item in sj_items:
+                            dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                            if dedup_k not in seen_pids:
+                                seen_pids.add(dedup_k)
+                                stores.append(item)
+
+                    # 若首屏检索且有游标，串联拉取第 2 批赏金商户增加候选丰富度
+                    if offset == 0 and returned_pv and len(pois) >= 5:
+                        try:
+                            sj2 = await client.search_shangjin_stores(
+                                keyword=kw,
+                                latitude=lat,
+                                longitude=lon,
+                                token=token,
+                                silk_id=silk_id,
+                                user_id=user_id,
+                                city_code=city_code,
+                                sort_type=3,
+                                page_pv_id=returned_pv
+                            )
+                            if isinstance(sj2, dict):
+                                returned_pv2 = sj2.get("page_pv_id") or sj2.get("meituan_pv_id")
+                                if returned_pv2:
+                                    current_pv_id = returned_pv2
+                                pois2 = sj2.get("poi_list") or []
+                                total_raw_count += len(pois2)
+                                if len(pois2) > 0:
+                                    has_more_shangjin = True
+                                for poi in pois2:
+                                    for item in _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name):
+                                        dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                        if dedup_k not in seen_pids:
+                                            seen_pids.add(dedup_k)
+                                            stores.append(item)
+                        except Exception as e_sj2:
+                            logger.warning(f"搜索次屏赏金补充拉取异常: {e_sj2}")
+                elif isinstance(sjr, Exception):
+                    logger.warning(f"赏金按比例返现检索批次异常: {sjr}")
+
+            # 2. 加入官方微服务搜索直接命中的商户活动 (支持美团/饿了么/京东各平台全档位方案展开)
+            for off, sr in zip(search_offsets, search_res):
+                if isinstance(sr, dict):
+                    raw_proms = sr.get("promotions") or sr.get("promotion_list") or sr.get("feed_items") or []
+                    total_raw_count += len(raw_proms)
+                    sr_total = sr.get("total") or 0
+                    if sr_total > (off + len(raw_proms)):
+                        has_more_search = True
+                    for p in raw_proms:
+                        promos = _extract_all_promos_from_raw(p, is_search=True, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
+                        for item in promos:
+                            dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                            if dedup_k not in seen_pids:
+                                seen_pids.add(dedup_k)
+                                stores.append(item)
+                elif isinstance(sr, Exception):
+                    logger.warning(f"搜索并发批次异常: {sr}")
+
+            # 3. 从商圈 Feed 匹配补全「按比例返」与大牌券特权商户 (仅首屏)
+            if feed_res:
+                kw_lower = kw.lower()
+                for fr in feed_res:
+                    if isinstance(fr, dict):
+                        feed_items = fr.get("feed_items") or fr.get("items") or fr.get("promotion_list") or []
+                        for p in feed_items:
+                            promos = _extract_all_promos_from_raw(p, is_search=False, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
+                            for item in promos:
+                                sname = item.get("name", "").lower()
+                                rdesc = item.get("rebate_desc", "").lower()
+                                rtype = item.get("rebate_type_text", "").lower()
+                                cond = item.get("condition", "").lower()
+                                
+                                is_match = (
+                                    kw_lower in sname or 
+                                    kw_lower in rdesc or 
+                                    kw_lower in rtype or 
+                                    kw_lower in cond or
+                                    ("比例" in kw_lower and item.get("rebate_type") == "percent") or
+                                    ("满返" in kw_lower and item.get("rebate_type") == "fixed") or
+                                    ("大牌" in kw_lower and item.get("need_brand_coupon")) or
+                                    ("免评" in kw_lower and item.get("condition") == "无需评价")
+                                )
+                                if is_match:
+                                    dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                    if dedup_k not in seen_pids:
+                                        seen_pids.add(dedup_k)
+                                        stores.append(item)
+                                    else:
+                                        for idx, existing_s in enumerate(stores):
+                                            if f"{existing_s.get('platform')}_{existing_s['store_id']}_{existing_s['promotion_id']}" == dedup_k:
+                                                stores[idx] = item
+                                                break
+                    elif isinstance(fr, Exception):
+                        logger.warning(f"Feed检索批次异常: {fr}")
+
+            has_more = has_more_shangjin or has_more_search or (total_raw_count >= 10)
+            next_offset = offset + (20 * len(search_offsets) if search_offsets else 20)
+            logger.info(f"混合实时搜索合并返回: keyword={kw}, offset={offset}, total={len(stores)}, has_more={has_more}, pv_id={current_pv_id}")
+        except Exception as e:
+            logger.error(f"小蚕官方实时搜索异常: {e}")
+            return {"ok": False, "stores": [], "total": 0, "source": source, "has_more": False, "error": f"小蚕官方实时搜索接口异常: {e}"}
+
+    # 分支二：常规商圈浏览
+    else:
+        official_sort = 1 if sort_by == "distance" else 0
+        seen_promotions = set()
+        total_raw_count = 0
+        step = 35
+
+        # 子分支 A：用户明确选择「按比例返」(rebate_type == 'percent' 或 'ratio')，且平台为全部或美团
+        if rebate_type in ("percent", "ratio") and (platform in ("all", "meituan")):
+            source = "shangjin_stream"
+            try:
+                # 官方美团赏金接口每次返回 5 个商户，连续流式拉取 4 批维持单次 20 个商户的体验
+                shangjin_batches = 4
+                curr_pv = current_pv_id
+                has_more_shangjin = False
+
+                # 若为首屏 (offset == 0)，同时并发拉取 1 批 Feed 推荐 (前 35 条中含有的比例返商户与真实地址)
+                feed_task = client.get_store_list(
+                    city_code=city_code,
+                    longitude=str(lon),
+                    latitude=str(lat),
+                    offset=0,
+                    limit=35,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    sort=official_sort
+                ) if offset == 0 else None
+
+                for b_idx in range(shangjin_batches):
+                    sjr = await client.search_shangjin_stores(
+                        keyword="",
+                        latitude=lat,
+                        longitude=lon,
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        city_code=city_code,
+                        sort_type=3,
+                        page_pv_id=curr_pv
+                    )
+                    if isinstance(sjr, dict):
+                        curr_pv = sjr.get("page_pv_id") or sjr.get("meituan_pv_id") or curr_pv
+                        pois = sjr.get("poi_list") or []
+                        total_raw_count += len(pois)
+                        if len(pois) > 0:
+                            has_more_shangjin = True
+                        for poi in pois:
+                            sj_items = _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name)
+                            for item in sj_items:
+                                dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                if dedup_key not in seen_promotions:
+                                    seen_promotions.add(dedup_key)
+                                    stores.append(item)
+                        if len(pois) < 5:
+                            # 官方已无后续赏金商户，终止流式拉取
+                            break
+                    elif isinstance(sjr, Exception):
+                        logger.warning(f"赏金流式拉取批次异常: {sjr}")
+                        break
+
+                current_pv_id = curr_pv
+
+                # 合并首屏 Feed 中的比例返商户
+                if feed_task:
+                    try:
+                        f_res = await feed_task
+                        if isinstance(f_res, dict):
+                            feed_items = f_res.get("feed_items") or f_res.get("items") or []
+                            for p in feed_items:
+                                promos = _extract_all_promos_from_raw(p, is_search=False, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
+                                for item in promos:
+                                    if item.get("rebate_type") == "percent":
+                                        dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                        if dedup_key not in seen_promotions:
+                                            seen_promotions.add(dedup_key)
+                                            stores.append(item)
+                    except Exception as e_feed:
+                        logger.warning(f"首屏 Feed 比例商户拉取异常: {e_feed}")
+
+                has_more = has_more_shangjin
+                next_offset = offset + len(stores)
+                logger.info(f"赏金按比例返现流式返回: offset={offset}, stores={len(stores)}, has_more={has_more}, pv_id={current_pv_id}")
+            except Exception as e:
+                logger.error(f"拉取赏金按比例返现商户失败: {e}")
+                return {"ok": False, "stores": [], "total": 0, "source": source, "has_more": False, "error": f"小蚕官方接口调用异常: {e}"}
+
+        # 子分支 B：用户浏览全部商圈 (rebate_type == 'all')
+        elif rebate_type == "all":
+            source = "feed_and_shangjin"
+            try:
+                # 1. 并发拉取 2 批 Feed (0, 35) 或 (offset, offset+35)
+                offsets = [offset, offset + step]
+                feed_tasks = [
+                    client.get_store_list(
+                        city_code=city_code,
+                        longitude=str(lon),
+                        latitude=str(lat),
+                        offset=off,
+                        limit=step,
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        sort=official_sort
+                    )
+                    for off in offsets
+                ]
+                # 2. 同时执行赏金流式拉取以丰富按比例返现活动商户
+                shangjin_curr_pv = current_pv_id
+                shangjin_task = client.search_shangjin_stores(
+                    keyword="",
+                    latitude=lat,
+                    longitude=lon,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    city_code=city_code,
+                    sort_type=3,
+                    page_pv_id=shangjin_curr_pv
+                ) if platform in ("all", "meituan") else None
+
+                all_tasks = feed_tasks + ([shangjin_task] if shangjin_task else [])
+                all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+                feed_results = all_results[:len(feed_tasks)]
+                sj_first = all_results[len(feed_tasks)] if shangjin_task else None
+                batch_errors: List[str] = []
+
+                # 收集 Feed 商户
+                for br in feed_results:
+                    if isinstance(br, dict):
+                        feed_items = br.get("feed_items") or br.get("items") or br.get("promotion_list") or []
+                        total_raw_count += len(feed_items)
+                        for p in feed_items:
+                            promos = _extract_all_promos_from_raw(p, is_search=False, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
+                            for item in promos:
+                                dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                if dedup_key not in seen_promotions:
+                                    seen_promotions.add(dedup_key)
+                                    stores.append(item)
+                    elif isinstance(br, Exception):
+                        logger.warning(f"商圈 Feed 拉取批次异常: {br}")
+                        batch_errors.append(str(br))
+
+                # 收集第 1 批赏金商户并串联第 2 批
+                if isinstance(sj_first, dict):
+                    shangjin_curr_pv = sj_first.get("page_pv_id") or sj_first.get("meituan_pv_id") or shangjin_curr_pv
+                    pois_1 = sj_first.get("poi_list") or []
+                    total_raw_count += len(pois_1)
+                    for poi in pois_1:
+                        sj_items = _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name)
+                        for item in sj_items:
+                            dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                            if dedup_key not in seen_promotions:
+                                seen_promotions.add(dedup_key)
+                                stores.append(item)
+
+                    if shangjin_curr_pv and len(pois_1) >= 5:
+                        try:
+                            sj_second = await client.search_shangjin_stores(
+                                keyword="",
+                                latitude=lat,
+                                longitude=lon,
+                                token=token,
+                                silk_id=silk_id,
+                                user_id=user_id,
+                                city_code=city_code,
+                                sort_type=3,
+                                page_pv_id=shangjin_curr_pv
+                            )
+                            if isinstance(sj_second, dict):
+                                shangjin_curr_pv = sj_second.get("page_pv_id") or sj_second.get("meituan_pv_id") or shangjin_curr_pv
+                                pois_2 = sj_second.get("poi_list") or []
+                                total_raw_count += len(pois_2)
+                                for poi in pois_2:
+                                    sj_items = _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name)
+                                    for item in sj_items:
+                                        dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                        if dedup_key not in seen_promotions:
+                                            seen_promotions.add(dedup_key)
+                                            stores.append(item)
+                        except Exception as e_sj2:
+                            logger.warning(f"赏金串联批次拉取异常: {e_sj2}")
+                elif isinstance(sj_first, Exception):
+                    logger.warning(f"赏金首屏拉取异常: {sj_first}")
+                    batch_errors.append(str(sj_first))
+
+                if not stores and batch_errors and len(batch_errors) >= len(all_tasks):
+                    logger.error(f"拉取商圈全量推荐全部失败: {batch_errors[0]}")
+                    return {"ok": False, "stores": [], "total": 0, "source": source, "has_more": False, "error": f"小蚕官方接口调用异常: {batch_errors[0]}"}
+
+                current_pv_id = shangjin_curr_pv
+                has_more = (total_raw_count > 0)
+                next_offset = offset + (step * len(offsets))
+                logger.info(f"商圈全量Feed与赏金合并返回: offset={offset}, total={len(stores)}, has_more={has_more}, pv_id={current_pv_id}")
+            except Exception as e:
+                logger.error(f"拉取商圈全量推荐失败: {e}")
+                return {"ok": False, "stores": [], "total": 0, "source": source, "has_more": False, "error": f"小蚕官方接口调用异常: {e}"}
+
+        # 子分支 C：实付满返或饿了么/京东单平台常规 Feed
+        else:
+            source = "feed"
+            try:
+                offsets = [offset, offset + step, offset + (step * 2)]
+                tasks = [
+                    client.get_store_list(
+                        city_code=city_code,
+                        longitude=str(lon),
+                        latitude=str(lat),
+                        offset=off,
+                        limit=step,
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        sort=official_sort
+                    )
+                    for off in offsets
+                ]
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                batch_errors = []
+                for br in batch_results:
+                    if isinstance(br, dict):
+                        feed_items = br.get("feed_items") or br.get("items") or br.get("promotion_list") or []
+                        total_raw_count += len(feed_items)
+                        for p in feed_items:
+                            promos = _extract_all_promos_from_raw(p, is_search=False, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
+                            for item in promos:
+                                dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                if dedup_key not in seen_promotions:
+                                    seen_promotions.add(dedup_key)
+                                    stores.append(item)
+                    elif isinstance(br, Exception):
+                        logger.warning(f"并发拉取批次异常: {br}")
+                        batch_errors.append(str(br))
+                if not stores and batch_errors and len(batch_errors) >= len(tasks):
+                    logger.error(f"拉取小蚕官方店铺列表全部失败: {batch_errors[0]}")
+                    return {"ok": False, "stores": [], "total": 0, "source": source, "has_more": False, "error": f"小蚕官方接口调用异常: {batch_errors[0]}"}
+                has_more = total_raw_count > 0
+                next_offset = offset + (step * len(offsets))
+                logger.info(f"商圈满返Feed返回: offset={offset}, total={len(stores)}, has_more={has_more}")
+            except Exception as e:
+                logger.error(f"拉取小蚕官方店铺列表失败: {e}")
+                return {"ok": False, "stores": [], "total": 0, "source": source, "has_more": False, "error": f"小蚕官方接口调用异常: {e}"}
+
+    # 4. 同名商家多任务深度合并 (在方案类型过滤前先聚合，确保满返真实门牌地址能100%穿透共享给同店比例方案)
+    # 按「同平台 + 同分店唯一标识」聚合，美团/饿了么/京东即使同店同名也作为独立商户卡片展示，档位绝不跨平台混淆
+    merged_stores = []
+    store_map = {}
+    branch_to_key = {}
+    id_to_key = {}
+
+    for s in stores:
+        sid = str(s.get("store_id") or "").strip()
+        sname = str(s.get("name") or "").strip()
+        
+        # 严格平台代码规范化，杜绝不同平台混淆
+        splat = str(s.get("platform") or "").lower().strip()
+        store_plat = s.get("store_platform")
+        if not splat or splat == "all":
+            if store_plat == 2:
+                splat = "eleme"
+            elif store_plat == 3:
+                splat = "jingdong"
+            else:
+                splat = "meituan"
+        if splat in ("taobao", "ele"):
+            splat = "eleme"
+        elif splat in ("jd",):
+            splat = "jingdong"
+
+        plat_code = 3 if splat == "jingdong" else (2 if splat == "eleme" else 1)
+
+        # 核心分店主键：以平台为命名空间隔离，杜绝同店名跨平台合并！
+        branch_k = _get_store_branch_key(splat, sname)
+
+        # 确定主键：有效 store_id 必须携带平台前缀，杜绝跨平台同 store_id 错乱合并！
+        plat_sid = f"{splat}_{sid}" if sid and sid != "0" else None
+        store_key = None
+        if plat_sid and plat_sid in id_to_key:
+            store_key = id_to_key[plat_sid]
+        elif branch_k in branch_to_key:
+            store_key = branch_to_key[branch_k]
+        elif plat_sid:
+            store_key = f"{splat}_id_{sid}"
+        else:
+            store_key = branch_k
+
+        if branch_k not in branch_to_key:
+            branch_to_key[branch_k] = store_key
+        if plat_sid and plat_sid not in id_to_key:
+            id_to_key[plat_sid] = store_key
+
+        promo_item = {
+            "promotion_id": s["promotion_id"],
+            "order_money": s["order_money"],
+            "rebate_price": s["rebate_price"],
+            "rebate_rate": s["rebate_rate"],
+            "rebate_desc": s.get("rebate_desc", f"满{s['order_money']}返{s['rebate_price']}元"),
+            "rebate_type": s.get("rebate_type", "fixed"),
+            "rebate_type_text": s.get("rebate_type_text", "实付满返"),
+            "condition": s["condition"],
+            "left_number": s["left_number"],
+            "start_time": s["start_time"],
+            "end_time": s["end_time"],
+            "opening_hours": s.get("opening_hours", "00:00-23:59"),
+            "delivery_time_tip": s.get("delivery_time_tip", ""),
+            "if_can_advance_order": s.get("if_can_advance_order", False),
+            "start_date_timestamp": s.get("start_date_timestamp"),
+            "end_date_timestamp": s.get("end_date_timestamp"),
+            "platform": splat,
+            "store_platform": plat_code,
+            "need_brand_coupon": s.get("need_brand_coupon", False),
+            "brand_left_number": s.get("brand_left_number", 0),
+            "is_vip_brand": s.get("is_vip_brand", False),
+            "days_limit": s.get("days_limit", 0),
+            "days_order_limit": s.get("days_order_limit", 1),
+            "same_group_id": s.get("same_group_id", 0),
+            "if_use_red_pack": s.get("if_use_red_pack", True),
+            "address": s.get("address", "")
+        }
+
+        if store_key not in store_map:
+            store_copy = dict(s)
+            store_copy["platform"] = splat
+            store_copy["store_platform"] = plat_code
+            store_copy["promotions"] = [promo_item]
+            store_copy["promotion_count"] = 1
+            store_map[store_key] = store_copy
+            merged_stores.append(store_copy)
+        else:
+            existing = store_map[store_key]
+            existing_plat = existing.get("platform") or "meituan"
+
+            # 严格防线：若平台不一致，绝对禁止合并到已有条目中，创建独立商户条目！
+            if existing_plat != splat:
+                isolated_key = f"{splat}_{store_key}"
+                store_copy = dict(s)
+                store_copy["platform"] = splat
+                store_copy["store_platform"] = plat_code
+                store_copy["promotions"] = [promo_item]
+                store_copy["promotion_count"] = 1
+                store_map[isolated_key] = store_copy
+                merged_stores.append(store_copy)
+                continue
+
+            if not any(p["promotion_id"] == s["promotion_id"] for p in existing["promotions"]):
+                existing["promotions"].append(promo_item)
+                existing["promotion_count"] = len(existing["promotions"])
+                # 若已有商户距离为 0 但当前活动解析出了有效距离，补充更新商户距离信息
+                if s.get("distance", 0) > 0 and existing.get("distance", 0) == 0:
+                    existing["distance"] = s["distance"]
+                    existing["distance_text"] = s["distance_text"]
+                # 择优展示外层：优先展示有名额的活动，其次展示返利金额更高的活动
+                has_quota_now = s.get("left_number", 0) > 0
+                has_quota_exist = existing.get("left_number", 0) > 0
+                better_quota = (not has_quota_exist and has_quota_now)
+                better_rebate = (has_quota_now == has_quota_exist and s.get("rebate_price", 0) > existing.get("rebate_price", 0))
+
+                if better_quota or better_rebate:
+                    existing["left_number"] = s["left_number"]
+                    existing["promotion_id"] = s["promotion_id"]
+                    existing["order_money"] = s["order_money"]
+                    existing["rebate_price"] = s["rebate_price"]
+                    existing["rebate_rate"] = s["rebate_rate"]
+                    existing["rebate_desc"] = s.get("rebate_desc")
+                    existing["rebate_type"] = s.get("rebate_type")
+                    existing["rebate_type_text"] = s.get("rebate_type_text")
+                    existing["condition"] = s["condition"]
+                    existing["start_time"] = s.get("start_time", "00:00")
+                    existing["end_time"] = s.get("end_time", "23:59")
+                    existing["start_date_timestamp"] = s.get("start_date_timestamp")
+                    existing["end_date_timestamp"] = s.get("end_date_timestamp")
+                    existing["if_can_advance_order"] = s.get("if_can_advance_order", False)
+                    existing["need_brand_coupon"] = s.get("need_brand_coupon", False)
+                    existing["brand_left_number"] = s.get("brand_left_number", 0)
+                    existing["is_vip_brand"] = s.get("is_vip_brand", False)
+                    existing["days_limit"] = s.get("days_limit", 0)
+                    existing["days_order_limit"] = s.get("days_order_limit", 1)
+                    existing["same_group_id"] = s.get("same_group_id", 0)
+                    existing["if_use_red_pack"] = s.get("if_use_red_pack", True)
+                elif existing.get("start_time") in ("00:00", "", None) and s.get("start_time") and s.get("start_time") != "00:00":
+                    existing["start_time"] = s["start_time"]
+                    existing["end_time"] = s["end_time"]
+
+                # 深度地址互通：若已有地址只是商圈推断或为空，而当前活动具备真实门牌地址，立即升级覆盖
+                current_addr = (s.get("address") or "").strip()
+                existing_addr = (existing.get("address") or "").strip()
+                is_curr_real = current_addr and ("外卖送达" not in current_addr and "配送范围" not in current_addr)
+                is_exist_real = existing_addr and ("外卖送达" not in existing_addr and "配送范围" not in existing_addr)
+
+                if is_curr_real and not is_exist_real:
+                    existing["address"] = current_addr
+                elif not existing_addr and current_addr:
+                    existing["address"] = current_addr
+
+    # 再次保障每个店铺名下的档位只属于本平台，拆分 fixed_plans 与 percent_plans，并把最佳地址同步穿透给名下所有活动
+    for ms in merged_stores:
+        ms_plat = ms.get("platform") or "meituan"
+        ms["promotions"] = [p for p in ms.get("promotions", []) if (p.get("platform") or "meituan") == ms_plat]
+        ms["promotion_count"] = len(ms["promotions"])
+
+        # 查找 promotions 中是否存在真实门牌地址
+        best_addr = (ms.get("address") or "").strip()
+        for p in ms["promotions"]:
+            p_addr = (p.get("address") or "").strip()
+            if p_addr and ("外卖送达" not in p_addr and "配送范围" not in p_addr):
+                best_addr = p_addr
+                break
+        ms["address"] = best_addr
+
+        # 同步给名下所有 promotion 档位，确保切换档位或百分比筛选时地址永不丢失
+        for p in ms["promotions"]:
+            if not p.get("address") or ("外卖送达" in p.get("address") or "配送范围" in p.get("address")):
+                p["address"] = best_addr
+
+        f_plans = [p for p in ms["promotions"] if p.get("rebate_type") == "fixed"]
+        p_plans = [p for p in ms["promotions"] if p.get("rebate_type") == "percent"]
+        ms["fixed_plans"] = f_plans
+        ms["percent_plans"] = p_plans
+        if f_plans:
+            ms["fixed_plan"] = f_plans[0]
+            if ms.get("start_time") in ("00:00", "", None) and f_plans[0].get("start_time") and f_plans[0].get("start_time") != "00:00":
+                ms["start_time"] = f_plans[0]["start_time"]
+                ms["end_time"] = f_plans[0]["end_time"]
+        if p_plans:
+            ms["percent_plan"] = p_plans[0]
+
+    # 5. 后置精准过滤 (基于已深度聚合的商户与方案进行，确保百分比商户完整继承同店真实门牌地址)
+    filtered_stores = merged_stores
+
+    # 平台过滤 (支持美团/饿了么/京东全量平台)
+    if platform and platform != "all":
+        if platform in ("jingdong", "jd"):
+            filtered_stores = [s for s in filtered_stores if s.get("platform") in ("jingdong", "jd") or s.get("store_platform") == 3]
+        elif platform in ("eleme", "taobao"):
+            filtered_stores = [s for s in filtered_stores if s.get("platform") in ("eleme", "taobao") or s.get("store_platform") == 2]
+        elif platform == "meituan":
+            filtered_stores = [s for s in filtered_stores if s.get("platform") == "meituan" or s.get("store_platform") == 1]
+        else:
+            filtered_stores = [s for s in filtered_stores if s.get("platform") == platform]
+
+    # 评价条件过滤
+    if condition and condition != "all":
+        if condition == "no_review":
+            filtered_stores = [s for s in filtered_stores if any(p.get("condition") == "无需评价" for p in s.get("promotions", [])) or s.get("condition") == "无需评价"]
+        elif condition == "good_review":
+            filtered_stores = [s for s in filtered_stores if any(p.get("condition") != "无需评价" for p in s.get("promotions", [])) or s.get("condition") != "无需评价"]
+
+    # 返利模式过滤 (全部 / 实付满返 / 按比例返)
+    if rebate_type and rebate_type != "all":
+        if rebate_type in ("fixed", "amount"):
+            filtered_stores = [s for s in filtered_stores if len(s.get("fixed_plans", [])) > 0 or s.get("rebate_type") == "fixed"]
+            # 若主展示方案不是满返方案，择优切换至首选满返方案
+            for s in filtered_stores:
+                if s.get("rebate_type") != "fixed" and s.get("fixed_plans"):
+                    best_f = s["fixed_plans"][0]
+                    s["promotion_id"] = best_f["promotion_id"]
+                    s["order_money"] = best_f["order_money"]
+                    s["rebate_price"] = best_f["rebate_price"]
+                    s["rebate_rate"] = best_f["rebate_rate"]
+                    s["rebate_desc"] = best_f["rebate_desc"]
+                    s["rebate_type"] = best_f["rebate_type"]
+                    s["rebate_type_text"] = best_f["rebate_type_text"]
+                    s["condition"] = best_f["condition"]
+                    s["left_number"] = best_f["left_number"]
+                    s["start_time"] = best_f["start_time"]
+                    s["end_time"] = best_f["end_time"]
+        elif rebate_type in ("percent", "ratio"):
+            filtered_stores = [s for s in filtered_stores if len(s.get("percent_plans", [])) > 0 or s.get("rebate_type") == "percent"]
+            # 若主展示方案不是比例方案，择优切换至首选比例方案
+            for s in filtered_stores:
+                if s.get("rebate_type") != "percent" and s.get("percent_plans"):
+                    best_p = s["percent_plans"][0]
+                    s["promotion_id"] = best_p["promotion_id"]
+                    s["order_money"] = best_p["order_money"]
+                    s["rebate_price"] = best_p["rebate_price"]
+                    s["rebate_rate"] = best_p["rebate_rate"]
+                    s["rebate_desc"] = best_p["rebate_desc"]
+                    s["rebate_type"] = best_p["rebate_type"]
+                    s["rebate_type_text"] = best_p["rebate_type_text"]
+                    s["condition"] = best_p["condition"]
+                    s["left_number"] = best_p["left_number"]
+                    s["start_time"] = best_p["start_time"]
+                    s["end_time"] = best_p["end_time"]
+
+    # 排序处理 (注意：未知或全国通用距离按 9999999 排到最后，避免 0m 霸榜置顶)
+    if sort_by == "distance":
+        filtered_stores.sort(key=lambda x: (x.get("distance", 0) if x.get("distance", 0) > 0 else 9999999))
+    elif sort_by == "rebate":
+        filtered_stores.sort(key=lambda x: x["rebate_price"], reverse=True)
+    elif sort_by == "rate":
+        filtered_stores.sort(key=lambda x: x["rebate_rate"], reverse=True)
+    elif sort_by == "left":
+        filtered_stores.sort(key=lambda x: x["left_number"], reverse=True)
+
+    merged_stores = filtered_stores
+
+    return {
+        "ok": True,
+        "stores": merged_stores,
+        "total": len(merged_stores),
+        "raw_total": len(stores),
+        "source": source,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "page_pv_id": current_pv_id,
+        "keyword": keyword.strip() if keyword else ""
+    }
+
+
+def _extract_all_promos_from_raw(
+    p: Dict[str, Any],
+    is_search: bool = False,
+    only_meituan: bool = False,
+    user_lat: Optional[float] = None,
+    user_lon: Optional[float] = None,
+    city_name: str = ""
+) -> List[Dict[str, Any]]:
+    """
+    从单条推荐或搜索结果记录中，完整提取出所有返利方案 (plan_activity_info_list)：
+    严格执行规则：
+    1. 若 only_meituan=True，严格限定平台必须为美团外卖（store_platform == 1 或 platform == 'meituan'），其他平台直接剔除。
+    2. 对每一档计划精确识别是「实付满返」还是「按比例返」，并清理所有 Emoji 符号与特殊字符。
+    """
+    # 官方美团赏金按比例返现 POI (source == 5 或具备 wm_poi_id 无独立 promotion_id)
+    if p.get("source") == 5 or (p.get("wm_poi_id") and not p.get("promotion_id")):
+        return _normalize_shangjin_item(p, user_lat=user_lat, user_lon=user_lon, city_name=city_name)
+
+    store_obj = p.get("store") or {}
+    tp = p.get("tp_promotion") or {}
+    platform_code = p.get("store_platform") or store_obj.get("store_platform") or tp.get("store_platform", 1)
+
+    # 若限定美团，非美团直接跳过
+    if only_meituan:
+        if platform_code != 1 and p.get("platform") != "meituan":
+            return []
+
+    base_item = _normalize_search_item(p, user_lat=user_lat, user_lon=user_lon) if is_search else _normalize_feed_item(p, user_lat=user_lat, user_lon=user_lon)
+    if only_meituan and base_item.get("platform") != "meituan" and base_item.get("store_platform") != 1:
+        return []
+
+    plans = p.get("plan_activity_info_list") or []
+
+    if not plans:
+        base_item["name"] = _clean_emoji(base_item.get("name", ""))
+        base_item["rebate_desc"] = _clean_emoji(base_item.get("rebate_desc", ""))
+        return [base_item]
+
+    items = []
+    for idx, plan in enumerate(plans, start=1):
+        plan_ratio = plan.get("user_ratio") or plan.get("ratio") or 0
+        try:
+            p_r = float(plan_ratio)
+            plan_pct = p_r if p_r <= 100 else (p_r / 100.0)
+        except Exception:
+            plan_pct = 0.0
+
+        plan_cap = plan.get("user_max_commission") or plan.get("max_commission") or 0
+        try:
+            p_c = float(plan_cap)
+            plan_cap_val = (p_c / 100.0) if p_c > 50 else p_c
+        except Exception:
+            plan_cap_val = 0.0
+
+        plan_order = plan.get("order_money") or plan.get("min_price_tip") or 0
+        try:
+            p_om = float(plan_order) / 100.0 if float(plan_order) > 50 else float(plan_order)
+        except Exception:
+            p_om = 0.0
+
+        plan_rebate = plan.get("user_rebate") or plan.get("discount_amount") or 0
+        try:
+            p_rb = float(plan_rebate) / 100.0 if float(plan_rebate) > 50 else float(plan_rebate)
+        except Exception:
+            p_rb = 0.0
+
+        plan_left = plan.get("left_number")
+        if plan_left is None:
+            plan_left = plan.get("inventory")
+        if plan_left is None:
+            plan_left = plan.get("meituan_left_number")
+        if plan_left is None:
+            plan_left = (plan.get("tp_promotion") or {}).get("tp_left_number")
+        if plan_left is None:
+            plan_left = base_item.get("left_number")
+        if plan_left is None:
+            plan_left = 0
+
+        plan_item = dict(base_item)
+        plan_item["promotion_id"] = f"{base_item['promotion_id']}_p{idx}" if idx > 1 else base_item["promotion_id"]
+        plan_item["left_number"] = int(plan_left)
+
+        # 提取档位专属开抢时间与时段 (若档位有自身独立时段则覆盖，否则继承商户活动基准时段)
+        plan_start_hour = plan.get("start_time_hour")
+        plan_start_minute = plan.get("start_time_minute")
+        plan_end_hour = plan.get("end_time_hour")
+        plan_end_minute = plan.get("end_time_minute")
+        plan_start_direct = plan.get("start_time")
+        plan_end_direct = plan.get("end_time")
+        plan_start_ts = plan.get("start_timestamp") or plan.get("start_date_timestamp")
+        plan_end_ts = plan.get("end_timestamp") or plan.get("end_date_timestamp")
+
+        if any(x is not None for x in [plan_start_hour, plan_start_minute, plan_start_direct, plan_start_ts]):
+            plan_item["start_time"] = _format_time_pair(
+                hour_val=plan_start_hour, 
+                min_val=plan_start_minute, 
+                direct_str=plan_start_direct, 
+                ts_val=plan_start_ts, 
+                default=base_item.get("start_time", "00:00")
+            )
+        if any(x is not None for x in [plan_end_hour, plan_end_minute, plan_end_direct, plan_end_ts]):
+            plan_item["end_time"] = _format_time_pair(
+                hour_val=plan_end_hour, 
+                min_val=plan_end_minute, 
+                direct_str=plan_end_direct, 
+                ts_val=plan_end_ts, 
+                default=base_item.get("end_time", "23:59")
+            )
+        if plan_start_ts:
+            plan_item["start_date_timestamp"] = plan_start_ts
+        if plan_end_ts:
+            plan_item["end_date_timestamp"] = plan_end_ts
+        if plan.get("if_can_advance_order") is not None:
+            plan_item["if_can_advance_order"] = bool(plan.get("if_can_advance_order"))
+        if plan.get("rebate_condition_str"):
+            plan_item["condition"] = plan.get("rebate_condition_str")
+
+        # 判断方案类型：按比例返 vs 实付满返
+        is_pct = (plan_pct > 0) or (p_om == 0 and plan_cap_val > 0)
+
+        if is_pct:
+            plan_item["rebate_type"] = "percent"
+            plan_item["rebate_type_text"] = "按比例返"
+            cap_val = plan_cap_val if plan_cap_val > 0 else p_rb
+            pct_fmt = int(plan_pct) if plan_pct.is_integer() else round(plan_pct, 1)
+            cap_fmt = int(cap_val) if cap_val.is_integer() else round(cap_val, 1)
+            if plan_pct > 0 and cap_val > 0:
+                plan_item["rebate_desc"] = f"返{pct_fmt}% (最高¥{cap_fmt})"
+            elif plan_pct > 0:
+                plan_item["rebate_desc"] = f"返{plan_pct}%"
+            else:
+                plan_item["rebate_desc"] = f"按比例返 (最高¥{cap_fmt})"
+            plan_item["order_money"] = 0.0
+            plan_item["rebate_price"] = round(cap_val, 2)
+            plan_item["rebate_rate"] = pct_fmt
+        else:
+            plan_item["rebate_type"] = "fixed"
+            plan_item["rebate_type_text"] = "实付满返"
+            om_fmt = int(p_om) if p_om.is_integer() else p_om
+            rb_fmt = int(p_rb) if p_rb.is_integer() else p_rb
+            plan_item["rebate_desc"] = f"满{om_fmt}返{rb_fmt}元" if (p_om > 0 or p_rb > 0) else "实付满返"
+            plan_item["order_money"] = round(p_om, 2)
+            plan_item["rebate_price"] = round(p_rb, 2)
+            plan_item["rebate_rate"] = round(p_rb / p_om * 100, 1) if p_om > 0 else 0
+
+        plan_item["name"] = _clean_emoji(plan_item.get("name", ""))
+        plan_item["rebate_desc"] = _clean_emoji(plan_item.get("rebate_desc", ""))
+        items.append(plan_item)
+
+    return items
+
+
+@router.get("/store/dual-rebate-scan")
+async def scan_dual_rebate_stores(
+    city_code: Optional[int] = Query(None),
+    longitude: Optional[str] = Query(None),
+    latitude: Optional[str] = Query(None),
+    account_key: Optional[str] = Query(None),
+    platform: Optional[str] = Query("meituan"),
+    keyword: Optional[str] = Query(None),
+    max_stores: int = Query(300),
+    max_fixed_stores: Optional[int] = Query(None),
+    max_percent_stores: Optional[int] = Query(None),
+    delay_min: Optional[float] = Query(None),
+    delay_max: Optional[float] = Query(None),
+    page_delay: Optional[float] = Query(None)
+):
+    """
+    美团外卖同店双返利高精度智能扫描：
+    1. 严格限定美团外卖平台；
+    2. 严格判定必须同时存在「实付满返」与「按比例返」两类方案；
+    3. 清洗过滤所有 Emoji 表情与符号；
+    4. 将同一店铺的名下双返利方案深度整合为一个统一模型，支持一键/分别抢单；
+    5. 支持搜索关键词过滤与实付满返/按比例返独立范围配置（默认各 300 家）。
+    """
+    scan_started_at = time.monotonic()
+    city_code = _safe_val(city_code, None)
+    longitude = _safe_val(longitude, None)
+    latitude = _safe_val(latitude, None)
+    account_key = _safe_val(account_key, None)
+    keyword = _safe_val(keyword, None)
+    try:
+        max_stores = int(_safe_val(max_stores, 300))
+    except Exception:
+        max_stores = 300
+    try:
+        fixed_limit = int(_safe_val(max_fixed_stores, 0) or 0)
+    except Exception:
+        fixed_limit = 0
+    try:
+        percent_limit = int(_safe_val(max_percent_stores, 0) or 0)
+    except Exception:
+        percent_limit = 0
+    if fixed_limit <= 0:
+        fixed_limit = max_stores if (max_stores and max_stores > 0) else 300
+    if percent_limit <= 0:
+        percent_limit = max_stores if (max_stores and max_stores > 0) else 300
+    # 强制限定为美团外卖
+    platform = "meituan"
+
+    # 计算翻页抖动区间延迟 (默认 1.5s ~ 3.0s)
+    delay_min = _safe_val(delay_min, None)
+    delay_max = _safe_val(delay_max, None)
+    page_delay = _safe_val(page_delay, None)
+    d_min = 1.5
+    d_max = 3.0
+    if delay_min is not None and delay_min > 0:
+        d_min = float(delay_min)
+    elif page_delay is not None and page_delay > 0:
+        d_min = float(page_delay)
+    if delay_max is not None and delay_max >= d_min:
+        d_max = float(delay_max)
+    else:
+        d_max = max(d_min, 3.0)
+
+    # 0. 前置 WAF 拦截状态检查，避免在冷却期盲目发起大规模扫描
+    if is_waf_blocked():
+        remain_sec = get_waf_cooldown_seconds()
+        return {
+            "ok": False,
+            "total_scanned_promotions": 0,
+            "total_scanned_stores": 0,
+            "dual_rebate_count": 0,
+            "stores": [],
+            "waf_block_detail": get_waf_block_detail(),
+            "message": format_waf_block_message(cooldown=remain_sec),
+        }
+
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {
+            "ok": False,
+            "total_scanned_promotions": 0,
+            "total_scanned_stores": 0,
+            "dual_rebate_count": 0,
+            "stores": [],
+            "message": "请先绑定或选择小蚕账号"
+        }
+
+    target_acc = None
+    if account_key:
+        target_acc = db.get_account_by_key(account_key)
+    if not target_acc and accounts:
+        target_acc = accounts[0]
+
+    if not target_acc:
+        return {"ok": False, "stores": [], "total_scanned_promotions": 0, "total_scanned_stores": 0, "dual_rebate_count": 0, "message": "当前账号凭据无效"}
+
+    token = target_acc.get("token")
+    silk_id = target_acc.get("silk_id")
+    user_id = target_acc.get("user_id")
+
+    if not db.has_valid_location(target_acc):
+        return {
+            "ok": False,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "total_scanned_promotions": 0,
+            "total_scanned_stores": 0,
+            "dual_rebate_count": 0,
+            "stores": [],
+            "message": _location_required_msg(target_acc, account_key or "")
+        }
+
+    # 定位信息严格以账号数据库中绑定保存的地址为准
+    longitude = str(target_acc["longitude"]).strip()
+    latitude = str(target_acc["latitude"]).strip()
+    city_code = int(target_acc["city_code"])
+
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except Exception:
+        return {
+            "ok": False,
+            "total_scanned_promotions": 0,
+            "total_scanned_stores": 0,
+            "dual_rebate_count": 0,
+            "stores": [],
+            "message": "抢单定位坐标格式无效，请重新设置定位"
+        }
+
+    logger.info(
+        f"开始执行美团同店双返利/多活动高精度扫描: city={city_code}, lon={lon}, lat={lat}, "
+        f"实付满返目标={fixed_limit}, 比例返目标={percent_limit}, 关键词={keyword}"
+    )
+
+    seen_store_keys = set()
+    feed_store_keys = set()
+    sj_store_keys = set()
+    store_groups: Dict[str, List[Dict[str, Any]]] = {}
+    seen_promo_keys = set()
+    all_raw_promotions = []
+
+    feed_pages_fetched = 0
+    feed_raw_items_count = 0
+    sj_calls = 0
+    sj_raw_pois_count = 0
+    max_feed_dist = 0
+    max_feed_store_name = ""
+    last_sj_round_names: List[str] = []
+    waf_aborted = False
+
+    def _record_promo(promo: Dict[str, Any], from_feed: bool = False, from_sj: bool = False) -> None:
+        nonlocal max_feed_dist, max_feed_store_name
+        sname = (promo.get("name") or "").strip()
+        if not sname:
+            return
+        if from_feed:
+            pdist = int(promo.get("distance") or 0)
+            if pdist > max_feed_dist:
+                max_feed_dist = pdist
+                max_feed_store_name = sname
+        skey = _get_store_branch_key("meituan", sname)
+        seen_store_keys.add(skey)
+        if from_feed:
+            feed_store_keys.add(skey)
+        if from_sj:
+            sj_store_keys.add(skey)
+        if skey not in store_groups:
+            store_groups[skey] = []
+        pkey = f"{promo.get('platform')}_{promo.get('store_id')}_{promo.get('promotion_id')}"
+        if pkey not in seen_promo_keys:
+            seen_promo_keys.add(pkey)
+            store_groups[skey].append(promo)
+            all_raw_promotions.append(promo)
+
+    # 1. 若用户指定了搜索关键词（如 曼玲粥、tea'stone、老碗会 等），并发调用满减搜索与官方按比例返现检索
+    search_promos = []
+    if keyword and keyword.strip():
+        kw_clean = keyword.strip()
+        try:
+            s_tasks = [
+                client.search_stores(
+                    keyword=kw_clean,
+                    city_code=city_code,
+                    longitude=str(lon),
+                    latitude=str(lat),
+                    offset=s_off,
+                    limit=20,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id
+                )
+                for s_off in [0, 20, 40]
+            ]
+            sj_task = client.search_shangjin_stores(
+                keyword=kw_clean,
+                latitude=lat,
+                longitude=lon,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                city_code=city_code,
+                sort_type=3,
+                page_pv_id=""
+            )
+            s_results = await asyncio.gather(*(s_tasks + [sj_task]), return_exceptions=True)
+            for sr in s_results[:len(s_tasks)]:
+                if isinstance(sr, dict):
+                    raw_proms = sr.get("promotions") or sr.get("promotion_list") or []
+                    for rp in raw_proms:
+                        extracted = _extract_all_promos_from_raw(rp, is_search=True, only_meituan=True, user_lat=lat, user_lon=lon)
+                        search_promos.extend(extracted)
+            sj_res = s_results[len(s_tasks)]
+            if isinstance(sj_res, dict):
+                pois = sj_res.get("poi_list") or []
+                for poi in pois:
+                    search_promos.extend(_normalize_shangjin_item(poi, user_lat=lat, user_lon=lon))
+                # 连续流式拉取剩余的赏金商户（彻底修复原判断 >= 10 导致单批 5 个商户永远无法翻页的严重缺陷）
+                pv_id = sj_res.get("page_pv_id")
+                shangjin_kw_rounds = 0
+                while pv_id and len(pois) > 0 and shangjin_kw_rounds < 3:
+                    shangjin_kw_rounds += 1
+                    try:
+                        sj2 = await client.search_shangjin_stores(
+                            keyword=kw_clean,
+                            latitude=lat,
+                            longitude=lon,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                            city_code=city_code,
+                            sort_type=3,
+                            page_pv_id=pv_id
+                        )
+                        if isinstance(sj2, dict):
+                            pv_id = sj2.get("page_pv_id") or pv_id
+                            pois = sj2.get("poi_list") or []
+                            for poi2 in pois:
+                                search_promos.extend(_normalize_shangjin_item(poi2, user_lat=lat, user_lon=lon))
+                            if len(pois) < 5:
+                                break
+                        else:
+                            break
+                    except Exception:
+                        break
+            logger.info(f"双返利专属搜索关键词 '{kw_clean}' 精准命中 {len(search_promos)} 条活动 (含满减与按比例返)")
+        except Exception as e:
+            logger.warning(f"双返利专属搜索失败: {e}")
+
+    for promo in search_promos:
+        _record_promo(
+            promo,
+            from_feed=(promo.get("rebate_type") == "fixed"),
+            from_sj=(promo.get("rebate_type") == "percent")
+        )
+
+    # 2. 模拟客户端下拉触底流式分页获取附近店铺：
+    # 并发拉取官方附近店铺 Feed 与美团赏金按比例返现池；
+    # 实付满返 (feed_store_keys) 与按比例返 (sj_store_keys) 各自独立计数达标即停止对应通道请求。
+    offset = 0
+    page_size = 35
+    batch_size = 2  # 每次微批次并行拉取 2 页触底数据 (70 条)，降低并发以防止触发腾讯云 WAF 频次拦截
+    max_rounds = max(40, int(fixed_limit // 20) + 15, int(percent_limit // 10) + 15)
+
+    round_idx = 0
+    shangjin_pv = ""
+    feed_exhausted = False
+    sj_exhausted = False
+
+    while round_idx < max_rounds:
+        if is_waf_blocked():
+            logger.warning("附近店铺流式触底加载：检测到 WAF 风控熔断，立即终止扫描")
+            waf_aborted = True
+            break
+
+        need_feed = (len(feed_store_keys) < fixed_limit) and (not feed_exhausted)
+        need_sj = (len(sj_store_keys) < percent_limit) and (not sj_exhausted)
+
+        if not need_feed and not need_sj:
+            logger.info(
+                f"附近店铺流式触底加载：双通道均已达标或触底 "
+                f"(实付满返={len(feed_store_keys)}/{fixed_limit}, 比例返={len(sj_store_keys)}/{percent_limit})，停止加载"
+            )
+            break
+
+        current_offsets = [offset + (i * page_size) for i in range(batch_size)] if need_feed else []
+        feed_tasks = [
+            client.get_store_list(
+                city_code=city_code,
+                longitude=str(lon),
+                latitude=str(lat),
+                offset=off,
+                limit=page_size,
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                sort=1  # 严格按距离最近由近及远扫描
+            )
+            for off in current_offsets
+        ]
+
+        batch_coros = list(feed_tasks)
+        if need_sj:
+            sj_calls += 1
+            batch_coros.append(
+                client.search_shangjin_stores(
+                    keyword="",
+                    latitude=lat,
+                    longitude=lon,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    city_code=city_code,
+                    sort_type=3,
+                    page_pv_id=shangjin_pv
+                )
+            )
+
+        all_batch = await asyncio.gather(*batch_coros, return_exceptions=True)
+        if is_waf_blocked():
+            logger.warning("附近店铺触底批次拉取检测到 WAF 风控熔断，立即终止后续扫描")
+            waf_aborted = True
+            break
+
+        batch_results = all_batch[:len(feed_tasks)]
+        sj_res = all_batch[len(feed_tasks)] if need_sj else None
+        empty_in_batch = 0
+
+        if need_feed:
+            feed_pages_fetched += len(feed_tasks)
+            for r_idx, res in enumerate(batch_results):
+                if isinstance(res, Exception) or not isinstance(res, dict):
+                    logger.warning(f"附近店铺触底批次 (offset={current_offsets[r_idx]}) 异常: {res}")
+                    empty_in_batch += 1
+                    continue
+
+                feed_items = res.get("feed_items") or res.get("items") or res.get("promotion_list") or []
+                feed_raw_items_count += len(feed_items)
+                if not feed_items:
+                    empty_in_batch += 1
+                    continue
+
+                for item in feed_items:
+                    promos = _extract_all_promos_from_raw(item, is_search=False, only_meituan=True, user_lat=lat, user_lon=lon)
+                    for promo in promos:
+                        _record_promo(promo, from_feed=True)
+
+            if empty_in_batch == len(batch_results):
+                if round_idx == 0:
+                    logger.warning("附近店铺第 1 轮返回空或异常，等待 1.2 秒执行快速重试...")
+                    await asyncio.sleep(1.2)
+                    retry_feed_tasks = [
+                        client.get_store_list(
+                            city_code=city_code,
+                            longitude=str(lon),
+                            latitude=str(lat),
+                            offset=off,
+                            limit=page_size,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                            sort=1
+                        )
+                        for off in current_offsets
+                    ]
+                    retry_results = await asyncio.gather(*retry_feed_tasks, return_exceptions=True)
+                    retry_empty = 0
+                    for res in retry_results:
+                        if isinstance(res, Exception) or not isinstance(res, dict):
+                            retry_empty += 1
+                            continue
+                        feed_items = res.get("feed_items") or res.get("items") or res.get("promotion_list") or []
+                        feed_raw_items_count += len(feed_items)
+                        if not feed_items:
+                            retry_empty += 1
+                            continue
+                        for item in feed_items:
+                            promos = _extract_all_promos_from_raw(item, is_search=False, only_meituan=True, user_lat=lat, user_lon=lon)
+                            for promo in promos:
+                                _record_promo(promo, from_feed=True)
+                    if retry_empty == len(retry_results):
+                        feed_exhausted = True
+                else:
+                    feed_exhausted = True
+
+        if need_sj:
+            if isinstance(sj_res, dict):
+                shangjin_pv = sj_res.get("page_pv_id") or shangjin_pv
+                pois = sj_res.get("poi_list") or []
+                sj_raw_pois_count += len(pois)
+                round_sj_names: List[str] = []
+                for poi in pois:
+                    pname = str(poi.get("name") or "").strip()
+                    if pname and pname not in round_sj_names:
+                        round_sj_names.append(pname)
+                    for promo in _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon):
+                        _record_promo(promo, from_sj=True)
+
+                if len(pois) < 5 or not shangjin_pv:
+                    sj_exhausted = True
+                elif len(sj_store_keys) < percent_limit:
+                    # 串联拉取第 2 批赏金商户以保持比例方案推进速度
+                    sj_calls += 1
+                    try:
+                        sj_next = await client.search_shangjin_stores(
+                            keyword="",
+                            latitude=lat,
+                            longitude=lon,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                            city_code=city_code,
+                            sort_type=3,
+                            page_pv_id=shangjin_pv
+                        )
+                        if isinstance(sj_next, dict):
+                            shangjin_pv = sj_next.get("page_pv_id") or shangjin_pv
+                            pois_n = sj_next.get("poi_list") or []
+                            sj_raw_pois_count += len(pois_n)
+                            for poi_n in pois_n:
+                                pname_n = str(poi_n.get("name") or "").strip()
+                                if pname_n and pname_n not in round_sj_names:
+                                    round_sj_names.append(pname_n)
+                                for promo_n in _normalize_shangjin_item(poi_n, user_lat=lat, user_lon=lon):
+                                    _record_promo(promo_n, from_sj=True)
+                            if len(pois_n) < 5 or not shangjin_pv:
+                                sj_exhausted = True
+                    except Exception:
+                        pass
+
+                if round_sj_names:
+                    last_sj_round_names = round_sj_names
+            else:
+                logger.warning(f"赏金按比例返现接口异常 (round={round_idx}): {sj_res}")
+
+        logger.info(
+            f"附近店铺触底加载第 {round_idx + 1} 轮: "
+            f"满返={len(feed_store_keys)}/{fixed_limit} (offset={offset}), "
+            f"比例返={len(sj_store_keys)}/{percent_limit}, 合并去重={len(seen_store_keys)}"
+        )
+
+        if (len(feed_store_keys) >= fixed_limit or feed_exhausted) and (len(sj_store_keys) >= percent_limit or sj_exhausted):
+            break
+
+        if need_feed:
+            offset += batch_size * page_size
+        round_idx += 1
+        # 防 WAF 频次风控：微批次之间根据用户设置的区间随机取抖动值
+        sleep_dur = random.uniform(d_min, d_max)
+        await asyncio.sleep(sleep_dur)
+
+    # 赏金按比例返现池深度保障：
+    # 若尚未触底/未达标且比例方案少于 40 条，执行独立赏金池补偿拉取
+    existing_percent_promos = [p for p in all_raw_promotions if p.get("rebate_type") == "percent"]
+    if len(existing_percent_promos) < 40 and not sj_exhausted and len(sj_store_keys) < percent_limit and not is_waf_blocked():
+        logger.info(f"赏金比例返现活动数量较少 ({len(existing_percent_promos)}条)，执行独立赏金池补偿拉取...")
+        shangjin_extra_pv = shangjin_pv
+        for _ in range(10):
+            if is_waf_blocked() or len(sj_store_keys) >= percent_limit:
+                break
+            try:
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+                sj_calls += 1
+                sj_extra = await client.search_shangjin_stores(
+                    keyword="",
+                    latitude=lat,
+                    longitude=lon,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id,
+                    city_code=city_code,
+                    sort_type=3,
+                    page_pv_id=shangjin_extra_pv
+                )
+                if isinstance(sj_extra, dict):
+                    shangjin_extra_pv = sj_extra.get("page_pv_id") or sj_extra.get("meituan_pv_id") or shangjin_extra_pv
+                    pois = sj_extra.get("poi_list") or []
+                    sj_raw_pois_count += len(pois)
+                    comp_names: List[str] = []
+                    for poi in pois:
+                        pname = str(poi.get("name") or "").strip()
+                        if pname and pname not in comp_names:
+                            comp_names.append(pname)
+                        for promo in _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon):
+                            _record_promo(promo, from_sj=True)
+                    if comp_names:
+                        last_sj_round_names = comp_names
+                    if len(pois) < 5:
+                        break
+            except Exception as e_sj:
+                logger.warning(f"独立赏金池补偿拉取异常: {e_sj}")
+                break
+
+    # 3. 停止加载后，严格按照用户的核心定义筛选美团同店双返利：
+    # 核心规则：同一商户名下，必须同时存在「实付满返」与「按比例返」两类方案！
+    dual_stores = []
+    for gkey, plist in store_groups.items():
+        fixed_plans = [
+            p for p in plist 
+            if p.get("rebate_type") == "fixed" and (p.get("rebate_price", 0) > 0 or p.get("order_money", 0) > 0)
+        ]
+        percent_plans = [
+            p for p in plist 
+            if p.get("rebate_type") == "percent" and (p.get("rebate_rate", 0) > 0 or p.get("rebate_price", 0) > 0)
+        ]
+
+        # 严格满足：必须同时拥有实付满返和按比例返！
+        if not (fixed_plans and percent_plans):
+            continue
+
+        fixed_plans.sort(key=lambda x: (
+            0 if x.get("left_number", 0) > 0 else 1,
+            -x.get("rebate_price", 0),
+            -x.get("left_number", 0)
+        ))
+        percent_plans.sort(key=lambda x: (
+            0 if x.get("left_number", 0) > 0 else 1,
+            -x.get("rebate_rate", 0),
+            -x.get("rebate_price", 0),
+            -x.get("left_number", 0)
+        ))
+
+        best_fixed = fixed_plans[0]
+        best_percent = percent_plans[0]
+        dual_tag = "实付满返 + 按比例返"
+        dual_desc = f"{best_fixed.get('rebate_desc')} + {best_percent.get('rebate_desc')}"
+
+        base = plist[0]
+        # 提取同店多方案中最精确的非零正向距离
+        best_dist = 0
+        best_dist_text = "附近"
+        for p in plist:
+            p_dist = p.get("distance", 0) or 0
+            if p_dist > 0:
+                if best_dist == 0 or p_dist < best_dist:
+                    best_dist = p_dist
+                    best_dist_text = p.get("distance_text") or f"{p_dist}m"
+        if best_dist == 0 and base.get("distance_text"):
+            best_dist_text = base.get("distance_text")
+
+        # 深度提取同店多方案中包含的有效真实门牌地址（满减活动由官方下发门牌地址，按比例赏金接口官方未下发）
+        best_address = ""
+        for p in plist:
+            addr = (p.get("address") or "").strip()
+            if addr:
+                best_address = addr
+                break
+        if not best_address:
+            for fp in fixed_plans:
+                addr = (fp.get("address") or "").strip()
+                if addr:
+                    best_address = addr
+                    break
+
+        store_item = {
+            "store_id": base.get("store_id") or str(uuid.uuid4()),
+            "name": _clean_emoji(base.get("name", "美团同店双返利店铺")),
+            "platform": "meituan",
+            "store_platform": 1,
+            "dual_tag": dual_tag,
+            "icon": base.get("icon") or "",
+            "distance": best_dist,
+            "distance_text": best_dist_text,
+            "condition": base.get("condition", "无需评价"),
+            "start_time": best_fixed.get("start_time", "00:00"),
+            "end_time": best_fixed.get("end_time", "23:59"),
+            "opening_hours": base.get("opening_hours") or "00:00-23:59",
+            "delivery_time_tip": base.get("delivery_time_tip") or "",
+            "address": best_address or base.get("address", ""),
+            
+            "fixed_plan": best_fixed,
+            "percent_plan": best_percent,
+            "fixed_plans": fixed_plans,
+            "percent_plans": percent_plans,
+            "fixed_left": max(0, int(best_fixed.get("left_number") or 0)),
+            "percent_left": max(0, int(best_percent.get("left_number") or 0)),
+
+            # 兼容通用字段
+            "order_money": best_fixed.get("order_money", 0),
+            "rebate_price": best_fixed.get("rebate_price", 0),
+            "rebate_rate": best_percent.get("rebate_rate", 0),
+            "rebate_desc": dual_desc,
+            "rebate_type": "dual",
+            "rebate_type_text": "同店双返利",
+            "left_number": max(best_fixed.get("left_number", 0), best_percent.get("left_number", 0)),
+            "need_brand_coupon": any(p.get("need_brand_coupon") for p in plist),
+            "brand_left_number": max(p.get("brand_left_number", 0) for p in plist),
+            "is_vip_brand": any(p.get("is_vip_brand") for p in plist),
+            "days_limit": plist[0].get("days_limit", 0),
+            "days_order_limit": plist[0].get("days_order_limit", 1),
+            "promotions": fixed_plans + percent_plans,
+            "promotion_count": len(fixed_plans) + len(percent_plans),
+            "is_dual_rebate": True
+        }
+        dual_stores.append(store_item)
+
+    # 4. 排序与关键词处理 (优先展示关键词命中的商户，并按距离由近到远排列)
+    if keyword and keyword.strip():
+        kw_clean = keyword.strip().lower()
+        dual_stores.sort(
+            key=lambda x: (
+                0 if (kw_clean in x.get("name", "").lower() or 
+                      kw_clean in (x.get("fixed_plan", {}).get("rebate_desc", "")).lower() or 
+                      kw_clean in (x.get("percent_plan", {}).get("rebate_desc", "")).lower() or
+                      any(kw_clean in p.get("rebate_desc", "").lower() for p in x.get("promotions", [])))
+                else 1, 
+                x.get("distance", 0) if x.get("distance", 0) > 0 else 9999999
+            )
+        )
+    else:
+        dual_stores.sort(key=lambda x: (x.get("distance", 0) if x.get("distance", 0) > 0 else 9999999))
+
+    total_found_count = len(dual_stores)
+    overlap_count = len(feed_store_keys & sj_store_keys)
+    elapsed_sec = round(time.monotonic() - scan_started_at, 1)
+    max_feed_km_text = f"{max_feed_dist}m ({round(max_feed_dist / 1000.0, 2)}km)" if max_feed_dist > 0 else "无"
+
+    logger.info(
+        f"同店双返利/多活动筛选完成: 满返={len(feed_store_keys)}/{fixed_limit} (最远={max_feed_km_text}), "
+        f"比例返={len(sj_store_keys)}/{percent_limit}, 合并去重={len(seen_store_keys)}, "
+        f"活动档位={len(seen_promo_keys)}, 双方案={total_found_count}, 耗时={elapsed_sec}s"
+    )
+
+    try:
+        resolved_acc_key = str(target_acc.get("key") or account_key or "")
+        acc_label = str(target_acc.get("nickname") or resolved_acc_key or "默认账号")
+        log_lines = [
+            f"[美团同店双返利扫描] {'触发WAF风控提前终止' if waf_aborted else '扫描完成'} (耗时 {elapsed_sec}s)",
+            f"账号: {acc_label} ({resolved_acc_key}) | 城市: {city_code} | 坐标: {lon},{lat}" + (f" | 关键词: {keyword.strip()}" if keyword and keyword.strip() else ""),
+            f"目标范围: 实付满返 {fixed_limit} 家 / 按比例返 {percent_limit} 家 | 延迟区间: {d_min}~{d_max}s",
+            "",
+            f"[实付满返 Feed 统计] 请求 {feed_pages_fetched} 页 (原始 {feed_raw_items_count} 条) -> 去重美团商户 {len(feed_store_keys)} 家",
+            f"最远 Feed 覆盖距离: {max_feed_km_text}" + (f" ({max_feed_store_name})" if max_feed_store_name else ""),
+            "",
+            f"[按比例返 赏金统计] 请求 {sj_calls} 次 (原始 {sj_raw_pois_count} 条) -> 去重赏金商户 {len(sj_store_keys)} 家",
+            "最后一轮赏金店铺 (官方无距离字段): " + ("、".join(last_sj_round_names) if last_sj_round_names else "无"),
+            "",
+            f"[筛选汇总] 合并去重 {len(seen_store_keys)} 家 | 两池直接重合 {overlap_count} 家 | 活动档位 {len(seen_promo_keys)} 条 | 命中双方案 {total_found_count} 家"
+        ]
+        if dual_stores:
+            log_lines.append("")
+            log_lines.append(f"[命中双方案明细] (共 {total_found_count} 家，展示前 {min(50, total_found_count)} 家)")
+            for idx, ds in enumerate(dual_stores[:50], 1):
+                fp = ds.get("fixed_plan") or {}
+                pp = ds.get("percent_plan") or {}
+                d_txt = ds.get("distance_text") or (f"{ds.get('distance')}m" if ds.get("distance") else "未知")
+                log_lines.append(
+                    f"{idx}. {ds.get('name')} | {d_txt} | "
+                    f"满返:{fp.get('rebate_desc', '-')}(余{ds.get('fixed_left', 0)}) + "
+                    f"比例:{pp.get('rebate_desc', '-')}(余{ds.get('percent_left', 0)})"
+                )
+            if total_found_count > 50:
+                log_lines.append(f"...其余 {total_found_count - 50} 家已省略")
+        db.add_job_log(
+            job_id="manual_dual_scan",
+            account_key=resolved_acc_key,
+            task_id="dual_rebate_scan",
+            status="warning" if waf_aborted else "success",
+            output="\n".join(log_lines)
+        )
+    except Exception as log_err:
+        logger.warning(f"写入双返利扫描运行日志失败: {log_err}")
+
+    return {
+        "ok": True,
+        "total_scanned_promotions": len(seen_promo_keys),
+        "total_scanned_stores": len(seen_store_keys),
+        "fixed_scanned_stores": len(feed_store_keys),
+        "percent_scanned_stores": len(sj_store_keys),
+        "max_fixed_stores": fixed_limit,
+        "max_percent_stores": percent_limit,
+        "max_feed_distance": max_feed_dist,
+        "max_feed_store_name": max_feed_store_name,
+        "last_shangjin_stores": last_sj_round_names,
+        "dual_rebate_count": total_found_count,
+        "returned_count": total_found_count,
+        "percent_promo_count": len([p for p in all_raw_promotions if p.get("rebate_type") == "percent"]),
+        "fixed_promo_count": len([p for p in all_raw_promotions if p.get("rebate_type") == "fixed"]),
+        "max_stores": max_stores,
+        "stores": dual_stores,
+        "message": f"扫描完成：满返 {len(feed_store_keys)} 家 / 比例返 {len(sj_store_keys)} 家（合并 {len(seen_store_keys)} 家），筛出 {total_found_count} 家同店双福利/多活动店铺"
+    }
+
+
+@router.post("/store/grab-now")
+async def grab_store_now(data: Dict[str, Any] = Body(...)):
+    """
+    即时抢单接口
+    当前时间已到且有名额时，直接执行抢单；若因库存瞬间被抢光导致失败，返回 can_monitor=True
+    """
+    account_key = data.get("account_key")
+    if not account_key:
+        raise HTTPException(status_code=400, detail="请先选择小蚕账号")
+    account = db.get_account_by_key(account_key)
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="当前账号已退出或凭据失效")
+    _require_account_location(account, account_key)
+
+    promotion_id = data.get("promotion_id")
+    if not promotion_id:
+        raise HTTPException(status_code=400, detail="缺少 promotion_id 参数")
+
+    from ..core.appointment_worker import execute_grab_for_appointment
+    apt_data = {
+        "id": 0,
+        "account_key": account_key,
+        "store_id": str(data.get("store_id", "")),
+        "store_name": data.get("store_name", "店铺活动"),
+        "store_icon": str(data.get("store_icon") or ""),
+        "promotion_id": str(promotion_id),
+        "platform": data.get("platform", "meituan"),
+        "store_platform": int(data.get("store_platform") or (3 if data.get("platform") in ("jingdong", "jd") else (2 if data.get("platform") == "eleme" else 1))),
+        "order_money": float(data.get("order_money", 0.0)),
+        "rebate_price": float(data.get("rebate_price", 0.0)),
+        "rebate_desc": data.get("rebate_desc", ""),
+        "rebate_type": str(data.get("rebate_type") or ""),
+        "redpack_mode": int(data.get("redpack_mode", 0)),
+        "redpack_id": data.get("redpack_id"),
+        "redpack_name": data.get("redpack_name", "")
+    }
+
+    res = await execute_grab_for_appointment(apt_data, account, advance=bool(data.get("advance", False)), action_source="store_grab")
+    if res["ok"]:
+        return {
+            "ok": True,
+            "order_id": res.get("order_id"),
+            "message": f"小蚕官方抢单成功，已为你锁定【{apt_data['store_name']}】名额 (订单ID: {res.get('order_id')})"
+        }
+    else:
+        err_code = res.get("code")
+        err_msg = res.get("message") or "抢单未成功"
+        # 仅当官方提示无名额/开仓已被抢光时才推荐开启名额监听；若为卡券不足(61)、未登录、风控等，不应弹出名额抢空模态框
+        can_monitor = err_code in (40003, 40004, 40037, 40038, 40039, 40040) or "名额" in err_msg or "抢完" in err_msg or "已满" in err_msg
+        return {
+            "ok": False,
+            "code": err_code,
+            "can_monitor": can_monitor,
+            "message": err_msg
+        }
+
+
+@router.post("/store/cancel-promotion-order")
+async def cancel_promotion_order(data: Dict[str, Any] = Body(...)):
+    """取消已抢到的霸王餐订单名额 (对齐小蚕官方 SilkwormService.CancelPromotionQuota) 并打入运行日志"""
+    account_key = data.get("account_key") or data.get("account")
+    order_id = data.get("promotion_order_id") or data.get("order_id")
+    if not account_key:
+        raise HTTPException(status_code=400, detail="请先选择账号")
+    if not order_id:
+        raise HTTPException(status_code=400, detail="缺少订单编号 promotion_order_id")
+    account = db.get_account_by_key(account_key)
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="账号凭据失效或未登录")
+    city_code = _require_account_location(account, account_key)
+
+    job_id = f"job_cancel_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    nickname = account.get("nickname") or account_key
+    cancel_steps = []
+    t_start = time_service.format_now_ms()
+    cancel_steps.append(f"[{t_start}] 启动霸王餐取消名额流程 - 账号: 【{nickname}】, 官方订单号: #{order_id}")
+
+    try:
+        t_req = time_service.format_now_ms()
+        cancel_steps.append(f"[{t_req}] 步骤 1/2: 调用官方 SilkwormService.CancelPromotionQuota RPC 接口")
+        res = await client.cancel_promotion_quota(
+            promotion_order_id=int(order_id),
+            token=account["token"],
+            silk_id=account.get("silk_id"),
+            user_id=account.get("user_id"),
+            city_code=city_code
+        )
+        t_fin = time_service.format_now_ms()
+        cancel_steps.append(f"[{t_fin}] 步骤 2/2: 官方响应成功，订单名额已退还，本地及远程锁定解除")
+        cancel_steps.append(f"[{time_service.format_now_ms()}] 流程结束 - 取消名额成功")
+        try:
+            db.add_job_log(job_id, account_key, "store_cancel", "success", "\n".join(cancel_steps))
+        except Exception:
+            pass
+        return {"ok": True, "message": "订单名额已成功在官方后台取消", "raw": res}
+    except XiaoCanRPCError as e:
+        t_err = time_service.format_now_ms()
+        cancel_steps.append(f"[{t_err}] 官方接口返回失败: {e.msg} (错误码: {e.code})")
+        try:
+            db.add_job_log(job_id, account_key, "store_cancel", "error", "\n".join(cancel_steps))
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"官方取消失败 [{e.code}]: {e.msg}")
+    except Exception as e:
+        t_err = time_service.format_now_ms()
+        cancel_steps.append(f"[{t_err}] 取消接口网络或服务异常: {str(e)}")
+        try:
+            db.add_job_log(job_id, account_key, "store_cancel", "error", "\n".join(cancel_steps))
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"取消名额失败: {str(e)}")
+
+
+@router.post("/store/signup-redpacks")
+async def get_signup_redpacks(data: Dict[str, Any] = Body(...)):
+    """获取指定账号当前可用红包清单 (对齐小蚕官方 RedPackService.GetUserMaxRedPack)"""
+    account_key = data.get("account_key") or data.get("account")
+    if not account_key:
+        raise HTTPException(status_code=400, detail="请选择账号")
+    account = db.get_account_by_key(account_key)
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="账号未登录")
+    city_code = _require_account_location(account, account_key)
+
+    try:
+        res = await client.get_user_max_redpack(
+            token=account["token"],
+            silk_id=account.get("silk_id"),
+            user_id=account.get("user_id"),
+            city_code=city_code
+        )
+        packs = res.get("platform_red_packs") or []
+        items = []
+        for p in packs:
+            raw_reward = float(p.get("reward_num", 0) or 0) / 100
+            items.append({
+                "id": p.get("user_red_pack_id"),
+                "name": p.get("name") or f"立减红包 ¥{raw_reward:.2f}",
+                "reward_num": p.get("reward_num", 0),
+                "end_time": p.get("end_time")
+            })
+        return {"ok": True, "items": items, "max_redpack": res.get("rep_pack")}
+    except Exception as e:
+        logger.warning(f"获取报名红包异常: {e}")
+        return {"ok": True, "items": [], "max_redpack": None}
+
+
+@router.post("/store/appoint")
+async def create_appointment(data: Dict[str, Any] = Body(...)):
+    """提交店铺抢单预约或名额监听任务"""
+    account_key = data.get("account_key")
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account_key or not account:
+        raise HTTPException(status_code=400, detail="未登录有效小蚕账号，无法创建预约或监听任务")
+    _require_account_location(account, account_key)
+    
+    task_type = data.get("task_type") or ("monitor" if data.get("mode") == "monitor" else "countdown")
+    data["task_type"] = task_type
+    
+    # 初始状态设为 running，真实追踪全流程生命周期
+    task_name = "实时名额监听捡漏任务" if task_type == "monitor" else "倒计时预约抢单任务"
+    log_tid = "store_monitor" if task_type == "monitor" else "store_appoint"
+    job_id = f"job_create_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    account = db.get_account_by_key(account_key)
+    nick = account.get("nickname") if account else account_key
+    plat_str = "美团外卖" if data.get("platform") == "meituan" else ("饿了么" if data.get("platform") == "eleme" else "京东外卖")
+    use_adv = bool(data.get("use_advance_card"))
+    adv_note = "【使用超前券·提前30分钟开抢】" if use_adv else ""
+    rp_mode = int(data.get("redpack_mode", 0))
+    rp_note = f"指定红包 #{data.get('redpack_id')} ({data.get('redpack_name', '')})" if rp_mode == 1 else ("不使用红包" if rp_mode == 2 else "自动最优红包")
+    s_log = (
+        f"[{time_service.format_now_ms()}] 初始化{task_name}成功 - 任务装载就绪\n"
+        f"[{time_service.format_now_ms()}] 目标店铺: 【{data.get('store_name', '商户活动')}】 (平台: {plat_str}, 活动ID: {data.get('promotion_id')})\n"
+        f"[{time_service.format_now_ms()}] 预约策略: 开抢/开始时间 {data.get('start_time', '即刻')} {adv_note}, 监听截止 {data.get('until_time', '活动结束')}, 提前量 {data.get('early_ms', 500)}ms\n"
+        f"[{time_service.format_now_ms()}] 卡券与红包关联: {rp_note} | {'已绑定超前抢单券' if use_adv else '未启用超前券'}\n"
+        f"[{time_service.format_now_ms()}] 执行账号: 【{nick}】，已正式装载入自适应调度队列，持续跟踪执行流水..."
+    )
+    log_id = 0
+    try:
+        log_id = db.add_job_log(job_id, account_key, log_tid, "running", s_log)
+    except Exception:
+        pass
+
+    data["log_id"] = log_id
+    aid = db.add_appointment(data)
+    # 将包含真实 aid 的信息反写至日志中
+    if log_id > 0:
+        updated_s_log = s_log.replace("任务装载就绪", f"任务编号 #{aid}")
+        db.update_job_log(log_id, status="running", output=updated_s_log)
+
+    return {"ok": True, "appointment_id": aid, "message": f"{task_name}已创建并加入调度队列"}
+
+
+@router.post("/store/stock-watch")
+async def create_stock_watch(data: Dict[str, Any] = Body(...)):
+    """创建名额监控捡漏任务 (对齐小蚕会员助手 /api/store/stock-watch)"""
+    account_key = data.get("account") or data.get("account_key")
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account_key or not account:
+        raise HTTPException(status_code=400, detail="未找到有效账号")
+    _require_account_location(account, account_key)
+
+    timeout_sec = int(data.get("timeout_sec") or 3600)
+    poll_sec = int(data.get("poll_sec") or 5)
+    
+    # 计算截止时间
+    now = time_service.now_dt()
+    until_dt = now + timedelta(seconds=timeout_sec)
+    until_str = until_dt.strftime("%H:%M")
+
+    job_id = f"job_watch_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    account = db.get_account_by_key(account_key)
+    nick = account.get("nickname") if account else account_key
+    store_title = data.get("store_name") or data.get("label") or "商户活动"
+    s_log = (
+        f"[{time_service.format_now_ms()}] 启动名额监控捡漏任务 - 调度引擎就绪\n"
+        f"[{time_service.format_now_ms()}] 店铺【{store_title}】(活动ID: {data['promotion_id']})\n"
+        f"[{time_service.format_now_ms()}] 监听参数: 轮询频率每 {poll_sec} 秒, 最长持续 {timeout_sec//60} 分钟 (截止 {until_str})\n"
+        f"[{time_service.format_now_ms()}] 监听通道已就绪，检测到名额释放时将执行毫秒级抢单..."
+    )
+    log_id = 0
+    try:
+        log_id = db.add_job_log(job_id, account_key, "store_monitor", "running", s_log)
+    except Exception:
+        pass
+
+    apt_data = {
+        "account_key": account_key,
+        "store_id": str(data.get("store_id") or ""),
+        "store_name": store_title,
+        "store_icon": data.get("store_icon") or data.get("icon") or "",
+        "promotion_id": str(data["promotion_id"]),
+        "task_type": "monitor",
+        "start_time": now.strftime("%H:%M"),
+        "until_time": until_str,
+        "check_interval": poll_sec,
+        "redpack_mode": 0 if data.get("redpack_mode") == "auto" else (2 if data.get("redpack_mode") == "none" else 1),
+        "redpack_id": data.get("redpack_id"),
+        "platform": "meituan" if int(data.get("store_platform") or 1) == 1 else "eleme",
+        "log_id": log_id
+    }
+    aid = db.add_appointment(apt_data)
+    if log_id > 0:
+        updated_s_log = s_log.replace("调度引擎就绪", f"任务编号 #{aid}")
+        db.update_job_log(log_id, status="running", output=updated_s_log)
+
+    return {"ok": True, "appointment_id": aid, "message": f"已开始名额监控 · 最长 {timeout_sec//60} 分钟 · 每 {poll_sec} 秒"}
+
+
+@router.post("/store/keyword-watch")
+async def create_keyword_watch(data: Dict[str, Any] = Body(...)):
+    """创建定时搜索捡漏任务 (对齐小蚕会员助手 /api/store/keyword-watch)"""
+    account_key = data.get("account") or data.get("account_key")
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account_key or not account:
+        raise HTTPException(status_code=400, detail="未找到有效账号")
+    _require_account_location(account, account_key)
+
+    keyword = (data.get("keyword") or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="缺少搜索关键词")
+
+    start_at = data.get("start_at") or time_service.format_now("%H:%M")
+    timeout_sec = int(data.get("timeout_sec") or 3600)
+    poll_sec = max(10, int(data.get("poll_sec") or 30))
+    platforms = data.get("platforms") or ["meituan"]
+    plat = platforms[0] if platforms else "meituan"
+
+    # 计算截止时间
+    now = time_service.now_dt()
+    until_dt = now + timedelta(seconds=timeout_sec)
+    until_str = until_dt.strftime("%H:%M")
+
+    job_id = f"job_kw_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    account = db.get_account_by_key(account_key)
+    nick = account.get("nickname") if account else account_key
+    s_log = (
+        f"[{time_service.format_now_ms()}] 创建商户定时搜索捡漏任务 - 调度引擎就绪\n"
+        f"[{time_service.format_now_ms()}] 搜索关键词: 「{keyword}」 (平台: {plat})\n"
+        f"[{time_service.format_now_ms()}] 检索时段: 开始于 {start_at}, 截止至 {until_str}, 频率每 {poll_sec} 秒\n"
+        f"[{time_service.format_now_ms()}] 账号【{nick}】自动搜索流水已启动，持续监听中..."
+    )
+    log_id = 0
+    try:
+        log_id = db.add_job_log(job_id, account_key, "store_keyword", "running", s_log)
+    except Exception:
+        pass
+
+    apt_data = {
+        "account_key": account_key,
+        "store_id": "0",
+        "store_name": keyword,
+        "promotion_id": "0",
+        "task_type": "keyword",
+        "start_time": start_at,
+        "until_time": until_str,
+        "check_interval": poll_sec,
+        "platform": plat,
+        "redpack_mode": 0 if data.get("redpack_mode") == "auto" else (2 if data.get("redpack_mode") == "none" else 1),
+        "redpack_id": data.get("redpack_id"),
+        "rebate_desc": f"定时搜索【{keyword}】",
+        "log_id": log_id
+    }
+    aid = db.add_appointment(apt_data)
+    if log_id > 0:
+        updated_s_log = s_log.replace("调度引擎就绪", f"任务编号 #{aid}")
+        db.update_job_log(log_id, status="running", output=updated_s_log)
+
+    return {"ok": True, "appointment_id": aid, "appointment": {"id": aid, "start_at": start_at}, "message": f"已添加定时搜索「{keyword}」-> {start_at}"}
+
+
+@router.post("/store/name-monitor")
+async def create_name_monitor(data: Dict[str, Any] = Body(...)):
+    """
+    创建店名抢单监听任务：
+    支持多平台 (美团/饿了么/全部)、匹配模式 (包含/精确)、模式过滤 (全部/满返/按比例)、
+    最低返利金额、最低返利比例、最高起送门槛、成功后自动停止等全方位配置。
+    """
+    account_key = data.get("account") or data.get("account_key")
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account_key or not account:
+        raise HTTPException(status_code=400, detail="未找到有效账号")
+    _require_account_location(account, account_key)
+
+    keyword = (data.get("keyword") or data.get("store_name") or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="缺少监听商户名称或关键词")
+
+    match_mode = data.get("match_mode") or "contains"
+    platform = data.get("platform") or "all"
+    rebate_mode_filter = data.get("rebate_mode_filter") or "all"
+    min_rebate_price = float(data.get("min_rebate_price") or 0.0)
+    min_rebate_rate = float(data.get("min_rebate_rate") or 0.0)
+    max_order_money = float(data.get("max_order_money") or 0.0)
+    auto_stop_on_success = int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1)
+    use_advance_card = int(data.get("use_advance_card") or 0)
+
+    raw_timeout = data.get("timeout_sec")
+    timeout_sec = int(raw_timeout) if raw_timeout is not None else 7200
+    poll_sec = max(5, int(data.get("check_interval") or data.get("poll_sec") or 10))
+
+    now = time_service.now_dt()
+    start_at = data.get("start_time") or now.strftime("%H:%M")
+    if data.get("until_time"):
+        until_str = data.get("until_time")
+    elif timeout_sec > 0:
+        until_dt = now + timedelta(seconds=timeout_sec)
+        until_str = until_dt.strftime("%H:%M")
+    else:
+        until_str = "23:59"
+
+    job_id = f"job_namemon_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    nick = account.get("nickname") or account_key
+    loc_label = f"{account.get('city_name', '')} {account.get('address_name', '')}".strip()
+    loc_coords = f"({account.get('longitude', '')}, {account.get('latitude', '')})"
+
+    plat_desc = "全平台 (美团/饿了么)" if platform == "all" else ("美团外卖" if platform == "meituan" else "饿了么")
+    match_desc = "包含匹配" if match_mode == "contains" else "精确完全匹配"
+    filter_desc = "全部方案" if rebate_mode_filter == "all" else ("仅实付满返" if rebate_mode_filter == "fixed" else "仅按比例返")
+    req_parts = []
+    if min_rebate_price > 0:
+        req_parts.append(f"最低返利 ¥{min_rebate_price:.1f}")
+    if min_rebate_rate > 0:
+        req_parts.append(f"最低比例 {min_rebate_rate:.0f}%")
+    if max_order_money > 0:
+        req_parts.append(f"门槛≤¥{max_order_money:.1f}")
+    req_str = "、".join(req_parts) if req_parts else "不设额外门槛"
+
+    t_now_init = time_service.format_now_ms()
+
+    s_log = (
+        f"[{t_now_init}] 创建店名抢单监听任务 - 调度引擎装载就绪\n"
+        f"[{t_now_init}] 目标商户关键词: 「{keyword}」 (模式: {match_desc} | 平台: {plat_desc})\n"
+        f"[{t_now_init}] 方案筛选要求: {filter_desc} | 阈值规则: {req_str}\n"
+        f"[{t_now_init}] 卡券加速策略: {'已启用超前抢单券加速 (进入开抢前30分钟自动触发)' if use_advance_card else '常规开抢 (准点开火)'}\n"
+        f"[{t_now_init}] 监听策略: 准点放单智能对齐 (每分钟 00 秒必嗅探) + 每 {poll_sec} 秒轮询 | 时段: {start_at} 至 {until_str} | 抢成自停: {'开启' if auto_stop_on_success else '关闭'}\n"
+        f"[{t_now_init}] 执行账号: 【{nick}】| 绑定定位: {loc_label or '已绑定'} {loc_coords}，高频嗅探与自动秒抢通道已就绪..."
+    )
+    log_id = 0
+    try:
+        log_id = db.add_job_log(job_id, account_key, "store_monitor", "running", s_log)
+    except Exception:
+        pass
+
+    apt_data = {
+        "account_key": account_key,
+        "store_id": "0",
+        "store_name": keyword,
+        "store_icon": data.get("store_icon") or "",
+        "promotion_id": "0",
+        "task_type": "name_monitor",
+        "start_time": start_at,
+        "until_time": until_str,
+        "check_interval": poll_sec,
+        "platform": platform,
+        "keyword": keyword,
+        "match_mode": match_mode,
+        "rebate_mode_filter": rebate_mode_filter,
+        "min_rebate_price": min_rebate_price,
+        "min_rebate_rate": min_rebate_rate,
+        "max_order_money": max_order_money,
+        "auto_stop_on_success": auto_stop_on_success,
+        "use_advance_card": use_advance_card,
+        "redpack_mode": int(data.get("redpack_mode", 0)),
+        "redpack_id": str(data.get("redpack_id") or ""),
+        "redpack_name": str(data.get("redpack_name") or ""),
+        "rebate_desc": f"店名监听【{keyword}】({plat_desc})",
+        "log_id": log_id
+    }
+    aid = db.add_appointment(apt_data)
+    if log_id > 0:
+        updated_s_log = s_log.replace("调度引擎装载就绪", f"任务编号 #{aid}")
+        db.update_job_log(log_id, status="running", output=updated_s_log)
+
+    from ..core.appointment_worker import invalidate_worker_cache
+    invalidate_worker_cache()
+
+    return {
+        "ok": True,
+        "appointment_id": aid,
+        "message": f"已启动「{keyword}」店名监听抢单任务 (编号 #{aid})"
+    }
+
+
+@router.get("/store/appointments")
+async def list_appointments(account_key: Optional[str] = Query(None)):
+    """获取预约队列列表"""
+    items = db.get_appointments(account_key)
+    return {"ok": True, "appointments": items, "total": len(items)}
+
+
+@router.post("/store/appointments/{aid}/stop")
+async def stop_appointment(aid: int):
+    """主动停止指定名额监听或预约任务"""
+    apt = db.get_appointment_by_id(aid)
+    if not apt:
+        raise HTTPException(status_code=404, detail="未找到对应的监听任务")
+    db.update_appointment(aid, {
+        "status": "cancelled",
+        "outcome": f"用户已于 {time_service.format_now()} 主动停止监听"
+    })
+    job_id = f"job_stop_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    acc_key = apt.get("account_key", "")
+    s_log = (
+        f"[{time_service.format_now_ms()}] 用户主动停止监听任务 #{aid}\n"
+        f"[{time_service.format_now_ms()}] 目标店铺: 【{apt.get('store_name', '商户活动')}】\n"
+        f"[{time_service.format_now_ms()}] 监听状态已转为 cancelled，定时轮询与突发抢单已解除"
+    )
+    linked_log_id = int(apt.get("log_id") or 0)
+    if linked_log_id > 0:
+        try:
+            with db.get_conn() as conn:
+                row = conn.execute("SELECT output FROM job_logs WHERE id = ?", (linked_log_id,)).fetchone()
+                prev_output = row["output"] if row else ""
+            new_output = (prev_output + "\n" + s_log).strip()
+            db.update_job_log(linked_log_id, status="error", output=new_output)
+        except Exception:
+            db.add_job_log(job_id, acc_key, "store_monitor", "error", s_log)
+    else:
+        try:
+            db.add_job_log(job_id, acc_key, "store_monitor", "error", s_log)
+        except Exception:
+            pass
+    from ..core.appointment_worker import invalidate_worker_cache
+    invalidate_worker_cache()
+    return {"ok": True, "message": "已主动停止该名额监听任务"}
+
+
+@router.delete("/store/appointments/{aid}")
+async def cancel_appointment(aid: int):
+    """取消店铺预约"""
+    apt = db.get_appointment_by_id(aid)
+    if apt:
+        acc_key = apt.get("account_key", "")
+        job_id = f"job_del_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+        s_log = (
+            f"[{time_service.format_now_ms()}] 用户删除预约/监听任务 #{aid}\n"
+            f"[{time_service.format_now_ms()}] 目标商户: 【{apt.get('store_name', '商户活动')}】\n"
+            f"[{time_service.format_now_ms()}] 该任务已从系统调度队列永久移除"
+        )
+        linked_log_id = int(apt.get("log_id") or 0)
+        if linked_log_id > 0:
+            try:
+                with db.get_conn() as conn:
+                    row = conn.execute("SELECT output FROM job_logs WHERE id = ?", (linked_log_id,)).fetchone()
+                    prev_output = row["output"] if row else ""
+                new_output = (prev_output + "\n" + s_log).strip()
+                db.update_job_log(linked_log_id, status="error", output=new_output)
+            except Exception:
+                db.add_job_log(job_id, acc_key, "store_appoint", "error", s_log)
+        else:
+            try:
+                db.add_job_log(job_id, acc_key, "store_appoint", "error", s_log)
+            except Exception:
+                pass
+    db.delete_appointment(aid)
+    from ..core.appointment_worker import invalidate_worker_cache
+    invalidate_worker_cache()
+    return {"ok": True, "message": "已取消预约"}
+
+
+# ---------------- 4.1 霸王餐订单管理接口 ---------------- #
+
+@router.get("/orders")
+async def list_orders(
+    account_key: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    platform: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    limit: int = Query(50),
+    offset: int = Query(0)
+):
+    """获取真实霸王餐订单列表 (自动同步真实历史与进行中订单，100% 真实数据)"""
+    account_key = _safe_val(account_key, None)
+    status = _safe_val(status, None)
+    platform = _safe_val(platform, None)
+    keyword = _safe_val(keyword, None)
+    limit = int(_safe_val(limit, 50))
+    offset = int(_safe_val(offset, 0))
+
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {"ok": True, "orders": [], "total": 0, "message": "当前未登录或未托管小蚕账号"}
+
+    acc = None
+    if account_key:
+        acc = db.get_account_by_key(account_key)
+    if not acc and accounts:
+        acc = accounts[0]
+        account_key = acc.get("key")
+
+    if not acc:
+        return {"ok": True, "orders": [], "total": 0, "message": "当前账号已退出"}
+
+    token = acc.get("token")
+    if not token:
+        return {"ok": True, "orders": [], "total": 0, "message": "当前账号凭据已失效或已退出"}
+
+    silk_id = acc.get("silk_id")
+    user_id = acc.get("user_id")
+    if not db.has_valid_location(acc):
+        orders = db.get_orders(
+            account_key=account_key,
+            status=status,
+            platform=platform,
+            keyword=keyword,
+            limit=limit,
+            offset=offset
+        )
+        return {
+            "ok": True,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "message": _location_required_msg(acc, account_key or ""),
+            "orders": orders,
+            "total": len(orders)
+        }
+    city_code = int(acc["city_code"])
+
+    # 转换前端状态过滤参数为官方 RPC order_status
+    # 官方真实状态集：0=待上传, 1=审核中, 2=已完成, 3=已驳回, 4=已取消, 99=全部
+    query_st = 99
+    if status == "pending":
+        query_st = 0
+    elif status == "auditing":
+        query_st = 1
+    elif status == "completed":
+        query_st = 2
+    elif status == "rejected":
+        query_st = 3
+    elif status == "cancelled":
+        query_st = 4
+    else:
+        query_st = 99
+
+    # 尝试从小蚕官方 RPC 同步最新真实订单 (固定同步全部 order_status=99，保证单号与最新状态全量校准)
+    try:
+        rpc_res = await client.get_order_list(
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            order_status=99,
+            offset=0,
+            number=50,
+            city_code=city_code
+        )
+        raw_orders = rpc_res.get("order_list") or rpc_res.get("orders") or []
+        for o in raw_orders:
+            order_sn = str(o.get("order_id_str") or o.get("promotion_order_id") or "")
+            if not order_sn:
+                continue
+            promo = o.get("store_promotion") or {}
+            store_obj = promo.get("store") or {}
+            store_name = store_obj.get("name") or promo.get("store_name") or "小蚕霸王餐"
+            store_icon = (
+                store_obj.get("icon") or
+                store_obj.get("logo") or
+                store_obj.get("head_img") or
+                promo.get("picture") or
+                promo.get("store_icon") or
+                promo.get("icon") or
+                o.get("store_icon") or
+                ""
+            )
+            store_id = str(store_obj.get("store_id") or "")
+            if not store_icon and (store_id or store_name):
+                try:
+                    conn = db.get_db()
+                    cur = conn.cursor()
+                    r_icon = cur.execute(
+                        "SELECT store_icon FROM orders WHERE (store_id = ? OR store_name = ?) AND store_icon != '' LIMIT 1",
+                        (store_id, store_name)
+                    ).fetchone()
+                    if r_icon and r_icon[0]:
+                        store_icon = r_icon[0]
+                except Exception:
+                    pass
+            
+            order_type_val = int(o.get("order_type") or 0)
+            raw_ratio = float(o.get("ratio") or 0)
+            rebate_ratio = round(raw_ratio / 100.0, 1) if raw_ratio > 0 else 0.0
+            is_percent_order = (order_type_val == 12 or rebate_ratio > 0 or bool(o.get("if_mt_fan")))
+
+            raw_om = float(o.get("store_platform_order_money") or 0)
+            if is_percent_order:
+                order_money = 0.0
+                if o.get("platform_order_total_price"):
+                    try:
+                        order_money = round(float(o.get("platform_order_total_price")), 2)
+                    except Exception:
+                        pass
+            else:
+                order_money = round(raw_om / 100.0, 2)
+                if order_money == 0 and o.get("platform_order_total_price"):
+                    try:
+                        order_money = round(float(o.get("platform_order_total_price")), 2)
+                    except Exception:
+                        pass
+
+            raw_rebate = float(o.get("user_rebate") or 0)
+            rebate_money = round(raw_rebate / 100.0, 2)
+            if is_percent_order and rebate_money <= 0:
+                raw_max_comm = float(o.get("max_commission") or raw_om or 0)
+                if raw_max_comm > 0:
+                    rebate_money = round(raw_max_comm / 100.0, 2)
+
+            raw_orig = float(o.get("original_user_rebate") or 0)
+            orig_rebate = round(raw_orig / 100.0, 2)
+
+            raw_redpack = float(o.get("redpack_reward_num") or 0)
+            redpack_reward = round(raw_redpack / 100.0, 2)
+
+            sp = o.get("store_platform")
+            if sp == 3:
+                order_platform = "jingdong"
+            elif sp == 2:
+                order_platform = "eleme"
+            else:
+                order_platform = "meituan"
+
+            # 官方状态枚举校准 (严格遵循官方小蚕 APK 逆向与服务端真实业务):
+            # 0=待上传/待绑定, 1=审核中, 2=已完成/已返现, 3=已驳回, 4=用户主动取消, 5=超时取消/订单关闭
+            raw_st = int(o.get("order_status", 0) or 0)
+            cancel_time = int(o.get("cancel_time") or 0)
+            timeout_time_val = int(o.get("timeout_time") or 0)
+            now_ts = time_service.now_int()
+
+            platform_order_id = str(
+                o.get("platform_order_id")
+                or o.get("source_order_id")
+                or o.get("store_platform_order_id")
+                or o.get("platform_order_sn")
+                or o.get("third_order_id")
+                or ""
+            ).strip()
+
+            if cancel_time > 0 or raw_st in (4, 5):
+                status_str = "cancelled"
+            elif raw_st == 2:
+                status_str = "completed"
+            elif raw_st == 1:
+                status_str = "auditing"
+            elif raw_st == 3:
+                status_str = "rejected"
+            elif raw_st == 0:
+                # 待上传 / 待提交
+                # 若未绑定外卖单号且已过 timeout_time，则判定为超时取消关闭
+                if not platform_order_id and timeout_time_val > 0 and timeout_time_val < now_ts:
+                    status_str = "cancelled"
+                else:
+                    status_str = "pending"
+            else:
+                if not platform_order_id and timeout_time_val > 0 and timeout_time_val < now_ts:
+                    status_str = "cancelled"
+                else:
+                    status_str = "pending"
+
+            if is_percent_order:
+                cond_str = "无需评价"
+            else:
+                cond_val = promo.get("rebate_condition")
+                cond_raw = promo.get("rebate_condition_str") or ("无需评价" if cond_val == 99 else ("随心好评" if cond_val == 2 else "用餐反馈"))
+                cond_str = cond_raw.replace("（需含字含图）", "").replace("(需含字含图)", "").strip() if cond_raw else "用餐反馈"
+                if not cond_str or cond_str == "图文好评":
+                    cond_str = "用餐反馈"
+            screens = o.get("platform_evaluation_screenshot") or []
+            receipt_img = screens[0] if screens else ""
+            ot = o.get("order_time")
+            c_at = time_service.format_ts(ot, "%Y-%m-%d %H:%M:%S") if ot else time_service.format_now_dt()
+            tt = o.get("timeout_time")
+            exp_at = time_service.format_ts(tt, "%Y-%m-%d %H:%M:%S") if tt else ""
+            ot_num = int(ot or 0)
+            tt_num = int(tt or 0)
+            is_delayed_reward = (
+                int(o.get("delay_count") or o.get("hh_delay_count") or 0) > 0 or
+                (tt_num > 0 and ot_num > 0 and (tt_num - ot_num) >= 25200)
+            )
+            delay_count_val = 1 if is_delayed_reward else 0
+
+            db.save_order({
+                "account_key": account_key,
+                "order_sn": order_sn,
+                "promotion_order_id": int(o.get("promotion_order_id") or 0),
+                "platform_order_id": platform_order_id,
+                "store_id": store_id,
+                "store_name": _clean_emoji(store_name),
+                "store_icon": store_icon,
+                "platform": order_platform,
+                "order_money": order_money,
+                "rebate_money": rebate_money,
+                "original_user_rebate": orig_rebate,
+                "redpack_reward_num": redpack_reward,
+                "timeout_time": int(tt or 0),
+                "status": status_str,
+                "condition": cond_str,
+                "receipt_img": receipt_img,
+                "reject_reason": "",
+                "expire_time": exp_at,
+                "created_at": c_at,
+                "order_time": int(ot or 0),
+                "order_type": 12 if is_percent_order else order_type_val,
+                "rebate_ratio": rebate_ratio,
+                "delay_count": delay_count_val
+            })
+
+
+        # 核验本地与官方待处理列表，处理超时未绑定自动关闭
+        if account_key:
+            official_pending_sns = {str(o.get("order_id_str") or o.get("promotion_order_id") or "") for o in raw_orders if o}
+            local_pending = db.get_orders(account_key=account_key, status="pending", limit=100)
+            now_str = time_service.format_now_dt()
+            now_ts = time_service.now_int()
+            for lp in local_pending:
+                lp_sn = str(lp.get("order_sn") or "")
+                if lp_sn and lp_sn not in official_pending_sns:
+                    lp_exp = lp.get("expire_time") or ""
+                    lp_tt = int(lp.get("timeout_time") or 0)
+                    if (lp_tt > 0 and lp_tt < now_ts) or (lp_exp and lp_exp < now_str):
+                        db.update_order(lp["id"], {"status": "cancelled"})
+    except Exception as e:
+        logger.info(f"官方 RPC 同步订单异常 (将直接返回本地数据库记录): {e}")
+
+    orders = db.get_orders(
+        account_key=account_key,
+        status=status,
+        platform=platform,
+        keyword=keyword,
+        limit=limit,
+        offset=offset
+    )
+    return {"ok": True, "orders": orders, "total": len(orders)}
+
+
+@router.get("/orders/stats")
+async def get_orders_stats(account_key: Optional[str] = Query(None)):
+    """获取霸王餐订单返利与收益看板统计 (结合官方真实资产与本地订单进行综合核准)"""
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {
+            "ok": True,
+            "stats": {
+                "total_orders": 0,
+                "completed_orders": 0,
+                "pending_orders": 0,
+                "total_rebate": 0,
+                "pending_rebate": 0,
+                "total_spent": 0
+            }
+        }
+    stats = db.get_order_stats(account_key=account_key)
+    
+    # 结合当前主控账号的官方原生资产进行综合校准
+    acc = None
+    if account_key:
+        acc = db.get_account_by_key(account_key)
+    if not acc and accounts:
+        acc = accounts[0]
+        
+    if acc:
+        official_completed = int(acc.get("completed_number") or 0)
+        official_total_rebate = round(((acc.get("withdraw_total") or 0) + (acc.get("silk") or 0)) / 100.0, 2)
+        if official_completed > stats["completed_orders"]:
+            stats["completed_orders"] = official_completed
+            stats["total_orders"] = max(stats["total_orders"], official_completed + stats["pending_orders"])
+        if official_total_rebate > stats["total_rebate"]:
+            stats["total_rebate"] = official_total_rebate
+            
+    return {"ok": True, "stats": stats}
+
+
+@router.get("/dashboard/chart-data")
+async def get_dashboard_chart_data_endpoint(account_key: Optional[str] = Query(None)):
+    """获取仪表盘可视化图表数据 (近7天返利趋势、订单状态分布、平台分布)"""
+    chart_data = db.get_dashboard_chart_data(account_key=account_key)
+    return {"ok": True, "data": chart_data}
+
+
+@router.get("/time")
+async def get_beijing_time_endpoint(force: bool = False):
+    """获取经由 ntp.aliyun.com 授时中心校准的高精度北京时间"""
+    try:
+        if force:
+            await time_service.async_sync_ntp(force=True)
+        return time_service.get_ntp_status()
+    except Exception as e:
+        logger.error(f"NTP授时异常: {e}")
+        now_ts = time_service.now_ts()
+        bj_time_tuple = time.gmtime(now_ts + 8 * 3600)
+        return {
+            "ok": True,
+            "timestamp": now_ts,
+            "beijing_time": time_service.format_ts(now_ts, "%Y-%m-%d %H:%M:%S"),
+            "server": "ntp.aliyun.com",
+            "synced": False,
+            "offset": 0.0,
+            "offset_ms": 0.0,
+            "round_trip_ms": 0.0,
+            "last_sync": now_ts
+        }
+
+
+@router.get("/scheduler/jobs")
+async def get_live_scheduler_jobs():
+    """获取当前调度中心实时注册的任务与下次触发时间"""
+    jobs = []
+    for j in scheduler.scheduler.get_jobs():
+        jobs.append({
+            "id": j.id,
+            "name": j.name,
+            "next_run_time": scheduler.format_job_next_run_time(j),
+            "trigger": str(j.trigger)
+        })
+    return {"ok": True, "total": len(jobs), "jobs": jobs}
+
+
+@router.post("/scheduler/reload")
+async def reload_scheduler_jobs_endpoint():
+    """动态重新装载调度中心任务"""
+    scheduler.reload_schedules()
+    return {"ok": True, "message": "调度中心任务已重新装载"}
+
+
+
+@router.post("/orders")
+async def create_order_endpoint(data: Dict[str, Any] = Body(...)):
+    """手动录入新订单"""
+    if not data.get("store_icon"):
+        sname = (data.get("store_name") or "").strip()
+        if sname:
+            try:
+                conn = db.get_db()
+                cur = conn.cursor()
+                r_icon = cur.execute(
+                    "SELECT store_icon FROM orders WHERE store_name = ? AND store_icon != '' LIMIT 1",
+                    (sname,)
+                ).fetchone()
+                if r_icon and r_icon[0]:
+                    data["store_icon"] = r_icon[0]
+            except Exception:
+                pass
+    saved = db.save_order(data)
+    return {"ok": True, "order": saved, "message": "订单已成功登记"}
+
+
+@router.put("/orders/{order_id}")
+async def update_order_endpoint(order_id: int, data: Dict[str, Any] = Body(...)):
+    """更新霸王餐订单信息"""
+    updated = db.update_order(order_id, data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    return {"ok": True, "order": updated, "message": "订单信息已更新"}
+
+
+@router.post("/orders/{order_id}/submit-platform-id")
+async def submit_platform_order_id(order_id: int, data: Dict[str, Any] = Body(...)):
+    """提交外卖单号进入小蚕平台审核返利流程 (100% 直连官方接口)"""
+    platform_order_id = (data.get("platform_order_id") or "").strip()
+    if not platform_order_id:
+        raise HTTPException(status_code=400, detail="外卖平台订单号不能为空")
+    
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+
+    existing_id = (target_order.get("platform_order_id") or "").strip()
+    if existing_id and existing_id != platform_order_id:
+        raise HTTPException(status_code=400, detail="外卖平台订单号已绑定，平台禁止二次修改")
+
+    promo_order_id = target_order.get("promotion_order_id") or 0
+    if not promo_order_id:
+        order_sn = target_order.get("order_sn", "")
+        m = re.search(r'(\d{8,10})$', order_sn)
+        if m:
+            promo_order_id = int(m.group(1))
+
+    # 尝试直连小蚕官方 RPC 提交外卖单号并全流程记入流水
+    upstream_res = None
+    account_key = target_order.get("account_key") or ""
+    acc = db.get_account_by_key(account_key) if account_key else None
+    token = acc.get("token") if acc else None
+
+    store_name = target_order.get("store_name") or "霸王餐店铺"
+    platform_name = "美团" if target_order.get("platform") == "meituan" else "饿了么"
+    rebate_money = float(target_order.get("rebate_money") or 0.0)
+    job_id = f"job_bind_{order_id}_{time_service.now_int()}"
+    now_str = time_service.format_now_ms()
+    steps = [
+        f"[{now_str}] 启动回填外卖单号: 店铺【{store_name}】({platform_name})",
+        f"[{now_str}] 待绑定外卖单号: {platform_order_id} (预期返现 ¥{rebate_money:.2f})",
+        f"[{now_str}] 账号核验: 【{acc.get('nickname') if acc else account_key}】(活动订单 #{promo_order_id})"
+    ]
+
+    rpc_success = True
+    if promo_order_id and token:
+        loc_city_code = _require_account_location(acc, account_key or "")
+        try:
+            upstream_res = await client.invoke_rpc(
+                server_name="SilkwormPromotion",
+                method_name="PromotionService.SubmitPlatformOrderId",
+                body={
+                    "promotion_order_id": promo_order_id,
+                    "platform_order_id": platform_order_id,
+                    "order_type": 0,
+                    "app_id": 20
+                },
+                city_code=loc_city_code,
+                token=token
+            )
+            logger.info(f"小蚕官方提交外卖单号结果: {upstream_res}")
+            t_res = time_service.format_now_ms()
+            steps.append(f"[{t_res}] 小蚕官方接口返回: {upstream_res.get('msg') or '单号上报成功'}")
+        except Exception as e:
+            logger.warning(f"小蚕官方接口提交单号返回: {e}")
+            t_res = time_service.format_now_ms()
+            steps.append(f"[{t_res}] 小蚕官方接口提示: {e}")
+            rpc_success = False
+
+    has_receipt = bool(data.get("receipt_img"))
+    new_status = "auditing" if has_receipt else "pending"
+    updated = db.update_order(order_id, {
+        "platform_order_id": platform_order_id,
+        "status": new_status,
+        "receipt_img": data.get("receipt_img", "")
+    })
+    msg = "外卖单号与评价凭证已提交审核！预计 2-24 小时内核销到账" if has_receipt else "外卖单号已成功绑定！待外卖送达后即可在小蚕APP提交评价反馈"
+    
+    t_fin = time_service.format_now_ms()
+    steps.append(f"[{t_fin}] 本地订单记录已更新为: {new_status} (单号核验入库)")
+    try:
+        db.add_job_log(job_id, account_key, "order_bind", "success" if rpc_success else "error", "\n".join(steps))
+    except Exception as le:
+        logger.warning(f"记录回填单号流水异常: {le}")
+
+    return {
+        "ok": True,
+        "order": updated,
+        "upstream_response": upstream_res,
+        "message": msg
+    }
+
+
+@router.post("/orders/bulk-delete-local")
+async def bulk_delete_orders_local(data: Dict[str, Any] = Body(...)):
+    """批量从本地列表移除已完成/已取消订单（写墓碑，绝不调用官方删除接口，避免批量请求触发风控）。"""
+    account_key = _safe_val(data.get("account_key"), None)
+    statuses = data.get("statuses") or ["completed", "cancelled"]
+    if not isinstance(statuses, list) or not statuses:
+        statuses = ["completed", "cancelled"]
+    allowed = {"completed", "cancelled"}
+    statuses = [s for s in statuses if s in allowed]
+    if not statuses:
+        raise HTTPException(status_code=400, detail="仅支持批量删除已完成或已取消订单")
+
+    orders = db.get_orders(account_key=account_key, limit=1000, offset=0)
+    targets = [o for o in orders if (o.get("status") or "").lower() in statuses]
+    deleted = 0
+    for o in targets:
+        try:
+            if db.delete_order(int(o["id"])):
+                deleted += 1
+        except Exception as e:
+            logger.warning(f"批量删除本地订单 {o.get('id')} 失败: {e}")
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "message": f"已从本地列表移除 {deleted} 条订单（官方记录未删除，不会触发官方接口风控）",
+    }
+
+
+@router.delete("/orders/{order_id}")
+async def remove_order(order_id: int):
+    """删除订单记录 (针对已完成/已取消订单，同步删除官方记录与本地数据库)"""
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    st = (target_order.get("status") or "").lower()
+    if st not in ("completed", "cancelled"):
+        raise HTTPException(status_code=400, detail="仅支持删除已完成或已取消的历史订单")
+
+    account_key = target_order.get("account_key")
+    acc = db.get_account_by_key(account_key) if account_key else None
+    promo_order_id = target_order.get("promotion_order_id") or 0
+
+    if promo_order_id and acc and acc.get("token") and db.has_valid_location(acc):
+        try:
+            await client.delete_promotion_order(
+                promotion_order_id=promo_order_id,
+                token=acc["token"],
+                silk_id=acc.get("silk_id"),
+                user_id=acc.get("user_id"),
+                city_code=int(acc["city_code"])
+            )
+        except Exception as e:
+            logger.info(f"官方删除订单微服务返回或已在远端删除: {e}")
+
+    db.delete_order(order_id)
+    return {"ok": True, "message": "订单记录已删除"}
+
+
+@router.post("/orders/{order_id}/cancel")
+async def cancel_order(order_id: int):
+    """取消霸王餐报名名额 (针对未提交外卖单号的待处理订单)"""
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    if target_order.get("platform_order_id"):
+        raise HTTPException(status_code=400, detail="已绑定外卖单号的订单无法取消报名")
+
+    st = (target_order.get("status") or "").lower()
+    if st != "pending":
+        raise HTTPException(status_code=400, detail="仅待上传状态且未下单的订单支持取消报名")
+
+    account_key = target_order.get("account_key")
+    acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    promo_order_id = target_order.get("promotion_order_id") or 0
+    if not promo_order_id:
+        order_sn = target_order.get("order_sn", "")
+        m = re.search(r'(\d{8,10})$', order_sn)
+        if m:
+            promo_order_id = int(m.group(1))
+
+    if not promo_order_id:
+        raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号 promotion_order_id，无法取消报名")
+
+    try:
+        res = await client.cancel_promotion_quota(
+            promotion_order_id=promo_order_id,
+            token=acc["token"],
+            silk_id=acc.get("silk_id"),
+            user_id=acc.get("user_id"),
+            city_code=_require_account_location(acc, account_key or "")
+        )
+        db.update_order(order_id, {"status": "cancelled"})
+        return {"ok": True, "message": "霸王餐报名已成功取消，名额已释放", "raw": res}
+    except XiaoCanRPCError as e:
+        logger.warning(f"取消报名官方接口返回异常: {e}")
+        raise HTTPException(status_code=400, detail=f"官方取消失败: {e.msg} (错误码: {e.code})")
+    except Exception as e:
+        logger.error(f"取消报名请求异常: {e}")
+        raise HTTPException(status_code=500, detail=f"取消报名服务异常: {str(e)}")
+
+
+@router.post("/orders/{order_id}/delay-voucher")
+async def delay_order_voucher(order_id: int):
+    """
+    触发小蚕移动端原生「领红包延时2小时」特权 (延长活动订单凭证上传有效期 2 小时)
+    对齐官方微服务: SilkwormMarketing.SilkwormMobileMarketingService.CompleteTaskEvent
+    """
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    if target_order.get("platform_order_id"):
+        raise HTTPException(status_code=400, detail="绑定上单号的订单无法申请延时")
+
+    if int(target_order.get("delay_count") or 0) > 0:
+        raise HTTPException(status_code=400, detail="该订单已享受过延时2小时特权，无法重复申请")
+
+    if int(target_order.get("order_type") or 0) == 12 or float(target_order.get("rebate_ratio") or 0) > 0:
+        raise HTTPException(status_code=400, detail="百分比按比例返现订单不支持「领红包延时2小时」特权")
+
+    account_key = target_order.get("account_key")
+    acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    promo_order_id = target_order.get("promotion_order_id") or 0
+    if not promo_order_id:
+        order_sn = target_order.get("order_sn", "")
+        m = re.search(r'(\d{8,10})$', order_sn)
+        if m:
+            promo_order_id = int(m.group(1))
+
+    if not promo_order_id:
+        raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号 promotion_order_id，无法申请延时")
+
+    # 根据平台确定任务类型: 4 为美团 (user_receive_meituan_task), 3 为饿了么 (user_receive_elem_task)
+    plat = (target_order.get("platform") or "meituan").lower()
+    task_type = 3 if "ele" in plat else 4
+
+    store_name = target_order.get("store_name") or "霸王餐店铺"
+    acc_name = acc.get("nickname") or account_key or "当前账号"
+    job_id = f"delay_voucher_{order_id}_{time_service.now_int()}"
+    now_str = time_service.format_now_ms()
+    steps = [
+        f"[{now_str}] 启动领红包延时特权: 店铺【{store_name}】(官方订单 #{promo_order_id})",
+        f"[{now_str}] 账号核验: 账号【{acc_name}】",
+        f"[{now_str}] 发起营销任务 RPC: SilkwormMarketing.CompleteTaskEvent (task_type={task_type})"
+    ]
+
+    loc_city_code = _require_account_location(acc, account_key or "")
+    try:
+        res = await client.complete_task_event(
+            token=acc["token"],
+            silk_id=acc.get("silk_id"),
+            user_id=acc.get("user_id"),
+            city_code=loc_city_code,
+            promotion_order_id=promo_order_id,
+            task_type=task_type
+        )
+        is_delayed = bool(res.get("if_delay") or res.get("if_delay_success"))
+        raw_delay_time = int(res.get("delay_time") or res.get("delayTime") or 0)
+        delay_time = raw_delay_time if raw_delay_time > 0 else (7200 if is_delayed else 0)
+        delay_hours = round(delay_time / 3600.0, 1) if delay_time else 2.0
+
+        if is_delayed or raw_delay_time > 0:
+            new_tt = int(target_order.get("timeout_time") or 0) + delay_time
+            new_exp = time_service.format_ts(new_tt, "%Y-%m-%d %H:%M:%S") if new_tt > 0 else ""
+            db.update_order(order_id, {
+                "delay_count": 1,
+                "timeout_time": new_tt,
+                "expire_time": new_exp
+            })
+
+        t_end = time_service.format_now_ms()
+        steps.append(f"[{t_end}] 官方特权已激活: 凭据上传有效期已顺延 {delay_hours} 小时")
+        steps.append(f"[{t_end}] 流程完成 - 订单记录已更新")
+        try:
+            db.add_job_log(job_id, account_key, "delay_voucher", "success", "\n".join(steps))
+        except Exception:
+            pass
+
+        msg = f"官方领红包延时特权已成功激活！凭据上传有效期已顺延 {delay_hours} 小时" if (is_delayed or raw_delay_time > 0) else "已成功向官方提交延时请求"
+        return {
+            "ok": True,
+            "is_delayed": is_delayed,
+            "delay_time": delay_time,
+            "message": msg,
+            "raw": res
+        }
+    except XiaoCanRPCError as e:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 官方接口返回异常: {e.msg} (错误码: {e.code})")
+        try:
+            db.add_job_log(job_id, account_key, "delay_voucher", "error", "\n".join(steps))
+        except Exception:
+            pass
+        logger.warning(f"领红包延时接口返回异常: {e}")
+        raise HTTPException(status_code=400, detail=f"官方接口响应: {e.msg} (错误码: {e.code})")
+    except Exception as e:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 延时操作服务异常: {str(e)}")
+        try:
+            db.add_job_log(job_id, account_key, "delay_voucher", "error", "\n".join(steps))
+        except Exception:
+            pass
+        logger.error(f"领红包延时请求失败: {e}")
+        raise HTTPException(status_code=500, detail=f"领红包延时网络或服务异常: {str(e)}")
+
+
+
+@router.get("/orders/{order_id}/delay-card-info")
+async def get_order_delay_card_info(order_id: int):
+    """
+    获取订单延时券可用状态及次日 06:00 临界阈值
+    已绑定外卖单号的订单彻底拦截不可使用延时券
+    """
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    if target_order.get("platform_order_id"):
+        raise HTTPException(status_code=400, detail="已绑定外卖单号的订单无法使用延时券")
+
+    account_key = target_order.get("account_key")
+    acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc or not acc.get("token"):
+        all_accs = db.get_all_accounts()
+        valid_accs = [a for a in all_accs if a.get("token")]
+        if valid_accs:
+            acc = valid_accs[0]
+        else:
+            raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    # 获取用户卡包中可用的延时券数量 (status: 0 未使用)
+    available_cards = 0
+    try:
+        cards_res = await client.get_user_card_list(
+            token=acc["token"],
+            silk_id=acc.get("silk_id"),
+            user_id=acc.get("user_id"),
+            city_code=_require_account_location(acc, account_key or ""),
+            status=0,
+            number=100
+        )
+        card_items = cards_res.get("list") or cards_res.get("cards") or []
+        for c in card_items:
+            card_obj = c.get("card") if isinstance(c.get("card"), dict) else {}
+            ctype = int(c.get("card_type") or c.get("type") or card_obj.get("card_type") or card_obj.get("type") or 0)
+            cname = str(c.get("card_name") or c.get("name") or card_obj.get("name") or card_obj.get("title") or "")
+            cdesc = str(c.get("desc") or card_obj.get("desc") or "")
+            if ctype == 2 or "延时" in cname or "延时" in cdesc:
+                available_cards += int(c.get("count") or c.get("number") or 1)
+        logger.info(f"订单 #{order_id} 延时券检测: 查得卡券共 {len(card_items)} 张，识别可用延时券 {available_cards} 张")
+    except Exception as e:
+        logger.warning(f"获取卡包延时券数量失败: {e}")
+    timeout_time = int(target_order.get("timeout_time") or 0)
+    if timeout_time <= 0 and target_order.get("order_time"):
+        timeout_time = int(target_order["order_time"]) + 7200
+
+    # 计算次日 06:00 阈值限制
+    now_ts = time_service.now_int()
+    base_ts = max(timeout_time, now_ts)
+    dt_base = datetime.fromtimestamp(base_ts)
+    if dt_base.hour < 6:
+        limit_dt = dt_base.replace(hour=6, minute=0, second=0, microsecond=0)
+    else:
+        limit_dt = (dt_base + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    limit_ts = int(limit_dt.timestamp())
+    remaining_sec = max(0, limit_ts - timeout_time)
+    allowed_hours = remaining_sec // 3600
+    max_usable = min(available_cards, allowed_hours)
+    next_6am_str = limit_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    promo_order_id = target_order.get("promotion_order_id") or 0
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "promotion_order_id": promo_order_id,
+        "has_completed_reward_delay": int(target_order.get("delay_count") or 0) > 0,
+        "available_delay_cards": available_cards,
+        "timeout_time": timeout_time,
+        "expire_time": target_order.get("expire_time") or "",
+        "allowed_hours_to_6am": allowed_hours,
+        "max_usable_count": max(0, max_usable),
+        "delay_card_used_count": int(target_order.get("delay_card_used_count") or 0),
+        "next_6am_str": next_6am_str
+    }
+
+
+@router.post("/orders/{order_id}/use-delay-card")
+async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(default={})):
+    """
+    使用延时券延长活动订单有效期 (每张延长 1 小时，最晚延至次日 06:00)
+    微服务: Silkworm.SilkwormService.DelayPromotionQuota
+    """
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    if target_order.get("platform_order_id"):
+        raise HTTPException(status_code=400, detail="已绑定外卖单号的订单无法使用延时券")
+
+    count = int(data.get("count") or 1)
+    if count < 1:
+        raise HTTPException(status_code=400, detail="延时券使用数量必须大于等于 1")
+
+    account_key = target_order.get("account_key")
+    acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc or not acc.get("token"):
+        all_accs = db.get_all_accounts()
+        valid_accs = [a for a in all_accs if a.get("token")]
+        if valid_accs:
+            acc = valid_accs[0]
+        else:
+            raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    promo_order_id = target_order.get("promotion_order_id") or 0
+    if not promo_order_id:
+        order_sn = target_order.get("order_sn", "")
+        m = re.search(r'(\d{8,10})$', order_sn)
+        if m:
+            promo_order_id = int(m.group(1))
+
+    if not promo_order_id:
+        raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号 promotion_order_id，无法使用延时券")
+
+    store_name = target_order.get("store_name") or "霸王餐店铺"
+    acc_name = acc.get("nickname") or account_key or "当前账号"
+    job_id = f"delay_card_{order_id}_{time_service.now_int()}"
+    now_str = time_service.format_now_ms()
+    steps = [
+        f"[{now_str}] 启动使用延时券: 店铺【{store_name}】(官方订单 #{promo_order_id}, 申请使用 {count} 张延时券)",
+        f"[{now_str}] 账号核验: 账号【{acc_name}】",
+        f"[{now_str}] 发起官方延时 RPC: Silkworm.SilkwormService.DelayPromotionQuota (delay_card_number={count})"
+    ]
+
+    loc_city_code = _require_account_location(acc, account_key or "")
+    try:
+        res = await client.delay_promotion_quota(
+            token=acc["token"],
+            silk_id=acc.get("silk_id"),
+            user_id=acc.get("user_id"),
+            promotion_order_id=promo_order_id,
+            delay_card_number=count,
+            city_code=loc_city_code
+        )
+        curr_tt = int(target_order.get("timeout_time") or 0)
+        new_tt = curr_tt + count * 3600
+        new_exp = time_service.format_ts(new_tt, "%Y-%m-%d %H:%M:%S") if new_tt > 0 else ""
+        used_count = int(target_order.get("delay_card_used_count") or 0) + count
+        db.update_order(order_id, {
+            "timeout_time": new_tt,
+            "expire_time": new_exp,
+            "delay_card_used_count": used_count
+        })
+
+        t_end = time_service.format_now_ms()
+        steps.append(f"[{t_end}] 官方延时成功: 凭证有效期已延长 {count} 小时，最新截止时间: {new_exp}")
+        steps.append(f"[{t_end}] 流程完成 - 订单状态与卡包延时券记录已更新")
+        try:
+            db.add_job_log(job_id, account_key, "delay_card", "success", "\n".join(steps))
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "message": f"成功使用 {count} 张延时券，订单提交有效期已顺延 {count} 小时",
+            "timeout_time": new_tt,
+            "expire_time": new_exp,
+            "delay_card_used_count": used_count,
+            "raw": res
+        }
+    except XiaoCanRPCError as e:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 官方接口返回异常: {e.msg} (错误码: {e.code})")
+        try:
+            db.add_job_log(job_id, account_key, "delay_card", "error", "\n".join(steps))
+        except Exception:
+            pass
+        logger.warning(f"使用延时券官方接口返回异常: {e}")
+        raise HTTPException(status_code=400, detail=f"官方接口响应: {e.msg} (错误码: {e.code})")
+    except Exception as e:
+        t_err = time_service.format_now_ms()
+        steps.append(f"[{t_err}] 延时操作服务异常: {str(e)}")
+        try:
+            db.add_job_log(job_id, account_key, "delay_card", "error", "\n".join(steps))
+        except Exception:
+            pass
+        logger.error(f"使用延时券网络或服务异常: {e}")
+        raise HTTPException(status_code=500, detail=f"使用延时券请求异常: {str(e)}")
+
+
+@router.post("/orders/{order_id}/use-free-card")
+async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default={})):
+    """
+    对指定订单核销使用每月霸王餐全额免单神券
+    对齐官方微服务: SilkwormVip.VipRightsService.UseFreeOrderCard
+    """
+    target_order = db.get_order_by_id(order_id)
+    if not target_order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    account_key = target_order.get("account_key")
+    acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    platform_order_id = (data.get("platform_order_id") or target_order.get("platform_order_id") or "").strip()
+    if not platform_order_id:
+        raise HTTPException(status_code=400, detail="请先填写并绑定外卖平台订单号方可使用免单券")
+
+    plat = (target_order.get("platform") or "meituan").lower()
+    order_business = 2 if "ele" in plat else 1
+
+    # 获取用户免单券 ID
+    user_free_card_id = data.get("user_free_card_id")
+    if not user_free_card_id:
+        try:
+            f_info_res = await client.get_user_free_order_info(
+                token=acc["token"],
+                silk_id=acc.get("silk_id"),
+                user_id=acc.get("user_id"),
+                city_code=_require_account_location(acc, account_key or "")
+            )
+            info_data = f_info_res.get("info") or {}
+            if not info_data.get("had"):
+                raise HTTPException(status_code=400, detail="当前账号本月尚未抢得外卖全额免单神券，请先在每日 14:00 参与秒杀")
+            if info_data.get("used"):
+                raise HTTPException(status_code=400, detail="当前账号本月免单券已使用，每月限使用 1 次")
+            user_free_card_id = info_data.get("user_free_card_id") or info_data.get("id")
+        except HTTPException:
+            raise
+        except Exception as ex:
+            logger.warning(f"自动查询免单券信息失败: {ex}")
+
+    if not user_free_card_id:
+        user_free_card_id = 0
+
+    loc_city_code = _require_account_location(acc, account_key or "")
+    try:
+        res = await client.use_free_order_card(
+            order_no=str(platform_order_id),
+            order_business=int(order_business),
+            user_free_card_id=int(user_free_card_id),
+            token=acc["token"],
+            silk_id=acc.get("silk_id"),
+            user_id=acc.get("user_id"),
+            city_code=loc_city_code
+        )
+        return {
+            "ok": True,
+            "message": "免单券核销使用成功！该笔订单已享全额免单返现",
+            "raw": res
+        }
+    except XiaoCanRPCError as e:
+        logger.warning(f"使用免单券官方接口返回异常: {e}")
+        raise HTTPException(status_code=400, detail=f"官方接口响应: {e.msg} (错误码: {e.code})")
+    except Exception as e:
+        logger.error(f"使用免单券请求失败: {e}")
+        raise HTTPException(status_code=500, detail=f"核销免单券网络或服务异常: {str(e)}")
+
+
+
+# ---------------- 5. 运行日志与统计 ---------------- #
+
+@router.get("/jobs")
+async def list_jobs(account_key: Optional[str] = Query(None), limit: int = Query(50)):
+    """获取执行历史日志"""
+    logs = db.get_job_logs(account_key, limit)
+    return {"ok": True, "jobs": logs}
+
+
+@router.delete("/jobs")
+async def clear_jobs(account_key: Optional[str] = Query(None)):
+    """清空执行历史日志"""
+    db.clear_job_logs(account_key)
+    return {"ok": True, "message": "运行日志已清空"}
+
+
+@router.get("/me")
+async def get_my_info():
+    """获取用户信息 (全免费：无限车位、无限积分、永久免激活)"""
+    accounts = db.get_all_accounts()
+    return {
+        "ok": True,
+        "user": {
+            "nickname": "管理员 / 极客玩家",
+            "email": "local@xiaocan.bot",
+            "is_admin": True,
+            "points": 999999,          # 零商业化，无限点数
+            "slots_max": 999,           # 无限车位
+            "slots_used": len(accounts),
+            "expires_at": "2099-12-31", # 永久不过期
+            "is_vip": True
+        }
+    }
+
+
+# ---------------- 6. 系统与通知配置 ---------------- #
+
+@router.get("/settings")
+async def get_settings():
+    """获取系统设置与各通知渠道当前状态"""
+    clawbot_auth, clawbot_src = clawbot_client.load_auth()
+    return {
+        "ok": True,
+        # 微信 ClawBot (腾讯 iLink 原生内置通道)
+        "clawbot_enabled": db.get_setting("clawbot_enabled", False),
+        "clawbot_auth_path": db.get_setting("clawbot_auth_path", ""),
+        "clawbot_auth_json": db.get_setting("clawbot_auth_json", ""),
+        "clawbot_status": {
+            "ready": bool(clawbot_auth and clawbot_auth.get("token") and clawbot_auth.get("userId")),
+            "source": clawbot_src,
+            "user_id": clawbot_auth.get("userId", "") if clawbot_auth else "",
+            "account_id": clawbot_auth.get("accountId", "") if clawbot_auth else "",
+            "has_context_token": bool(clawbot_auth.get("contextToken")) if clawbot_auth else False,
+            "saved_at": clawbot_auth.get("savedAt", "") if clawbot_auth else ""
+        },
+        # Server酱 (Turbo / 3)
+        "serverchan_enabled": db.get_setting("serverchan_enabled", False),
+        "serverchan_sendkey": db.get_setting("serverchan_sendkey", ""),
+        # WxPusher 微信推送服务
+        "wxpusher_enabled": db.get_setting("wxpusher_enabled", False),
+        "wxpusher_app_token": db.get_setting("wxpusher_app_token", ""),
+        "wxpusher_uids": db.get_setting("wxpusher_uids", ""),
+        # 企业微信群机器人
+        "wecom_enabled": db.get_setting("wecom_enabled", False),
+        "wecom_webhook": db.get_setting("wecom_webhook", ""),
+        # 钉钉自定义群机器人
+        "dingtalk_enabled": db.get_setting("dingtalk_enabled", False),
+        "dingtalk_webhook": db.get_setting("dingtalk_webhook", ""),
+        "dingtalk_secret": db.get_setting("dingtalk_secret", ""),
+        # 飞书群机器人
+        "feishu_enabled": db.get_setting("feishu_enabled", False),
+        "feishu_webhook": db.get_setting("feishu_webhook", ""),
+        "feishu_secret": db.get_setting("feishu_secret", ""),
+        # iOS Bark
+        "bark_enabled": db.get_setting("bark_enabled", False),
+        "bark_url": db.get_setting("bark_url", ""),
+        "bark_group": db.get_setting("bark_group", "XiaoCan Assistant"),
+        "bark_sound": db.get_setting("bark_sound", "minuet"),
+        "bark_icon": db.get_setting("bark_icon", ""),
+        # Telegram Bot
+        "telegram_enabled": db.get_setting("telegram_enabled", False),
+        "tg_bot_token": db.get_setting("tg_bot_token", ""),
+        "tg_chat_id": db.get_setting("tg_chat_id", ""),
+        "tg_proxy_url": db.get_setting("tg_proxy_url", ""),
+        "tg_api_base_url": db.get_setting("tg_api_base_url", ""),
+        # 通用 HTTP Webhook
+        "webhook_enabled": db.get_setting("webhook_enabled", False),
+        "webhook_url": db.get_setting("webhook_url", ""),
+        "webhook_method": db.get_setting("webhook_method", "POST"),
+        "webhook_headers": db.get_setting("webhook_headers", ""),
+        # SMTP 邮件服务
+        "email_enabled": db.get_setting("email_enabled", False),
+        "email_host": db.get_setting("email_host", ""),
+        "email_port": db.get_setting("email_port", 465),
+        "email_ssl": db.get_setting("email_ssl", True),
+        "email_user": db.get_setting("email_user", ""),
+        "email_pass": db.get_setting("email_pass", ""),
+        "email_from": db.get_setting("email_from", ""),
+        "email_to": db.get_setting("email_to", ""),
+        # Gotify 推送
+        "gotify_enabled": db.get_setting("gotify_enabled", False),
+        "gotify_url": db.get_setting("gotify_url", ""),
+        "gotify_token": db.get_setting("gotify_token", ""),
+        "gotify_priority": db.get_setting("gotify_priority", 5),
+        # Discord Webhook
+        "discord_enabled": db.get_setting("discord_enabled", False),
+        "discord_webhook": db.get_setting("discord_webhook", ""),
+        "discord_username": db.get_setting("discord_username", "XiaoCan Assistant"),
+        # QQ 机器人 (OneBot V11 / mystool-bot)
+        "qq_bot_enabled": db.get_setting("qq_bot_enabled", False),
+        "qq_bot_api": db.get_setting("qq_bot_api", ""),
+        "qq_bot_group_id": db.get_setting("qq_bot_group_id", ""),
+        "qq_bot_user_id": db.get_setting("qq_bot_user_id", ""),
+        "qq_bot_target_type": db.get_setting("qq_bot_target_type", "group"),
+        "qq_bot_token": db.get_setting("qq_bot_token", ""),
+        # 触发策略 (对标 BetterGI 事件订阅)
+        "notify_on_grab": db.get_setting("notify_on_grab", True),
+        "notify_on_spike": db.get_setting("notify_on_spike", True),
+        "notify_on_meituan": db.get_setting("notify_on_meituan", True),
+        "notify_on_appoint": db.get_setting("notify_on_appoint", True),
+        "notify_on_token_warn": db.get_setting("notify_on_token_warn", True),
+        "notify_on_coupon_expire": db.get_setting("notify_on_coupon_expire", True),
+        "notify_on_task_fail": db.get_setting("notify_on_task_fail", True),
+        # 位置服务与多地图源 (优先级: 高德 > 百度 > 天地图)
+        "amap_enabled": db.get_setting("amap_enabled", True),
+        "amap_key": db.get_setting("amap_key", ""),
+        "baidu_enabled": db.get_setting("baidu_enabled", False),
+        "baidu_key": db.get_setting("baidu_key", ""),
+        "tianditu_enabled": db.get_setting("tianditu_enabled", True),
+        "tianditu_key": db.get_setting("tianditu_key", "109fd484f999e3c0472ab15fa38fe2ac"),
+        # 协议自适应档案与网关风控诊断摘要 (脱敏只读状态)
+        "active_protocol_profile": get_active_protocol_profile(),
+        "waf_block_detail": get_waf_block_detail(include_expired=True),
+    }
+
+
+@router.post("/settings")
+async def save_settings(data: Dict[str, Any] = Body(...)):
+    """保存系统设置"""
+    readonly_keys = {"clawbot_status", "active_protocol_profile", "waf_block_detail"}
+    for k, v in data.items():
+        if k not in readonly_keys:
+            db.set_setting(k, v)
+    return {"ok": True, "message": "设置已保存"}
+
+
+@router.post("/settings/test-map-source")
+async def test_map_source_endpoint(data: Dict[str, Any] = Body(...)):
+    """测试指定地图源 (amap/baidu/tianditu) 的服务密钥连通性"""
+    source = str(data.get("source", "")).strip()
+    key = str(data.get("key", "") or data.get("tianditu_key", "")).strip()
+    return await map_service.test_connection(source, key)
+
+
+@router.post("/settings/test-tianditu")
+async def test_tianditu_endpoint(data: Dict[str, Any] = Body(...)):
+    """测试天地图 Web API 服务 Token 连通性 (兼容旧前端)"""
+    tianditu_key = str(data.get("tianditu_key", "")).strip()
+    res = await map_service.test_connection("tianditu", tianditu_key)
+    return res
+
+
+@router.post("/settings/wxpusher-users")
+async def wxpusher_users_endpoint(data: Dict[str, Any] = Body(...)):
+    """通过 WxPusher 官方开放接口拉取应用关注用户列表（appToken 鉴权，无需后台登录）"""
+    from ..core.notification.channels.wxpusher import fetch_users
+
+    token = str(data.get("app_token") or "").strip() or db.get_setting("wxpusher_app_token", "")
+    page = int(data.get("page") or 1)
+    page_size = int(data.get("page_size") or 100)
+    return await fetch_users(token, page=page, page_size=page_size)
+
+
+@router.post("/settings/qq-bot-targets")
+async def qq_bot_targets_endpoint(data: Dict[str, Any] = Body(...)):
+    """通过 OneBot V11 标准 API 获取目标群与好友列表"""
+    from ..core.notification.channels.qq_bot import fetch_targets
+
+    api_url = (
+        str(data["qq_bot_api"]).strip()
+        if "qq_bot_api" in data
+        else str(db.get_setting("qq_bot_api", "http://127.0.0.1:8080") or "").strip()
+    )
+    token = (
+        str(data["qq_bot_token"]).strip()
+        if "qq_bot_token" in data
+        else str(db.get_setting("qq_bot_token", "") or "").strip()
+    )
+    return await fetch_targets(api_url, token)
+
+
+@router.post("/settings/telegram-chats")
+async def telegram_chats_endpoint(data: Dict[str, Any] = Body(...)):
+    """从 Telegram Bot API 发现最近活跃会话（不传 offset，不消耗更新）"""
+    from ..core.notification.channels.telegram import fetch_recent_chats
+
+    def field(name: str, db_key: str) -> str:
+        if name in data:
+            return str(data.get(name) or "").strip()
+        return str(db.get_setting(db_key, "") or "").strip()
+
+    return await fetch_recent_chats(
+        field("bot_token", "tg_bot_token"),
+        proxy_url=field("proxy_url", "tg_proxy_url"),
+        api_base_url=field("api_base_url", "tg_api_base_url"),
+    )
+
+
+@router.post("/settings/test-notify")
+async def test_notify_endpoint(data: Dict[str, Any] = Body(...)):
+    """测试单个通知渠道连通性"""
+    channel = data.get("channel", "")
+    config = data.get("config", {})
+    if not channel:
+        raise HTTPException(status_code=400, detail="通知渠道参数不能为空")
+    res = await notifier.test_single_channel(channel, config)
+    try:
+        ok = bool(res.get("ok", False))
+        status_str = "success" if ok else "error"
+        status_desc = "成功" if ok else str(res.get("message", "未知错误"))
+        now_str = time_service.format_now_ms()
+        steps = [
+            f"[{now_str}] 开始执行【通知推送测试】(渠道: {channel}, 方式: 手动测试)",
+            f"[{now_str}] 测试通知渠道 [{channel}]: {status_desc}",
+        ]
+        # 展开官方消息明细，便于在日志详情里核对标题/正文/目标 UID（与 WxPusher 后台消息详情一致）
+        if res.get("test_title"):
+            steps.append(f"[{now_str}] 消息标题: {res['test_title']}")
+        if res.get("test_summary"):
+            steps.append(f"[{now_str}] 消息摘要: {res['test_summary']}")
+        if res.get("test_content_type"):
+            steps.append(f"[{now_str}] 消息类型: {res['test_content_type']}")
+        if res.get("test_uids"):
+            steps.append(f"[{now_str}] 发送目标: {', '.join(map(str, res['test_uids']))} (UID 单发)")
+        if res.get("app_token_masked"):
+            steps.append(f"[{now_str}] 应用凭证: {res['app_token_masked']}")
+        if res.get("test_content"):
+            content_text = str(res["test_content"]).replace("\r\n", "\n")
+            steps.append(f"[{now_str}] 消息正文:\n{content_text}")
+        if res.get("official_code") is not None:
+            steps.append(f"[{now_str}] 官方响应: code={res.get('official_code')}, msg={res.get('official_msg') or ''}")
+        steps.append(f"[{now_str}] 结论: {status_desc}")
+        output = "\n".join(steps)
+        result_text = f"测试通知渠道 [{channel}]: {status_desc}"
+        db.add_job_log(
+            f"notify_test_{int(time.time())}_{uuid.uuid4().hex[:6]}",
+            "",
+            "notify_test",
+            status_str,
+            output,
+            result=result_text,
+        )
+    except Exception as log_err:
+        logger.warning(f"记录通知渠道测试日志失败: {log_err}")
+    return res
+
+
+@router.get("/settings/clawbot/status")
+@router.get("/settings/clawbot-status")
+async def clawbot_status_endpoint(custom_path: Optional[str] = None):
+    """检测微信 ClawBot 凭证状态与会话活跃度"""
+    auth, msg = clawbot_client.load_auth(custom_path)
+    if not auth or not auth.get("token") or not auth.get("userId"):
+        return {"ok": False, "ready": False, "message": msg}
+    return {
+        "ok": True,
+        "ready": True,
+        "message": msg,
+        "user_id": auth.get("userId", ""),
+        "account_id": auth.get("accountId", ""),
+        "has_context_token": bool(auth.get("contextToken")),
+        "saved_at": auth.get("savedAt", "")
+    }
+
+
+@router.post("/settings/clawbot/qr")
+async def clawbot_get_qr_endpoint(data: Optional[Dict[str, Any]] = Body(default={})):
+    """生成微信 ClawBot 登录二维码（包含内存渲染的 Base64 PNG 图片）"""
+    local_token = data.get("local_token") if isinstance(data, dict) else None
+    res = await clawbot_client.get_qr_code(local_token)
+    return res
+
+
+@router.get("/settings/clawbot/poll")
+async def clawbot_poll_qr_endpoint(
+    qrcode: str = Query(..., description="二维码 ticket 标识"),
+    verify_code: Optional[str] = Query(None, description="手机微信提示的数字配对码")
+):
+    """长轮询检测微信 ClawBot 扫码与授权状态"""
+    res = await clawbot_client.poll_qr_status(qrcode, verify_code)
+    return res
+
+
+@router.post("/settings/clawbot/check-activation")
+async def clawbot_check_activation_endpoint():
+    """长轮询检测并抓取用户发给 ClawBot 的消息以激活 context_token"""
+    res = await clawbot_client.check_activation(timeout=15.0)
+    return res
+
+
+@router.post("/settings/clawbot/unbind")
+async def clawbot_unbind_endpoint():
+    """解绑微信 ClawBot 账号并清除本地凭据"""
+    clawbot_client.clear_auth()
+    return {"ok": True, "message": "微信 ClawBot 已成功解绑"}
+
+
+# ---------------- 7. 设备定位与逆地理编码 ---------------- #
+
+CITY_CODE_MAP = {
+    "武汉": 420100, "武汉市": 420100,
+    "孝感": 420900, "孝感市": 420900,
+    "应城": 420981, "应城市": 420981,
+    "襄阳": 420600, "襄阳市": 420600,
+    "宜昌": 420500, "宜昌市": 420500,
+    "黄冈": 421100, "黄冈市": 421100,
+    "黄石": 420200, "黄石市": 420200,
+    "荆州": 421000, "荆州市": 421000,
+    "北京": 110100, "北京市": 110100,
+    "上海": 310100, "上海市": 310100,
+    "广州": 440100, "广州市": 440100,
+    "深圳": 440300, "深圳市": 440300,
+    "杭州": 330100, "杭州市": 330100,
+    "成都": 510100, "成都市": 510100,
+    "南京": 320100, "南京市": 320100,
+    "苏州": 320500, "苏州市": 320500,
+    "重庆": 500100, "重庆市": 500100,
+    "长沙": 430100, "长沙市": 430100,
+    "西安": 610100, "西安市": 610100,
+    "郑州": 410100, "郑州市": 410100,
+    "合肥": 340100, "合肥市": 340100,
+    "天津": 120100, "天津市": 120100,
+    "福州": 350100, "福州市": 350100,
+    "厦门": 350200, "厦门市": 350200,
+    "青岛": 370200, "青岛市": 370200,
+    "济南": 370100, "济南市": 370100,
+    "东莞": 441900, "东莞市": 441900,
+    "佛山": 440600, "佛山市": 440600,
+    "无锡": 320200, "无锡市": 320200,
+    "宁波": 330200, "宁波市": 330200,
+}
+
+CITY_COORDS = {
+    420100: ("武汉", "114.305393", "30.593099"),
+    420900: ("孝感", "113.926655", "30.926423"),
+    420981: ("应城", "113.572458", "30.928236"),
+    440300: ("深圳", "114.057868", "22.543099"),
+    440100: ("广州", "113.264385", "23.129112"),
+    110100: ("北京", "116.407395", "39.904211"),
+    310100: ("上海", "121.473701", "31.230416"),
+    330100: ("杭州", "120.155070", "30.274085"),
+    510100: ("成都", "104.066541", "30.572269"),
+    320100: ("南京", "118.796877", "32.060255"),
+    430100: ("长沙", "112.938814", "28.228209"),
+    500100: ("重庆", "106.551556", "29.563009"),
+    610100: ("西安", "108.939770", "34.341574"),
+    320500: ("苏州", "120.585315", "31.298886"),
+}
+
+
+@router.get("/location/search")
+async def search_location(
+    keyword: str = Query("", description="搜索地址或地标关键词"),
+    city: str = Query("", description="当前定位城市，用于限定泛词检索范围"),
+):
+    """根据输入的地址或商圈关键词，按 高德 > 百度 > 天地图 优先级检索详细地址与经纬度候选列表"""
+    clean_kw = (keyword or "").strip()
+    if not clean_kw:
+        return {
+            "ok": True,
+            "keyword": "",
+            "candidates": []
+        }
+    if not map_service.enabled_providers():
+        return {**map_service.no_source_response(), "keyword": clean_kw, "candidates": []}
+
+    try:
+        candidates = await map_service.search_poi(clean_kw, current_city=city)
+    except Exception as e:
+        logger.warning(f"多地图源地址候选检索异常: {e}")
+        candidates = []
+
+    if candidates:
+        valid_candidates = []
+        for c in candidates:
+            if not c.get("city_code"):
+                c_name = c.get("city_name", "")
+                c["city_code"] = CITY_CODE_MAP.get(c_name) or CITY_CODE_MAP.get(f"{c_name}市") or 0
+            if int(c.get("city_code") or 0) > 0 and str(c.get("city_name") or "").strip():
+                valid_candidates.append(c)
+
+        if valid_candidates:
+            top = valid_candidates[0]
+            return {
+                "ok": True,
+                "keyword": clean_kw,
+                "candidates": valid_candidates,
+                "city_code": int(top["city_code"]),
+                "city_name": top.get("city_name", ""),
+                "district_name": top.get("district_name", ""),
+                "town_name": top.get("town_name", ""),
+                "short_name": top.get("short_name", clean_kw),
+                "full_address": top.get("full_address", ""),
+                "latitude": top.get("latitude", ""),
+                "longitude": top.get("longitude", ""),
+                "source": top.get("source", "tianditu"),
+                "source_name": top.get("source_name", map_service.SOURCE_NAMES.get(str(top.get("source", "")).lower(), ""))
+            }
+
+    # 兜底：尝试从已有预设城市快速匹配
+    for code, (cname, clng, clat) in CITY_COORDS.items():
+        if cname in clean_kw or clean_kw in cname:
+            c_item = {
+                "city_code": code,
+                "city_name": cname,
+                "district_name": "",
+                "town_name": "",
+                "poi": clean_kw,
+                "short_name": f"{cname} · {clean_kw}",
+                "full_address": f"{cname}市 {clean_kw}",
+                "latitude": clat,
+                "longitude": clng,
+                "source": "preset",
+                "source_name": map_service.SOURCE_NAMES["preset"]
+            }
+            return {
+                "ok": True,
+                "keyword": clean_kw,
+                "candidates": [c_item],
+                "city_code": code,
+                "city_name": cname,
+                "district_name": "",
+                "short_name": f"{cname} · {clean_kw}",
+                "full_address": f"{cname}市 {clean_kw}",
+                "latitude": clat,
+                "longitude": clng,
+                "source": "preset",
+                "source_name": map_service.SOURCE_NAMES["preset"]
+            }
+
+    # 未检索到结果时，正常返回空候选列表，绝不抛出 400 异常
+    return {
+        "ok": True,
+        "keyword": clean_kw,
+        "candidates": []
+    }
+
+
+@router.get("/location/resolve")
+async def resolve_location(latitude: float = Query(...), longitude: float = Query(...)):
+    """逆地理编码：按 高德 > 百度 > 天地图 优先级解析指定经纬度，全部失败时平滑降级"""
+    if not map_service.enabled_providers():
+        return map_service.no_source_response()
+
+    # 1. 依次尝试已启用的地图源
+    try:
+        geo_res = await map_service.reverse_geocode(latitude, longitude)
+        if geo_res and geo_res.get("city_name"):
+            return {
+                "ok": True,
+                "city_code": int(geo_res.get("city_code") or 0),
+                "city_name": geo_res["city_name"],
+                "locality": geo_res.get("locality", ""),
+                "province": geo_res.get("province", ""),
+                "address_name": geo_res.get("address_name", f"{geo_res['city_name']}定位点"),
+                "latitude": f"{latitude:.6f}",
+                "longitude": f"{longitude:.6f}",
+                "source": geo_res.get("source", "tianditu"),
+                "source_name": geo_res.get("source_name", ""),
+                "accuracy": geo_res.get("accuracy", "high")
+            }
+    except Exception as e:
+        logger.warning(f"多地图源逆地理编码异常，切换降级通道: {e}")
+
+    # 2. 降级备用通道 (BigDataCloud，禁止伪造默认城市)
+    city_name = ""
+    locality = ""
+    province = ""
+    addr = ""
+
+    try:
+        url = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={latitude}&longitude={longitude}&localityLanguage=zh"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        res = urllib.request.urlopen(req, timeout=3.5)
+        data = json.loads(res.read().decode("utf-8"))
+        raw_city = data.get("city") or data.get("locality") or ""
+        locality = data.get("locality") or ""
+        province = data.get("principalSubdivision") or ""
+        if raw_city:
+            city_name = raw_city.replace("市", "")
+        if locality and city_name:
+            addr = f"{city_name} · {locality}"
+        elif city_name:
+            addr = f"{city_name}定位点"
+    except Exception as e:
+        logger.warning(f"备用逆地理编码解析异常: {e}")
+
+    # 匹配 city_code
+    city_code = CITY_CODE_MAP.get(city_name) or CITY_CODE_MAP.get(f"{city_name}市") or 0
+    if not city_name or int(city_code or 0) <= 0:
+        return {
+            "ok": False,
+            "city_code": 0,
+            "city_name": "",
+            "locality": locality,
+            "province": province,
+            "address_name": addr,
+            "latitude": f"{latitude:.6f}",
+            "longitude": f"{longitude:.6f}",
+            "source": "fallback",
+            "source_name": map_service.SOURCE_NAMES["fallback"],
+            "message": "无法解析当前坐标所属城市，请使用搜索框手动输入城市及商圈地址"
+        }
+
+    return {
+        "ok": True,
+        "city_code": city_code,
+        "city_name": city_name,
+        "locality": locality,
+        "province": province,
+        "address_name": addr,
+        "latitude": f"{latitude:.6f}",
+        "longitude": f"{longitude:.6f}",
+        "source": "fallback",
+        "source_name": map_service.SOURCE_NAMES["fallback"],
+        "accuracy": "high"
+    }
+
+
+@router.get("/location/ip")
+async def get_ip_location():
+    """网络 IP 粗略定位兜底：通过 IP 归属地获取城市并结合天地图逆地理补全坐标"""
+    if not map_service.enabled_providers():
+        return map_service.no_source_response()
+    try:
+        req = urllib.request.Request("https://whois.pconline.com.cn/ipJson.jsp?json=true", headers={"User-Agent": "Mozilla/5.0"})
+        res = urllib.request.urlopen(req, timeout=3.0)
+        raw = res.read().decode("gbk", errors="ignore")
+        data = json.loads(raw)
+        c_code_str = data.get("cityCode", "")
+        raw_city = data.get("city", "").replace("市", "")
+        addr_text = data.get("addr", "") or f"{raw_city}网络定位"
+
+        code_int = int(c_code_str) if c_code_str and c_code_str.isdigit() else (CITY_CODE_MAP.get(raw_city, 0))
+
+        # 查找对应城市的预设经纬度
+        c_tuple = CITY_COORDS.get(code_int)
+        if not c_tuple and raw_city:
+            for code, (cname, clng, clat) in CITY_COORDS.items():
+                if cname in raw_city or raw_city in cname:
+                    code_int = code
+                    c_tuple = (cname, clng, clat)
+                    break
+
+        if c_tuple:
+            return {
+                "ok": True,
+                "city_code": code_int,
+                "city_name": c_tuple[0],
+                "address_name": addr_text,
+                "latitude": c_tuple[2],
+                "longitude": c_tuple[1],
+                "source": "ip",
+                "source_name": map_service.SOURCE_NAMES["ip"],
+                "is_ip": True
+            }
+    except Exception as e:
+        logger.warning(f"备用 IP 定位异常: {e}")
+
+    return {
+        "ok": False,
+        "message": "未能自动获取当前网络 IP 定位，请点击搜索框输入目标商圈或手动选择"
+    }
+
+
+# ---------------- 消息中心 API ---------------- #
+
+@router.get("/messages")
+async def get_messages(
+    account_key: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    """获取小蚕官方消息中心频道与通知列表"""
+    acc = None
+    if account_key:
+        acc = db.get_account_by_key(account_key)
+    if not acc:
+        accounts = db.get_all_accounts()
+        if accounts:
+            acc = accounts[0]
+            
+    if not acc:
+        return {
+            "ok": True,
+            "channels": [],
+            "messages": [],
+            "unread_total": 0,
+            "message": "未接入小蚕账号"
+        }
+
+    token = acc.get("token")
+    silk_id = str(acc.get("silk_id") or "")
+    user_id = str(acc.get("user_id") or "")
+    if not db.has_valid_location(acc):
+        return {
+            "ok": False,
+            "location_required": True,
+            "code": "LOCATION_REQUIRED",
+            "channels": [],
+            "messages": [],
+            "unread_total": 0,
+            "message": _location_required_msg(acc, account_key or "")
+        }
+    city_code = int(acc["city_code"])
+
+    try:
+        channels_res, msgs_res = await asyncio.gather(
+            client.get_message_channels(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code),
+            client.get_messages(token=token, silk_id=silk_id, user_id=user_id, channel_id=channel_id, page=page, page_size=page_size, city_code=city_code),
+            return_exceptions=True
+        )
+
+        channels = []
+        if isinstance(channels_res, dict) and channels_res.get("list_channel"):
+            channels = channels_res["list_channel"]
+
+        messages = []
+        if isinstance(msgs_res, dict) and msgs_res.get("list"):
+            messages = msgs_res["list"]
+
+        unread_total = sum(c.get("unread", 0) for c in channels)
+
+        return {
+            "ok": True,
+            "channels": channels,
+            "messages": messages,
+            "unread_total": unread_total
+        }
+    except Exception as e:
+        logger.error(f"获取小蚕消息中心失败: {e}")
+        return {
+            "ok": False,
+            "channels": [],
+            "messages": [],
+            "unread_total": 0,
+            "error": str(e)
+        }
+
+
+class ReadAllMessagesRequest(BaseModel):
+    account_key: str
+
+
+@router.post("/messages/read-all")
+async def read_all_messages(req: ReadAllMessagesRequest):
+    """一键将当前账号所有消息标记为已读"""
+    acc = db.get_account_by_key(req.account_key)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    token = acc.get("token")
+    silk_id = str(acc.get("silk_id") or "")
+    user_id = str(acc.get("user_id") or "")
+    city_code = _require_account_location(acc, req.account_key)
+
+    try:
+        await client.set_all_messages_read(
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            city_code=city_code
+        )
+        return {"ok": True, "message": "已全部标记为已读"}
+    except Exception as e:
+        logger.error(f"全部标记已读失败: {e}")
+        return {"ok": False, "error": str(e)}

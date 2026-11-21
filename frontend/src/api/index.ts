@@ -1,0 +1,270 @@
+import axios from 'axios';
+import { Toast } from '@douyinfe/semi-ui';
+import type { Account, AccountDetailData, UserCardItem, TaskItem, FlashSaleShelfResponse, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, DelayCardInfo, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse, MeituanPromotionItem } from '../types';
+
+export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+
+// 统一所有接口坐标参数为 6 位小数，避免因浮点精度差异导致定位/检索结果不一致
+const coord6 = (value: number | string | undefined | null): string | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(6) : undefined;
+};
+
+const client = axios.create({
+  baseURL: API_BASE,
+  timeout: 30000,
+});
+
+// 全局响应拦截器：统一网络异常与安全兜底
+client.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (axios.isCancel(error)) {
+      return Promise.reject(error);
+    }
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      Toast.error('请求超时，请检查后端服务是否正常响应');
+    } else if (error.message === 'Network Error') {
+      Toast.error('网络连接失败，请确认后端服务已在 8690 端口启动');
+    }
+    return Promise.reject(error);
+  }
+);
+
+// 在途 GET 请求复用池：避免同一时间点多个并发相同 GET 请求重复打到后端
+const inFlightGetRequests = new Map<string, Promise<any>>();
+
+const getQueryKey = (url: string, params?: any): string => {
+  if (!params) return url;
+  try {
+    const searchParams = new URLSearchParams();
+    const sortedKeys = Object.keys(params).sort();
+    for (const key of sortedKeys) {
+      const val = params[key];
+      if (val !== undefined && val !== null) {
+        searchParams.append(key, String(val));
+      }
+    }
+    const qs = searchParams.toString();
+    return qs ? `${url}?${qs}` : url;
+  } catch {
+    return `${url}?${JSON.stringify(params)}`;
+  }
+};
+
+const originalGet = client.get.bind(client);
+
+(client as any).get = function (url: string, config?: any): Promise<any> {
+  // 如果调用方显式提供了 AbortSignal，不进行在途共享，保证 AbortSignal 精确控制
+  if (config?.signal) {
+    return originalGet(url, config);
+  }
+  const key = getQueryKey(url, config?.params);
+  const existing = inFlightGetRequests.get(key);
+  if (existing) {
+    return existing;
+  }
+  const promise = originalGet(url, config)
+    .finally(() => {
+      inFlightGetRequests.delete(key);
+    });
+  inFlightGetRequests.set(key, promise);
+  return promise;
+};
+
+export const api = {
+  // 账号管理
+  getAccounts: () => client.get<{ ok: boolean; accounts: Account[]; total: number }>('/accounts').then(r => r.data),
+  createAccount: (data: Partial<Account>) => client.post<{ ok: boolean; account: Account }>('/accounts', data).then(r => r.data),
+  updateAccount: (key: string, data: Partial<Account>) => client.post<{ ok: boolean; account: Account; message: string }>(`/accounts/${key}/profile`, data).then(r => r.data),
+  updateAccountLocation: (key: string, loc: { city_code: number; city_name: string; longitude: string; latitude: string; address_name: string; short_name?: string; full_address?: string; location_source?: string; location_source_name?: string; location_remark?: string }) =>
+    client.post<{ ok: boolean; account: Account; message: string }>(`/accounts/${key}/profile`, { ...loc, longitude: coord6(loc.longitude), latitude: coord6(loc.latitude) }).then(r => r.data),
+  syncAccount: (key: string) => client.post<{ ok: boolean; account: Account; message: string }>(`/accounts/${key}/sync`).then(r => r.data),
+  getAccountDetail: (key: string) => client.get<AccountDetailData>(`/accounts/${key}/detail`).then(r => r.data),
+  getAccountCards: (key: string, status = 0) => client.get<{ ok: boolean; cards: UserCardItem[]; status: number }>(`/accounts/${key}/cards`, { params: { status } }).then(r => r.data),
+  deleteAccount: (key: string) => client.delete<{ ok: boolean; message: string }>(`/accounts/${key}`).then(r => r.data),
+  getAccountNotifyConfig: (key: string) => client.get<AccountNotifyResponse>(`/accounts/${key}/notify-config`).then(r => r.data),
+  saveAccountNotifyConfig: (key: string, notify_mode: string, notify_config: AccountNotifyConfig) => client.post<{ ok: boolean; message: string }>(`/accounts/${key}/notify-config`, { notify_mode, notify_config }).then(r => r.data),
+  testAccountNotify: (key: string, notify_mode: string, notify_config: AccountNotifyConfig) => client.post<{ ok: boolean; message: string; channel?: string }>(`/accounts/${key}/test-notify`, { notify_mode, notify_config }).then(r => r.data),
+  
+  // 账号解析与嗅探接入
+  parseToken: (rawText: string) => client.post<{ ok: boolean; token?: string; silk_id?: string; is_valid: boolean; message: string; exp_date?: string; city_code?: number; nickname?: string; client_mode?: string }>('/accounts/parse-token', { raw_text: rawText }).then(r => r.data),
+  verifyToken: (token: string, cityCode?: number) => client.post<{ ok: boolean; valid: boolean; message: string }>('/accounts/verify-token', { token, city_code: cityCode }).then(r => r.data),
+  startProxyCapture: (port?: number) => client.post<{ ok: boolean; message: string; status: any }>('/accounts/proxy-capture/start', { port }).then(r => r.data),
+  stopProxyCapture: () => client.post<{ ok: boolean; message: string; status: any }>('/accounts/proxy-capture/stop').then(r => r.data),
+  getProxyCaptureStatus: () => client.get<{ ok: boolean; status: any }>('/accounts/proxy-capture/status').then(r => r.data),
+
+  // 电脑微信无感直连 (免配置·首选)
+  scanWechatAccount: () => client.post<{ ok: boolean; account?: Account; message: string }>('/accounts/wechat-scan').then(r => r.data),
+  startWechatListener: (timeout?: number) => client.post<{ ok: boolean; message: string; status: any }>('/accounts/wechat-listener/start', { timeout }).then(r => r.data),
+  stopWechatListener: () => client.post<{ ok: boolean; message: string; status: any }>('/accounts/wechat-listener/stop').then(r => r.data),
+  getWechatListenerStatus: () => client.get<{ ok: boolean; status: any }>('/accounts/wechat-listener/status').then(r => r.data),
+
+  // 历史兼容
+  startWinCapture: (port?: number, timeout?: number) => client.post<{ ok: boolean; message: string; status: any }>('/accounts/win_capture/start', { port, timeout }).then(r => r.data),
+  stopWinCapture: () => client.post<{ ok: boolean; message: string; status: any }>('/accounts/win_capture/stop').then(r => r.data),
+  getWinCaptureStatus: () => client.get<{ ok: boolean; status: any }>('/accounts/win_capture/status').then(r => r.data),
+  installCaCert: () => client.post<{ ok: boolean; message: string; ca_installed?: boolean }>('/accounts/win_capture/install_ca').then(r => r.data),
+
+
+  // 任务自动化
+  getTasks: (accountKey: string) => client.get<{ ok: boolean; tasks: TaskItem[] }>(`/tasks?account_key=${accountKey}`).then(r => r.data),
+  getFlashSaleShelf: (accountKey: string) => client.get<FlashSaleShelfResponse>(`/flash-sale/shelf?account_key=${accountKey}`).then(r => r.data),
+  exchangeFlashSale: (data: { account_key: string; exchange_id: number; community_silk?: number; goods_name?: string }) => client.post<{ ok: boolean; message: string; remaining_yb?: number }>('/flash-sale/exchange', data).then(r => r.data),
+  toggleTask: (data: { account_key: string; task_id: string; enabled: boolean; cron_time?: string; params?: Record<string, any> }) => client.post<{ ok: boolean; message: string }>('/tasks/toggle', data).then(r => r.data),
+  runTaskNow: (accountKey: string, taskId: string) => client.post<{ ok: boolean; job_id?: string; output: string }>('/tasks/run', { account_key: accountKey, task_id: taskId }, { timeout: 60000 }).then(r => r.data),
+  batchRunDaily: (accountKey?: string) => client.post<BatchDailyResult>('/tasks/batch-run-daily', { account_key: accountKey }, { timeout: 180000 }).then(r => r.data),
+
+  // 美团官方账号与神券领取
+  getMeituanAccounts: () => client.get<{ ok: boolean; accounts: MeituanAccount[] }>('/meituan/accounts').then(r => r.data),
+  saveMeituanAccount: (data: Partial<MeituanAccount>) => client.post<{ ok: boolean; account: MeituanAccount; message: string }>('/meituan/accounts', data).then(r => r.data),
+  deleteMeituanAccount: (key: string) => client.delete<{ ok: boolean; message: string }>(`/meituan/accounts/${key}`).then(r => r.data),
+  startMeituanAuth: (accountKey?: string, customNickname?: string) => client.post<MeituanAuthStartResponse>('/meituan/auth/start', { ...(accountKey ? { account_key: accountKey } : {}), ...(customNickname ? { custom_nickname: customNickname } : {}) }).then(r => r.data),
+  updateMeituanNickname: (accountKey: string, nickname: string) => client.post<{ ok: boolean; message: string; nickname?: string }>(`/accounts/${accountKey}/meituan-nickname`, { nickname }).then(r => r.data),
+  clearAllMeituan: () => client.post<{ ok: boolean; message: string }>('/meituan/clear-all').then(r => r.data),
+  unbindMeituan: (accountKey: string) => client.post<{ ok: boolean; message: string }>(`/accounts/${accountKey}/unbind-meituan`).then(r => r.data),
+  bindExistingMeituan: (accountKey: string, meituanKey: string) => client.post<{ ok: boolean; message: string }>(`/accounts/${accountKey}/bind-meituan`, { meituan_key: meituanKey }).then(r => r.data),
+  pollMeituanAuth: (sessionId: string) => client.get<MeituanAuthPollResponse>('/meituan/auth/poll', { params: { session_id: sessionId } }).then(r => r.data),
+  cancelMeituanAuth: (sessionId: string) => client.post<{ ok: boolean; message: string }>('/meituan/auth/cancel', { session_id: sessionId }).then(r => r.data),
+  runMeituanClaim: (data?: { account_key?: string; force?: boolean }) => client.post<{ ok: boolean; result?: any; results?: any[]; message?: string }>('/meituan/claim/run', data, { timeout: 150000 }).then(r => r.data),
+  getMeituanPromotions: () => client.get<{ ok: boolean; promotions: MeituanPromotionItem[] }>('/meituan/promotions').then(r => r.data),
+
+  // 店铺与附近霸王餐 (支持经纬度、平台、搜索过滤、触底流式分页)
+  getStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; rebate_type?: string; sort_by?: string; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) =>
+    client.get<{ ok: boolean; stores: StoreItem[]; total: number; raw_total?: number; source?: string; has_more?: boolean; next_offset?: number; page_pv_id?: string; keyword?: string; location_required?: boolean; code?: string; message?: string; error?: string }>('/store/list', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, signal }).then(r => r.data),
+  scanDualRebateStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; platform?: string; keyword?: string; max_stores?: number; max_fixed_stores?: number; max_percent_stores?: number; delay_min?: number; delay_max?: number; page_delay?: number }) =>
+    client.get<{
+      ok: boolean;
+      total_scanned_promotions: number;
+      total_scanned_stores: number;
+      fixed_scanned_stores?: number;
+      percent_scanned_stores?: number;
+      max_fixed_stores?: number;
+      max_percent_stores?: number;
+      max_feed_distance?: number;
+      max_feed_store_name?: string;
+      last_shangjin_stores?: string[];
+      dual_rebate_count: number;
+      returned_count?: number;
+      max_stores?: number;
+      stores: StoreItem[];
+      location_required?: boolean;
+      code?: string;
+      message?: string;
+    }>('/store/dual-rebate-scan', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, timeout: 120000 }).then(r => r.data),
+  grabStoreNow: (data: { account_key: string; store_id?: string; store_name?: string; store_icon?: string; promotion_id: string; platform?: string; order_money?: number; rebate_price?: number; rebate_desc?: string; rebate_type?: string; advance?: boolean; redpack_id?: string; redpack_name?: string; redpack_mode?: number }) =>
+    client.post<{ ok: boolean; order_id?: number; can_monitor?: boolean; message: string }>('/store/grab-now', data).then(r => r.data),
+  createAppointment: (data: Partial<StoreAppointment>) => client.post<{ ok: boolean; appointment_id: number; message: string }>('/store/appoint', data).then(r => r.data),
+  createNameMonitor: (data: NameMonitorPayload) =>
+    client.post<{ ok: boolean; appointment_id: number; message: string }>('/store/name-monitor', data).then(r => r.data),
+  getAppointments: (accountKey?: string) => client.get<{ ok: boolean; appointments: StoreAppointment[]; total: number }>('/store/appointments', { params: { account_key: accountKey } }).then(r => r.data),
+  stopAppointment: (id: number) => client.post<{ ok: boolean; message: string }>(`/store/appointments/${id}/stop`).then(r => r.data),
+  cancelAppointment: (id: number) => client.delete<{ ok: boolean; message: string }>(`/store/appointments/${id}`).then(r => r.data),
+
+  // 设备定位与逆地理编码
+  searchLocation: (keyword: string, city?: string) =>
+    client.get<LocationSearchResult & { no_map_source?: boolean; message?: string }>('/location/search', { params: { keyword, city } }).then(r => r.data),
+  resolveLocation: (latitude: number, longitude: number) =>
+    client.get<{ ok: boolean; city_code?: number; city_name?: string; locality?: string; province?: string; address_name?: string; latitude?: string; longitude?: string; source?: string; source_name?: string; accuracy?: string; no_map_source?: boolean; message?: string }>('/location/resolve', { params: { latitude: coord6(latitude), longitude: coord6(longitude) } }).then(r => r.data),
+  getIpLocation: () =>
+    client.get<{ ok: boolean; city_code?: number; city_name?: string; address_name?: string; latitude?: string; longitude?: string; is_ip?: boolean; source?: string; source_name?: string; no_map_source?: boolean; message?: string }>('/location/ip').then(r => r.data),
+
+  // 阿里云 NTP 高精度授时校准
+  getTime: (force?: boolean) =>
+    client.get<{ ok: boolean; timestamp: number; beijing_time: string; server: string; synced: boolean; offset: number }>('/time', { params: { force } }).then(r => r.data),
+
+  // 霸王餐订单管理
+  getOrders: (params?: { account_key?: string; status?: string; platform?: string; keyword?: string; limit?: number; offset?: number }) => 
+    client.get<{ ok: boolean; orders: Order[]; total: number }>('/orders', { params }).then(r => r.data),
+  getOrderStats: (accountKey?: string) => 
+    client.get<{ ok: boolean; stats: OrderStats }>(`/orders/stats`, { params: { account_key: accountKey } }).then(r => r.data),
+  getDashboardChartData: (accountKey?: string) =>
+    client.get<{ ok: boolean; data: DashboardChartData }>('/dashboard/chart-data', { params: { account_key: accountKey } }).then(r => r.data),
+  getMessages: (params?: { account_key?: string; channel_id?: number; page?: number; page_size?: number }) =>
+    client.get<XiaoCanMessagesResponse>('/messages', { params }).then(r => r.data),
+  markAllMessagesRead: (account_key: string) =>
+    client.post<{ ok: boolean; message: string }>('/messages/read-all', { account_key }).then(r => r.data),
+  createOrder: (data: Partial<Order>) => 
+    client.post<{ ok: boolean; order: Order; message: string }>('/orders', data).then(r => r.data),
+  updateOrder: (id: number, data: Partial<Order>) => 
+    client.put<{ ok: boolean; order: Order; message: string }>(`/orders/${id}`, data).then(r => r.data),
+  submitPlatformOrderId: (id: number, platformOrderId: string, receiptImg?: string) => 
+    client.post<{ ok: boolean; order: Order; message: string }>(`/orders/${id}/submit-platform-id`, { platform_order_id: platformOrderId, receipt_img: receiptImg }).then(r => r.data),
+  delayOrderVoucher: (id: number) =>
+    client.post<{ ok: boolean; is_delayed: boolean; delay_time: number; message: string }>(`/orders/${id}/delay-voucher`).then(r => r.data),
+  getDelayCardInfo: (id: number) => client.get<DelayCardInfo>(`/orders/${id}/delay-card-info`).then(r => r.data),
+  useDelayCard: (id: number, count: number) => client.post<{ ok: boolean; message: string; timeout_time: number; expire_time: string; delay_card_used_count: number }>(`/orders/${id}/use-delay-card`, { count }).then(r => r.data),
+  cancelOrder: (id: number) =>
+    client.post<{ ok: boolean; message: string; raw?: any }>(`/orders/${id}/cancel`).then(r => r.data),
+  deleteOrder: (id: number) => 
+    client.delete<{ ok: boolean; message: string }>(`/orders/${id}`).then(r => r.data),
+  bulkDeleteOrdersLocal: (accountKey?: string, statuses?: string[]) =>
+    client.post<{ ok: boolean; deleted: number; message: string }>('/orders/bulk-delete-local', {
+      account_key: accountKey,
+      statuses: statuses || ['completed', 'cancelled'],
+    }).then(r => r.data),
+
+
+  // 日志与监控
+  getJobs: (accountKey?: string, limit: number = 50) => client.get<{ ok: boolean; jobs: JobLog[] }>('/jobs', { params: { account_key: accountKey, limit } }).then(r => r.data),
+  clearJobs: (accountKey?: string) => client.delete<{ ok: boolean; message: string }>('/jobs', { params: { account_key: accountKey } }).then(r => r.data),
+  
+  // 用户中心 (免付费状态)
+  getMe: () => client.get<{ ok: boolean; user: UserInfo }>('/me').then(r => r.data),
+
+  // 系统配置与通知管理
+  getSettings: () => client.get<SystemSettings>('/settings').then(r => r.data),
+  saveSettings: (data: Partial<SystemSettings>) => client.post<{ ok: boolean; message: string }>('/settings', data).then(r => r.data),
+  testNotify: (channel: string, config: Record<string, any>) => 
+    client.post<NotifyTestResult>('/settings/test-notify', { channel, config }).then(r => r.data),
+  getWxPusherUsers: (appToken: string, page = 1, pageSize = 100) =>
+    client.post<{ ok: boolean; message?: string; users?: Array<{ uid: string; nickname: string; status?: any; face?: string; createTime?: any }>; total?: number }>(
+      '/settings/wxpusher-users', { app_token: appToken, page, page_size: pageSize }
+    ).then(r => r.data),
+  getTelegramChats: (data: { bot_token: string; proxy_url?: string; api_base_url?: string }) =>
+    client.post<{
+      ok: boolean;
+      message?: string;
+      chats?: Array<{ id: string; name: string; type: string; typeName: string; username?: string }>;
+      total?: number;
+      update_count?: number;
+    }>('/settings/telegram-chats', data).then(r => r.data),
+  getQqBotTargets: (data: { qq_bot_api: string; qq_bot_token?: string }) =>
+    client.post<{
+      ok: boolean;
+      message?: string;
+      groups?: Array<{ id: string; name: string; memberCount?: number }>;
+      friends?: Array<{ id: string; name: string; nickname?: string; remark?: string }>;
+      groupError?: string | null;
+      friendError?: string | null;
+    }>('/settings/qq-bot-targets', data).then(r => r.data),
+  testMapSource: (source: 'amap' | 'baidu' | 'tianditu', key: string) =>
+    client.post<{ ok: boolean; message: string; data?: any }>('/settings/test-map-source', { source, key }).then(r => r.data),
+  testTianditu: (data: { tianditu_key: string }) =>
+    client.post<{ ok: boolean; message: string; data?: any }>('/settings/test-tianditu', data).then(r => r.data),
+  getClawBotStatus: (customPath?: string) => 
+    client.get<ClawBotStatus & { ok: boolean; message: string }>('/settings/clawbot/status', { params: { custom_path: customPath } }).then(r => r.data),
+  generateClawBotQr: (localToken?: string) =>
+    client.post<ClawBotQrResponse>('/settings/clawbot/qr', { local_token: localToken }).then(r => r.data),
+  pollClawBotStatus: (qrcode: string, verifyCode?: string) =>
+    client.get<ClawBotPollResponse>('/settings/clawbot/poll', { params: { qrcode, verify_code: verifyCode } }).then(r => r.data),
+  checkClawBotActivation: () =>
+    client.post<ClawBotActivationResponse>('/settings/clawbot/check-activation').then(r => r.data),
+  unbindClawBot: () =>
+    client.post<{ ok: boolean; message: string }>('/settings/clawbot/unbind').then(r => r.data),
+
+  // 阿里云 NTP 高精度授时服务
+  getBeijingTime: () =>
+    client
+      .get<{
+        ok: boolean;
+        timestamp: number;
+        beijing_time: string;
+        server: string;
+        synced: boolean;
+        offset: number;
+      }>('/time')
+      .then(r => r.data),
+
+};
