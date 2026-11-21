@@ -42,7 +42,9 @@ const formatCityTag = (rawCity?: string, district?: string) => {
   return '地点';
 };
 
-const MAP_SOURCE_META: Record<string, { label: string; color: string }> = {
+type SourceTagColor = 'amber' | 'blue' | 'cyan' | 'green' | 'grey' | 'indigo' | 'light-blue' | 'light-green' | 'lime' | 'orange' | 'pink' | 'purple' | 'red' | 'teal' | 'violet' | 'yellow' | 'white';
+
+const MAP_SOURCE_META: Record<string, { label: string; color: SourceTagColor }> = {
   amap: { label: '高德地图', color: 'blue' },
   baidu: { label: '百度地图', color: 'red' },
   tianditu: { label: '天地图', color: 'green' },
@@ -57,7 +59,7 @@ const formatSourceTag = (source?: string, sourceName?: string) => {
   return MAP_SOURCE_META[key]?.label || '未知来源';
 };
 
-const sourceTagColor = (source?: string) => {
+const sourceTagColor = (source?: string): SourceTagColor => {
   const key = String(source || '').toLowerCase();
   return MAP_SOURCE_META[key]?.color || 'grey';
 };
