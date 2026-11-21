@@ -540,10 +540,17 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             if not is_on_minute_probe:
                 await asyncio.sleep(random.uniform(0.05, 0.15))
 
-            kw = (apt.get("keyword") or apt.get("store_name") or "").strip()
+            listen_mode = apt.get("listen_mode") or "store"
+            monitor_label = "常规监听" if listen_mode == "general" else "店名监听"
+            kw = (apt.get("keyword") or "").strip() if listen_mode == "store" else ""
             match_mode = apt.get("match_mode") or "contains"
+            activity_requirement = apt.get("activity_requirement") or "all"
             target_plat = apt.get("platform") or "all"
             rebate_mode_filter = apt.get("rebate_mode_filter") or "all"
+            if rebate_mode_filter == "percent":
+                activity_requirement = "all"
+                if target_plat in ("eleme", "jingdong"):
+                    target_plat = "meituan"
             min_rebate_price = float(apt.get("min_rebate_price") or 0.0)
             min_rebate_rate = float(apt.get("min_rebate_rate") or 0.0)
             max_order_money = float(apt.get("max_order_money") or 0.0)
@@ -617,12 +624,12 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         continue
                     total_found_stores.add(s_name)
 
-                    # 1. 店名匹配规则
-                    if match_mode == "exact":
-                        if s_name.lower() != kw_lower:
-                            continue
-                    else:
-                        if kw_lower not in s_name.lower():
+                    # 1. 店名匹配规则：常规监听不区分店名，直接放行
+                    if listen_mode == "store":
+                        if match_mode == "exact":
+                            if s_name.lower() != kw_lower:
+                                continue
+                        elif kw_lower not in s_name.lower():
                             continue
 
                     # 2. 平台过滤
@@ -635,7 +642,15 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     if rebate_mode_filter != "all" and c_rtype != rebate_mode_filter:
                         continue
 
-                    # 4. 最低返利金额
+                    # 4. 活动要求过滤
+                    if activity_requirement != "all":
+                        c_activity_tags = c.get("activity_tags") or []
+                        if isinstance(c_activity_tags, str):
+                            c_activity_tags = [c_activity_tags]
+                        if activity_requirement not in c_activity_tags:
+                            continue
+
+                    # 5. 最低返利金额
                     c_rebate_price = float(c.get("rebate_price") or 0.0)
                     if min_rebate_price > 0 and c_rebate_price < min_rebate_price:
                         continue
@@ -718,7 +733,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     rebate_label = best_item.get("rebate_desc", "")
                     adv_tag = "【超前券·提前抢单】" if is_adv else ""
                     step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探成功{probe_tag}: 检索到「{store_label}」有可抢名额 ({rebate_label}, 剩余库存 {best_item.get('left_number')} 份)！{adv_tag}立即触发闪电抢单！"
-                    logger.info(f"店名监听 #{aid} 命中可用方案【{store_label}】({rebate_label})，立即触发抢单！")
+                    logger.info(f"{monitor_label} #{aid} 命中可用方案【{store_label}】({rebate_label})，立即触发抢单！")
                     if linked_log_id > 0:
                         _append_apt_log(aid, linked_log_id, step_str, sync_db=True, status="running")
 
@@ -738,7 +753,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     t_grab = time_service.format_now_ms()
                     if res.get("ok"):
                         succ_msg = f"抢单成功: 【{store_label}】{rebate_label}"
-                        logger.info(f"店名监听 #{aid} {succ_msg}")
+                        logger.info(f"{monitor_label} #{aid} {succ_msg}")
                         if auto_stop:
                             db.update_appointment(aid, {
                                 "status": "completed",
@@ -754,7 +769,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                                 _append_apt_log(aid, linked_log_id, f"[{t_grab}] {succ_msg}，保持持续监听模式", sync_db=True, status="running")
                     else:
                         fail_msg = res.get("message") or "名额被抢占或网络响应延迟"
-                        logger.warning(f"店名监听 #{aid} 抢单尝试未成功: {fail_msg}")
+                        logger.warning(f"{monitor_label} #{aid} 抢单尝试未成功: {fail_msg}")
                         if res.get("code") == 401 or "401" in str(fail_msg):
                             db.update_appointment(aid, {"status": "error", "outcome": fail_msg})
                             invalidate_worker_cache()
@@ -780,7 +795,8 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 else:
                     # 未找到符合条件的方案
                     store_count = len(total_found_stores)
-                    step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探{probe_tag}: 关键词「{kw}」，发现 {store_count} 家商户 (当前暂无满足条件的剩余名额)，持续保持监听..."
+                    filter_desc = f"关键词「{kw}」" if listen_mode == "store" else "常规模式 (不区分店名)"
+                    step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探{probe_tag}: {filter_desc}，发现 {store_count} 家商户 (当前暂无满足条件的剩余名额)，持续保持监听..."
                     if linked_log_id > 0:
                         _append_apt_log(aid, linked_log_id, step_str, sync_db=(poll_cnt == 1 or poll_cnt % 3 == 0 or is_on_minute_probe), status="running")
 

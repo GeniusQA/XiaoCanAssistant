@@ -1040,20 +1040,35 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const handleSubscribeAll = () => {
+  const persistStrategy = async (field: string, checked: boolean, silent = false) => {
+    try {
+      await api.saveSettings({ [field]: checked });
+      if (!silent) Toast.success(checked ? '已开启并保存该事件订阅' : '已关闭并保存该事件订阅');
+    } catch {
+      Toast.error('订阅状态保存失败，请重试');
+    }
+  };
+
+  const handleStrategyToggle = (field: string, checked: boolean) => {
+    void persistStrategy(field, checked);
+  };
+
+  const handleSubscribeAll = async () => {
     if (!formApiRef.current) return;
     STRATEGIES.forEach((s) => {
       formApiRef.current.setValue(s.field, true);
     });
-    Toast.success('已开启全部业务事件推送');
+    await Promise.all(STRATEGIES.map((s) => persistStrategy(s.field, true, true)));
+    Toast.success('已开启并保存全部业务事件推送');
   };
 
-  const handleUnsubscribeAll = () => {
+  const handleUnsubscribeAll = async () => {
     if (!formApiRef.current) return;
     STRATEGIES.forEach((s) => {
       formApiRef.current.setValue(s.field, false);
     });
-    Toast.info('已关闭所有业务事件推送');
+    await Promise.all(STRATEGIES.map((s) => persistStrategy(s.field, false, true)));
+    Toast.info('已关闭并保存所有业务事件推送');
   };
 
   const aboutDescriptions = [
@@ -1186,7 +1201,7 @@ export const SettingsView: React.FC = () => {
                   <div className="settings-tab-panel tab-panel-channels pt-4">
                     <div className="flex flex-col lg:flex-row gap-6 items-start">
                       {/* 左侧通道导航列表 */}
-                      <div className="w-full lg:w-72 shrink-0 bg-semi-color-bg-0 border border-semi-color-border rounded-xl p-2.5 space-y-2.5 shadow-xs max-h-[calc(100vh-220px)] overflow-y-auto">
+                      <div className="w-full lg:w-72 shrink-0 bg-semi-color-bg-0 border border-semi-color-border rounded-xl p-2.5 space-y-2.5 shadow-xs max-h-none lg:max-h-[calc(100vh-220px)] overflow-y-auto">
                         <div className="flex items-center justify-between px-2 pt-0.5">
                           <Text strong className="text-xs text-semi-color-text-1 uppercase tracking-wider">
                             通道目录
@@ -2025,10 +2040,10 @@ export const SettingsView: React.FC = () => {
                             已订阅 {subscribedCount} / 7 项事件
                           </Tag>
                           <Space>
-                            <Button size="small" theme="light" onClick={handleSubscribeAll}>
+                            <Button size="small" theme="light" onClick={() => void handleSubscribeAll()}>
                               全部开启
                             </Button>
-                            <Button size="small" theme="light" onClick={handleUnsubscribeAll}>
+                            <Button size="small" theme="light" onClick={() => void handleUnsubscribeAll()}>
                               全部关闭
                             </Button>
                           </Space>
@@ -2059,7 +2074,11 @@ export const SettingsView: React.FC = () => {
                               <Tag color={values?.[item.field] ? 'green' : 'grey'} size="small">
                                 {values?.[item.field] ? '已订阅' : '未订阅'}
                               </Tag>
-                              <Form.Switch field={item.field} noLabel />
+                              <Form.Switch
+                                field={item.field}
+                                noLabel
+                                onChange={(checked: boolean) => handleStrategyToggle(item.field, checked)}
+                              />
                             </div>
                           </div>
                         ))}
@@ -2227,6 +2246,7 @@ export const SettingsView: React.FC = () => {
                     </Card>
                   </div>
                 </TabPane>
+
               </Tabs>
 
               {/* 底部统一样式保存条 */}

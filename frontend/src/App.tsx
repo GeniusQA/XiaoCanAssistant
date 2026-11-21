@@ -1,6 +1,9 @@
 import React, { useEffect, useState, useRef, Suspense, lazy } from 'react';
-import { Layout, Tooltip } from '@douyinfe/semi-ui';
-import { IconChevronLeft, IconChevronRight } from '@douyinfe/semi-icons';
+import { Layout, SideSheet, Tooltip } from '@douyinfe/semi-ui';
+import {
+  IconChevronLeft,
+  IconChevronRight,
+} from '@douyinfe/semi-icons';
 import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
 import { SideNav } from './components/SideNav';
@@ -8,6 +11,7 @@ import { TopHeader } from './components/TopHeader';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PageLoading } from './components/PageLoading';
 import { useAppStore } from './store/useAppStore';
+import { api } from './api';
 
 gsap.registerPlugin(useGSAP);
 
@@ -52,12 +56,31 @@ export const App: React.FC = () => {
   const loadUserInfo = useAppStore((state) => state.loadUserInfo);
 
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set([activeTab]));
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const pageContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     sessionStorage.removeItem('chunk_retry_reloaded');
+
+    // 移动端设备凭证校验：PC 端注销后即时踢下线；启动与每 30 秒各校验一次
+    const verifyDeviceSession = () => {
+      const deviceToken = localStorage.getItem('xiaocan_device_token');
+      if (!deviceToken) return;
+      void api.checkDeviceSession(deviceToken).then((res) => {
+        if (!res.ok) {
+          Object.keys(localStorage)
+            .filter((k) => k.startsWith('xiaocan_'))
+            .forEach((k) => localStorage.removeItem(k));
+          window.location.reload();
+        }
+      }).catch(() => { /* 网络异常时允许使用已缓存数据，下次校验再处理 */ });
+    };
+    verifyDeviceSession();
+    const sessionTimer = window.setInterval(verifyDeviceSession, 30000);
+
     loadAccounts();
     loadUserInfo();
+    return () => window.clearInterval(sessionTimer);
   }, [loadAccounts, loadUserInfo]);
 
   // 空闲时静默预加载其他 Chunk，消除后续首次切入模块的网络与解析延迟
@@ -132,13 +155,13 @@ export const App: React.FC = () => {
   }, [setSidebarCollapsed]);
 
   return (
-    <Layout className="h-screen w-screen overflow-hidden bg-semi-color-bg-0 flex flex-row">
+    <Layout className="app-shell h-screen w-screen overflow-hidden bg-semi-color-bg-0 flex flex-row">
       <Sider
         breakpoint={['xl', 'lg']}
         onBreakpoint={(_screen, broken) => {
           setSidebarCollapsed(broken);
         }}
-        className="relative border-r border-semi-color-border h-full bg-semi-color-bg-1 z-20 shadow-sm shrink-0"
+        className="app-sider relative border-r border-semi-color-border h-full bg-semi-color-bg-1 z-20 shadow-sm shrink-0"
       >
         <SideNav />
         {/* 侧边栏右边缘快捷收起/展开悬浮按钮 (Semi Design 风格) */}
@@ -158,23 +181,23 @@ export const App: React.FC = () => {
           </Tooltip>
         </div>
       </Sider>
-      <Layout className="h-full flex flex-col flex-1 min-w-0 overflow-hidden">
-        <div className="shrink-0 z-10">
+      <Layout className="app-main h-full flex flex-col flex-1 min-w-0 overflow-hidden">
+        <div className="shrink-0 z-10 app-header">
           <TopHeader />
         </div>
-        <Content className="flex-1 min-h-0 bg-semi-color-bg-0 p-3 sm:p-3.5 sm:px-5 overflow-hidden flex flex-col">
+        <Content className="app-content flex-1 min-h-0 bg-semi-color-bg-0 p-3 sm:p-3.5 sm:px-5 overflow-hidden flex flex-col">
           <ErrorBoundary>
             <Suspense fallback={<PageLoading />}>
               <div
                 ref={pageContainerRef}
-                className="w-full h-full min-h-0 flex-1 relative overflow-hidden"
+                className="tab-page-container w-full h-full min-h-0 flex-1 relative overflow-hidden"
               >
                 {visitedTabs.has('dashboard') && (
                   <div
                     key="tab-dashboard"
                     data-tab="dashboard"
                     style={{ display: activeTab === 'dashboard' ? 'flex' : 'none' }}
-                    className="w-full h-full min-h-0 overflow-hidden flex flex-col"
+                    className="tab-page w-full h-full min-h-0 overflow-hidden flex flex-col"
                   >
                     <Dashboard />
                   </div>
@@ -184,7 +207,7 @@ export const App: React.FC = () => {
                     key="tab-accounts"
                     data-tab="accounts"
                     style={{ display: activeTab === 'accounts' ? 'block' : 'none' }}
-                    className="w-full h-full overflow-y-auto overflow-x-hidden pr-1"
+                    className="tab-page w-full h-full overflow-y-auto overflow-x-hidden pr-1"
                   >
                     <Accounts />
                   </div>
@@ -194,7 +217,7 @@ export const App: React.FC = () => {
                     key="tab-automation"
                     data-tab="automation"
                     style={{ display: activeTab === 'automation' ? 'block' : 'none' }}
-                    className="w-full h-full overflow-y-auto overflow-x-hidden pr-1"
+                    className="tab-page w-full h-full overflow-y-auto overflow-x-hidden pr-1"
                   >
                     <Automation />
                   </div>
@@ -204,7 +227,7 @@ export const App: React.FC = () => {
                     key="tab-store"
                     data-tab="store"
                     style={{ display: activeTab === 'store' ? 'flex' : 'none' }}
-                    className="w-full h-full min-h-0 flex-col overflow-hidden"
+                    className="tab-page w-full h-full min-h-0 flex-col overflow-hidden"
                   >
                     <StoreSniping />
                   </div>
@@ -214,7 +237,7 @@ export const App: React.FC = () => {
                     key="tab-orders"
                     data-tab="orders"
                     style={{ display: activeTab === 'orders' ? 'flex' : 'none' }}
-                    className="w-full h-full min-h-0 flex-col overflow-hidden"
+                    className="tab-page w-full h-full min-h-0 flex-col overflow-hidden"
                   >
                     <OrdersView />
                   </div>
@@ -224,7 +247,7 @@ export const App: React.FC = () => {
                     key="tab-logs"
                     data-tab="logs"
                     style={{ display: activeTab === 'logs' ? 'flex' : 'none' }}
-                    className="w-full h-full min-h-0 flex-col overflow-hidden"
+                    className="tab-page w-full h-full min-h-0 flex-col overflow-hidden"
                   >
                     <LogsView />
                   </div>
@@ -234,7 +257,7 @@ export const App: React.FC = () => {
                     key="tab-settings"
                     data-tab="settings"
                     style={{ display: activeTab === 'settings' ? 'block' : 'none' }}
-                    className="w-full h-full overflow-y-auto overflow-x-hidden pr-1"
+                    className="tab-page w-full h-full overflow-y-auto overflow-x-hidden pr-1"
                   >
                     <SettingsView />
                   </div>
@@ -244,6 +267,29 @@ export const App: React.FC = () => {
           </ErrorBoundary>
         </Content>
       </Layout>
+
+      {/* 移动端侧边栏抽屉：由顶部左上按钮唤出，桌面端隐藏 */}
+      <button
+        type="button"
+        className="mobile-sider-trigger"
+        aria-label="展开侧边栏"
+        aria-expanded={mobileNavOpen}
+        onClick={() => setMobileNavOpen(true)}
+      >
+        <img src="/logo.png" alt="XiaoCan Assistant" className="w-6 h-6 object-contain rounded-md" />
+      </button>
+      <SideSheet
+        title="功能导航"
+        visible={mobileNavOpen}
+        placement="left"
+        width="78vw"
+        className="mobile-nav-drawer"
+        footer={null}
+        onCancel={() => setMobileNavOpen(false)}
+      >
+        <SideNav forceExpanded onNavigate={() => setMobileNavOpen(false)} />
+      </SideSheet>
+
     </Layout>
   );
 };

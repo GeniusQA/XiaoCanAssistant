@@ -141,7 +141,7 @@ TASK_PRIORITY = {
     "auto_withdraw": 20,      # 自动提现 (资金操作，保守低优)
 
     # 级别 7 (最低): 后台全城大扫描与监控 (随时主动礼让)
-    "dual_rebate_monitor": 10, # 美团同店双返利智能监控
+    "dual_rebate_monitor": 10, # 同店双返智能监控
 }
 
 TASK_DEFAULT_TIME = {
@@ -159,7 +159,7 @@ TASK_DEFAULT_TIME = {
     "coupon_remind": "08:35",   # 卡券到期提醒 (错开 vip_expand 08:30)
     "auto_withdraw": "10:30",   # 自动提现 (错开 10:00 影音VIP / 10:05 红包雨)
     "meituan_coupon": "09:10",  # 美团神券每日领取 (错开 09:00 秒杀高峰)
-    "dual_rebate_monitor": "5 9-23 * * *", # 美团同店双返利智能监控 (固定xx:05/xx:35巡检，彻底避开整点与半点秒杀/红包雨)
+    "dual_rebate_monitor": "5 9-23 * * *", # 同店双返智能监控 (固定xx:05/xx:35巡检，彻底避开整点与半点秒杀/红包雨)
 }
 
 # ---------------------------------------------------------------------------
@@ -373,7 +373,7 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
         "expire_remind": "登录凭据到期巡检",
         "coupon_remind": "卡券到期提醒",
         "auto_withdraw": "钱包余额自动提现",
-        "dual_rebate_monitor": "美团同店双返利监控",
+        "dual_rebate_monitor": "同店双返监控",
         "meituan_coupon": "美团神券每日一键领",
         "store_grab": "霸王餐即时抢单",
         "store_appoint": "倒计时预约抢单",
@@ -1949,7 +1949,7 @@ def reload_schedules():
 
             task_id = cfg["task_id"]
             if task_id == "dual_rebate_monitor":
-                # 美团同店双返利智能监控调度引擎：按固定时段巡检 (默认 1 小时，可选 30 分钟、2 小时)
+                # 同店双返智能监控调度引擎：按固定时段巡检 (默认 1 小时，可选 30 分钟、2 小时)
                 task_params = cfg.get("params") or {}
                 try:
                     interval = int(task_params.get("interval_minutes", 60))
@@ -2001,7 +2001,7 @@ def reload_schedules():
                     misfire_grace_time=60,
                     replace_existing=True
                 )
-                logger.info(f"已装载美团同店双返利监控: {acc.get('nickname')} - 固定时段={interval}分钟 (时段={hours_desc})")
+                logger.info(f"已装载同店双返监控: {acc.get('nickname')} - 固定时段={interval}分钟 (时段={hours_desc})")
                 continue
 
             fixed_trig = create_fixed_trigger(task_id)

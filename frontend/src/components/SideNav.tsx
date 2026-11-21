@@ -12,11 +12,17 @@ import {
 import { useAppStore } from '../store/useAppStore';
 import { gsap, useGSAP } from '../utils/animations';
 
-export const SideNav: React.FC = () => {
+interface SideNavProps {
+  forceExpanded?: boolean;
+  onNavigate?: () => void;
+}
+
+export const SideNav: React.FC<SideNavProps> = ({ forceExpanded = false, onNavigate }) => {
   const activeTab = useAppStore((s) => s.activeTab);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const isSidebarCollapsed = useAppStore((s) => s.isSidebarCollapsed);
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed);
+  const collapsed = forceExpanded ? false : isSidebarCollapsed;
   const navRef = useRef<HTMLDivElement>(null);
 
   // 菜单项微动效：选中的菜单项图标轻弹激活 (遵循 gsap-react 规范)
@@ -58,18 +64,21 @@ export const SideNav: React.FC = () => {
     <div ref={navRef} className="h-full flex flex-col">
       <Nav
         mode="vertical"
-        isCollapsed={isSidebarCollapsed}
-        onCollapseChange={(collapsed) => setSidebarCollapsed(collapsed)}
+        isCollapsed={collapsed}
+        onCollapseChange={(nextCollapsed) => {
+          if (!forceExpanded) setSidebarCollapsed(nextCollapsed);
+        }}
         selectedKeys={[activeTab]}
         onSelect={(data) => {
           const nextKey = String(data.itemKey);
           if (nextKey) {
             setActiveTab(nextKey);
+            onNavigate?.();
           }
         }}
         style={{ height: '100%', borderRight: 'none' }}
         header={{
-          logo: isSidebarCollapsed ? (
+          logo: collapsed ? (
             <Tooltip content="XiaoCan Assistant" position="right">
               <div
                 className="w-10 h-10 flex items-center justify-center cursor-pointer transition-all duration-200 hover:scale-105 mx-auto"

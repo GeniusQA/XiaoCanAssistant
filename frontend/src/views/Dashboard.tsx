@@ -109,8 +109,8 @@ const TASK_LABELS: Record<string, string> = {
   free_order: '订单全额免单券',
   expire_remind: '凭据/JWT到期预警',
   coupon_remind: '卡券/红包到期提醒',
-  dual_rebate_monitor: '美团同店双返利监控',
-  dual_rebate_scan: '美团同店双返利扫描',
+  dual_rebate_monitor: '同店双返监控',
+  dual_rebate_scan: '同店双返扫描',
   meituan_coupon: '美团官方领券打卡',
   meituan_auth: '美团官方扫码授权',
   auto_withdraw: '账户佣金自动提现',
@@ -171,7 +171,6 @@ const getConditionTagColor = (condition?: string): 'green' | 'cyan' | 'blue' | '
 export const Dashboard: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
-  const setCurrentAccountKey = useAppStore((s) => s.setCurrentAccountKey);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const openLocationModal = useAppStore((s) => s.openLocationModal);
   const dashboardRef = useRef<HTMLDivElement>(null);
@@ -655,7 +654,7 @@ export const Dashboard: React.FC = () => {
   // 当前激活账号资料
   const currentAccount = accounts.find((a) => a.key === currentAccountKey) || accounts[0];
 
-  // 过滤并组装当前账号全部待执行与进行中任务 (严格排除美团同店双返利监控)
+  // 过滤并组装当前账号全部待执行与进行中任务 (严格排除同店双返监控)
   const activePendingTasks = useMemo(() => {
     const list: Array<{
       id: string;
@@ -714,7 +713,7 @@ export const Dashboard: React.FC = () => {
       });
     }
 
-    // 2. 本账号已开启的自动化任务 (明确排除 dual_rebate_monitor 美团同店双返利监控)
+    // 2. 本账号已开启的自动化任务 (明确排除 dual_rebate_monitor 同店双返监控)
     const enabledTasks = accountTasks.filter(
       (t) => t.enabled && t.task_id !== 'dual_rebate_monitor'
     );
@@ -854,7 +853,7 @@ export const Dashboard: React.FC = () => {
   return (
     <div ref={dashboardRef} className="w-full h-full min-h-0 flex flex-col overflow-hidden gap-2 sm:gap-2.5">
       {/* 顶部主控账号概览 Card (专业沉稳三段式，色彩收敛，数据聚焦) */}
-      <div className="gsap-card-item shrink-0 bg-semi-color-bg-1 border border-semi-color-border/90 rounded-xl px-4 py-2.5 shadow-xs hover:border-semi-color-primary-light-active transition-colors duration-200 flex items-center justify-between gap-3">
+      <div className="gsap-card-item shrink-0 bg-semi-color-bg-1 border border-semi-color-border/90 rounded-xl px-4 py-2.5 shadow-xs hover:border-semi-color-primary-light-active transition-colors duration-200 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3">
         {/* 左侧：主控账号身份与连接状态 */}
         <div className="flex items-center gap-3 min-w-0">
           <div className="relative group cursor-pointer shrink-0" onClick={() => setActiveTab('accounts')}>
@@ -892,7 +891,7 @@ export const Dashboard: React.FC = () => {
                 <span>主控托管中</span>
               </div>
               {currentAccount?.phone && (
-                <span className="text-xs text-semi-color-text-2 font-mono hidden xl:inline">
+                <span className="text-xs text-semi-color-text-2 font-mono">
                   {currentAccount.phone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2')}
                 </span>
               )}
@@ -903,7 +902,7 @@ export const Dashboard: React.FC = () => {
                 最后同步: <span className="font-mono text-semi-color-text-1">{currentAccount?.updated_at?.split(' ')[1] || currentAccount?.updated_at || '刚刚'}</span>
               </span>
               {Boolean(currentAccount?.vip_score) && (
-                <span className="hidden lg:inline text-semi-color-text-2">
+                <span className="text-semi-color-text-2">
                   成长值: <span className="font-mono text-semi-color-text-1"><NumberAnimation to={currentAccount?.vip_score || 0} showSeparator refreshKey={dashboardRefreshKey} className="font-mono text-semi-color-text-1" /></span>
                 </span>
               )}
@@ -911,46 +910,8 @@ export const Dashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* 右侧：多账号切换与全局操作 */}
-        <div className="flex items-center gap-2 shrink-0">
-          {accounts.length > 1 && (
-            <Select
-              value={currentAccountKey}
-              onChange={(v) => {
-                setCurrentAccountKey(String(v));
-                const target = accounts.find((a) => a.key === v);
-                Toast.success(`已切换主控为【${target?.nickname || v}】`);
-              }}
-              style={{ width: 150 }}
-              size="small"
-              renderSelectedItem={(opt: any) => {
-                const acc = accounts.find((a) => a.key === opt?.value);
-                return (
-                  <div className="flex items-center gap-1.5 text-xs truncate">
-                    <Avatar size="extra-extra-small" src={acc?.avatar || undefined} color="orange">
-                      {acc?.nickname?.[0] || '蚕'}
-                    </Avatar>
-                    <span className="truncate">{acc?.nickname || '选择账号'}</span>
-                  </div>
-                );
-              }}
-            >
-              {accounts.map((a) => (
-                <Select.Option key={a.key} value={a.key}>
-                  <div className="flex items-center gap-1.5 py-0.5">
-                    <Avatar size="extra-extra-small" src={a.avatar || undefined} color="orange">
-                      {a.nickname?.[0] || '蚕'}
-                    </Avatar>
-                    <span className="text-xs truncate flex-1">{a.nickname}</span>
-                    <Tag size="small" color={a.is_plus ? 'amber' : 'blue'}>
-                      {a.is_plus ? `SVIP${a.vip_level || 1}` : `VIP${a.vip_level || 1}`}
-                    </Tag>
-                  </div>
-                </Select.Option>
-              ))}
-            </Select>
-          )}
-
+        {/* 右侧：全局操作 */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Button
             theme="light"
             type="primary"
@@ -963,17 +924,6 @@ export const Dashboard: React.FC = () => {
             }}
           >
             刷新数据
-          </Button>
-
-          <Button
-            theme="light"
-            type="tertiary"
-            size="small"
-            icon={<IconChevronRight />}
-            iconPosition="right"
-            onClick={() => setActiveTab('accounts')}
-          >
-            账号管理
           </Button>
         </div>
       </div>
@@ -1208,7 +1158,7 @@ export const Dashboard: React.FC = () => {
           {/* 上卡片：待上传外卖订单 (官方限额 3 笔，高度平滑过渡，工单级呈现) */}
           <Card
             title={
-              <div className="flex justify-between items-center w-full min-w-0 gap-2">
+              <div className="flex flex-wrap justify-between items-center w-full min-w-0 gap-2">
                 <div className="flex items-center gap-1.5 shrink-0">
                   <div className="w-5 h-5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
                     <IconShoppingBag size="extra-small" />
@@ -1333,7 +1283,7 @@ export const Dashboard: React.FC = () => {
                                 </span>
                                 <span>门槛 ¥{order.order_money}</span>
                                 <Tag size="small" color={getConditionTagColor(order.condition)}>
-                                  {order.condition || '用餐反馈'}
+                                  {order.condition || '图文反馈'}
                                 </Tag>
                                 {isBound && (
                                   <span className="font-mono text-xs text-semi-color-text-1">
@@ -1385,7 +1335,7 @@ export const Dashboard: React.FC = () => {
                     <IconCheckCircleStroked className="text-emerald-500 shrink-0" size="small" />
                     <div className="text-xs min-w-0">
                       <span className="text-semi-color-text-1 font-medium">当前无待处理工单</span>
-                      <span className="text-semi-color-text-2 ml-1 hidden sm:inline">· 限额 3 笔，抢单后需回填单号</span>
+                      <span className="text-semi-color-text-2 ml-1">· 限额 3 笔，抢单后需回填单号</span>
                     </div>
                   </div>
                   <Button
@@ -1419,7 +1369,7 @@ export const Dashboard: React.FC = () => {
           {/* 下卡片：今日自动化守护与快捷中心 (一键打卡 + 核心待命节点，精炼降噪) */}
           <Card
             title={
-              <div className="flex justify-between items-center w-full min-w-0 gap-2">
+              <div className="flex flex-wrap justify-between items-center w-full min-w-0 gap-2">
                 <div className="flex items-center gap-1.5 shrink-0">
                   <div className="w-5 h-5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
                     <IconBolt size="extra-small" />
@@ -1498,7 +1448,7 @@ export const Dashboard: React.FC = () => {
                 className="px-2.5 py-1 rounded-md text-xs font-medium bg-semi-color-fill-0 hover:bg-semi-color-fill-1 text-semi-color-text-1 hover:text-semi-color-primary border border-semi-color-border/60 transition-colors flex items-center gap-1 cursor-pointer"
               >
                 <IconActivity size="extra-small" />
-                <span>美团同店双返利监控</span>
+                <span>同店双返监控</span>
                 <IconChevronRight size="extra-small" />
               </button>
               <button
@@ -1666,7 +1616,7 @@ export const Dashboard: React.FC = () => {
         <div className="lg:col-span-5 h-full min-h-0 flex flex-col overflow-hidden">
           <Card
             title={
-              <div className="flex justify-between items-center w-full min-w-0 gap-2">
+              <div className="flex flex-wrap justify-between items-center w-full min-w-0 gap-2">
                 {/* 模式切换切换器 */}
                 <RadioGroup
                   type="button"
@@ -1697,7 +1647,7 @@ export const Dashboard: React.FC = () => {
 
                 {/* 右侧工具操作区 */}
                 {rightPanelTab === 'feed' ? (
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                     <Select
                       value={logFilterAccount}
                       onChange={(v) => setLogFilterAccount(String(v))}
@@ -1748,7 +1698,7 @@ export const Dashboard: React.FC = () => {
                     </Button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1 shrink-0">
                     <Tooltip content="弹出消息提醒">
                       <Button
                         theme="light"

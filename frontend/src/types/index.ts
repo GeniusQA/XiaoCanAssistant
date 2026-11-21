@@ -200,6 +200,7 @@ export interface StorePromotion {
   rebate_type?: 'fixed' | 'percent' | string;
   rebate_type_text?: string;
   condition: string;
+  activity_tags?: string[];
   left_number: number;
   start_time: string;
   end_time: string;
@@ -208,6 +209,7 @@ export interface StorePromotion {
   need_brand_coupon?: boolean;
   brand_left_number?: number;
   is_vip_brand?: boolean;
+  is_brand_store?: boolean;
   days_limit?: number;
   days_order_limit?: number;
   same_group_id?: number;
@@ -242,6 +244,7 @@ export interface StoreItem {
   start_date_timestamp?: number;
   end_date_timestamp?: number;
   condition: string;
+  activity_tags?: string[];
   platform?: 'meituan' | 'eleme' | 'jingdong' | string;
   store_platform?: number;
   promotions?: StorePromotion[];
@@ -249,6 +252,7 @@ export interface StoreItem {
   need_brand_coupon?: boolean;
   brand_left_number?: number;
   is_vip_brand?: boolean;
+  is_brand_store?: boolean;
   days_limit?: number;
   days_order_limit?: number;
   same_group_id?: number;
@@ -332,6 +336,8 @@ export interface StoreAppointment {
   redpack_name?: string;
   use_advance_card?: number | boolean;
   keyword?: string;
+  listen_mode?: 'store' | 'general' | string;
+  activity_requirement?: 'all' | 'specified_dish' | 'repurchase' | string;
   match_mode?: 'contains' | 'exact' | string;
   min_rebate_price?: number;
   min_rebate_rate?: number;
@@ -346,8 +352,10 @@ export interface StoreAppointment {
 export interface NameMonitorPayload {
   account_key: string;
   keyword: string;
+  listen_mode?: 'store' | 'general';
+  activity_requirement?: 'all' | 'specified_dish' | 'repurchase';
   match_mode?: 'contains' | 'exact';
-  platform?: 'all' | 'meituan' | 'eleme';
+  platform?: 'all' | 'meituan' | 'eleme' | 'jingdong';
   rebate_mode_filter?: 'all' | 'fixed' | 'percent';
   min_rebate_price?: number;
   min_rebate_rate?: number;
@@ -679,6 +687,35 @@ export interface NotifyTestResult {
   channel: string;
   message: string;
   errors?: string[];
+}
+
+export interface DevicePairStartResult {
+  ok: boolean;
+  ticket: string;
+  url: string;
+  qr_image: string;
+  expires_in: number;
+  lan_ip: string;
+}
+
+export interface DevicePairStatusResult {
+  ok: boolean;
+  status: string;
+  message?: string;
+  device_name?: string;
+  expires_in?: number;
+}
+
+export interface PairedDevice {
+  id: string;
+  name: string;
+  device_id: string;
+  created_at: number;
+  last_seen_at: number;
+  revoked_at: number;
+  client_ip: string;
+  user_agent: string;
+  status: 'active' | 'revoked';
 }
 
 export interface UserCardItem {

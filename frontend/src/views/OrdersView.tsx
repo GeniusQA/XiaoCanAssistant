@@ -888,7 +888,7 @@ export const OrdersView: React.FC = () => {
               setSearchKeyword('');
               fetchOrders('');
             }}
-            style={{ width: 220 }}
+            style={{ width: '100%' }}
           />
         </div>
       </div>
@@ -915,7 +915,7 @@ export const OrdersView: React.FC = () => {
               showSizeChanger: true,
               pageSizeOpts: [10, 20, 50, 100],
             }}
-            scroll={{ y: tableScrollY, x: 1200 }}
+            scroll={{ y: tableScrollY, x: 1600 }}
             size="middle"
             empty={
               loading ? (

@@ -1,5 +1,5 @@
 """
-美团同店双返利智能监控引擎
+同店双返智能监控引擎
 功能规范：
 1. 定期（每5分钟与半小时整点）流式高精度扫描美团外卖同店双返利商户；
 2. 维护每日商户快照，每日凌晨自动重置基准；
@@ -84,7 +84,7 @@ async def run_dual_rebate_monitor(
     trigger_type: str = "cron"
 ) -> Tuple[str, bool]:
     """
-    执行美团同店双返利监控主流程
+    执行同店双返监控主流程
     返回: (log_output: str, success: bool)
     """
     params = params or {}
@@ -99,7 +99,7 @@ async def run_dual_rebate_monitor(
     now_str = time_service.format_now()
     today_str = time_service.format_now("%Y-%m-%d")
 
-    log_lines.append(f"[{now_str}] 启动美团同店双返利巡检: 触发方式={trigger_type}, 范围={max_stores}家, 关键词='{keyword}'")
+    log_lines.append(f"[{now_str}] 启动同店双返巡检: 触发方式={trigger_type}, 范围={max_stores}家, 关键词='{keyword}'")
 
     # 0. 前置 WAF 拦截状态检查 (仅当前账号，避免被其他账号的冷却误伤)
     from ..protocol.client import is_waf_blocked, get_waf_cooldown_seconds, format_waf_block_message, waf_account_key

@@ -148,6 +148,21 @@ export const getConditionShortText = (cond?: string): string => {
   return cond.slice(0, 2);
 };
 
+const ACTIVITY_REQUIREMENT_LABELS: Record<string, string> = {
+  specified_dish: '指定餐品',
+  repurchase: '复购专享',
+};
+
+const renderActivityRequirementTags = (tags?: string[] | string) => {
+  const list = Array.isArray(tags) ? tags : (tags ? [tags] : []);
+  const normalized = [...new Set(list.map((tag) => String(tag).trim()))];
+  return normalized.map((tag) => (
+    <Tag key={tag} color="cyan" size="small" shape="square">
+      {ACTIVITY_REQUIREMENT_LABELS[tag] || tag}
+    </Tag>
+  ));
+};
+
 export const formatPromoDescForTier = (desc?: string): string => {
   if (!desc) return '';
   return cleanEmoji(desc).replace(/[(（]\s*最高[^)）]*[)）]/gi, '').trim();
@@ -467,6 +482,7 @@ export const StoreSniping: React.FC = () => {
   const [platformFilter, setPlatformFilter] = useState<'all' | 'meituan' | 'eleme' | 'jingdong'>('all');
   const [rebateTypeFilter, setRebateTypeFilter] = useState<'all' | 'fixed' | 'percent'>('all');
   const [conditionFilter, setConditionFilter] = useState<'all' | 'no_review' | 'good_review'>('all');
+  const [activityRequirementFilter, setActivityRequirementFilter] = useState<'all' | 'specified_dish' | 'repurchase'>('all');
   const [sortBy, setSortBy] = useState<'default' | 'distance' | 'rebate' | 'rate' | 'left'>('default');
   const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [activeSearchKeyword, setActiveSearchKeyword] = useState<string>('');
@@ -499,14 +515,9 @@ export const StoreSniping: React.FC = () => {
   const activeSearchKeywordRef = useRef<string>('');
   const pagePvIdRef = useRef<string>('');
 
-  // 仅且只有「周边门店通用」的店铺归入大牌券专享 Tab，其他所有店铺均为普通附近店铺
+  // 大牌专享：按官方「大牌商家」标识归类，不再把「周边门店通用」误判为大牌。
   const isBrandCouponStore = useCallback((s: StoreItem) => {
-    return Boolean(
-      s.distance_text && (
-        s.distance_text === '周边门店通用' ||
-        s.distance_text.includes('周边门店通用')
-      )
-    );
+    return Boolean(s.is_brand_store);
   }, []);
 
   // 提取店铺在平台内的同店分店唯一聚合标识（准确保留主品牌与核心分店，杜绝跨分店混淆）
@@ -528,7 +539,7 @@ export const StoreSniping: React.FC = () => {
     return `${plat}_${brand}_${branchCore}`;
   }, []);
 
-  // 识别美团同店双返利商户（严格限定同平台同分店，必须同时具备实付满返与按比例返两类方案）
+  // 识别同店双返商户（严格限定同平台同分店，必须同时具备实付满返与按比例返两类方案）
   const dualRebateStoreKeys = useMemo(() => {
     const branchMap = new Map<string, { fixed: boolean; percent: boolean }>();
 
@@ -586,6 +597,8 @@ export const StoreSniping: React.FC = () => {
   const [nameMonitorVisible, setNameMonitorVisible] = useState(false);
   const [nameMonitorSubmitting, setNameMonitorSubmitting] = useState(false);
   const [nameMonitorInitialKeyword, setNameMonitorInitialKeyword] = useState('');
+  const [editingMonitorId, setEditingMonitorId] = useState<number | null>(null);
+  const [nameMonitorInitialValues, setNameMonitorInitialValues] = useState<Record<string, any> | null>(null);
 
   // 同店双返利状态
   const [dualStores, setDualStores] = useState<StoreItem[]>([]);
@@ -677,7 +690,7 @@ export const StoreSniping: React.FC = () => {
     }));
   }, []);
 
-  // 美团同店双返利满返档位切换
+  // 同店双返满返档位切换
   const handleSelectDualFixedPromo = useCallback((storeKey: string, promoId: string) => {
     setDualStores(prev => prev.map(s => {
       const key = `${s.store_id || s.name}_${normalizeStorePlatform(s)}`;
@@ -688,7 +701,7 @@ export const StoreSniping: React.FC = () => {
     }));
   }, []);
 
-  // 美团同店双返利比例档位切换
+  // 同店双返比例档位切换
   const handleSelectDualPercentPromo = useCallback((storeKey: string, promoId: string) => {
     setDualStores(prev => prev.map(s => {
       const key = `${s.store_id || s.name}_${normalizeStorePlatform(s)}`;
@@ -722,7 +735,7 @@ export const StoreSniping: React.FC = () => {
     });
   }, [dualStores, deferredDualKeyword]);
 
-  // 店铺图标映射表：优先快速回填预约与监听列表中缺失的商户图标
+  // 店铺图标映射表：优先快速回填预约监听列表中缺失的商户图标
   const storeIconMap = useMemo(() => {
     const map = new Map<string, string>();
     for (const s of stores) {
@@ -755,7 +768,7 @@ export const StoreSniping: React.FC = () => {
     });
   }, [activeTabKey]);
 
-  // 距离最近排序下无法检索大牌券专享商户，自动回退到常规附近店铺分栏
+  // 距离最近排序下无法检索大牌专享商户，自动回退到常规附近店铺分栏
   useEffect(() => {
     if (sortBy === 'distance' && activeTabKey === 'brand_coupon') {
       setActiveTabKey('stores');
@@ -935,7 +948,7 @@ export const StoreSniping: React.FC = () => {
       position="bottomLeft"
       showArrow
       content={
-        <div className="p-3 w-[250px] flex flex-col gap-3">
+        <div className="p-3 w-full md:w-[250px] flex flex-col gap-3">
           <div className="flex items-center justify-between gap-2">
             <Text className="text-xs font-medium text-semi-color-text-1 whitespace-nowrap">实付满返 (Feed)</Text>
             <Select
@@ -1004,7 +1017,7 @@ export const StoreSniping: React.FC = () => {
       return;
     }
     const keywordToSearch = kw !== undefined ? kw : activeSearchKeywordRef.current;
-    const querySignature = `${activeLocation?.cityCode}_${activeLocation?.longitude}_${activeLocation?.latitude}_${currentAccountKey}_${platformFilter}_${conditionFilter}_${rebateTypeFilter}_${sortBy}_${keywordToSearch}`;
+    const querySignature = `${activeLocation?.cityCode}_${activeLocation?.longitude}_${activeLocation?.latitude}_${currentAccountKey}_${platformFilter}_${conditionFilter}_${activityRequirementFilter}_${rebateTypeFilter}_${sortBy}_${keywordToSearch}`;
 
     if (!force && lastStoresQuerySignatureRef.current === querySignature) {
       return;
@@ -1029,6 +1042,7 @@ export const StoreSniping: React.FC = () => {
         account_key: currentAccountKey,
         platform: platformFilter,
         condition: conditionFilter,
+        activity_requirement: activityRequirementFilter,
         rebate_type: rebateTypeFilter,
         sort_by: sortBy,
         keyword: keywordToSearch,
@@ -1067,7 +1081,7 @@ export const StoreSniping: React.FC = () => {
       setLoading(false);
       loadingRef.current = false;
     }
-  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy]);
+  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy]);
 
   const loadMoreStores = useCallback(async () => {
     if (loadingRef.current || loadingMoreRef.current || !hasMoreRef.current || accounts.length === 0) {
@@ -1089,6 +1103,7 @@ export const StoreSniping: React.FC = () => {
         account_key: currentAccountKey,
         platform: platformFilter,
         condition: conditionFilter,
+        activity_requirement: activityRequirementFilter,
         rebate_type: rebateTypeFilter,
         sort_by: sortBy,
         keyword: activeSearchKeywordRef.current,
@@ -1163,6 +1178,7 @@ export const StoreSniping: React.FC = () => {
                   need_brand_coupon: ns.need_brand_coupon,
                   brand_left_number: ns.brand_left_number,
                   is_vip_brand: ns.is_vip_brand,
+                  is_brand_store: ns.is_brand_store,
                   days_limit: ns.days_limit,
                   days_order_limit: ns.days_order_limit,
                   same_group_id: ns.same_group_id,
@@ -1251,7 +1267,7 @@ export const StoreSniping: React.FC = () => {
       setLoadingMore(false);
       loadingMoreRef.current = false;
     }
-  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy, getStoreBranchIdentityKey]);
+  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy, getStoreBranchIdentityKey]);
 
   const scrollToTop = () => {
     const tableBody = tableContainerRef.current?.querySelector('.semi-table-body') as HTMLElement;
@@ -1376,7 +1392,7 @@ export const StoreSniping: React.FC = () => {
     }
   }, { throttleMs: 3000 });
 
-  // 当处于「预约与监听」Tab 且存在进行中的任务时，启动轻量 4 秒静默自动轮询更新任务状态
+  // 当处于「预约监听」Tab 且存在进行中的任务时，启动轻量 4 秒静默自动轮询更新任务状态
   useEffect(() => {
     if (activeTabKey !== 'appointments') return;
     const hasActive = appointments.some(a => ['monitoring', 'scheduled', 'primed', 'pending'].includes(a.status));
@@ -1598,9 +1614,49 @@ export const StoreSniping: React.FC = () => {
       openLocationModal(currentAccountKey);
       return;
     }
+    setEditingMonitorId(null);
+    setNameMonitorInitialValues(null);
     setNameMonitorInitialKeyword(kw || searchKeyword || '');
     setNameMonitorVisible(true);
   }, [currentAccountKey, searchKeyword, activeLocation, openLocationModal]);
+
+  const timeoutSecFromUntilTime = (untilTime?: string): number => {
+    if (!untilTime || untilTime === '23:59') return 0;
+    const match = untilTime.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return 7200;
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(Number(match[1]), Number(match[2]), 0, 0);
+    if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+    return Math.max(60, Math.floor((target.getTime() - now.getTime()) / 1000));
+  };
+
+  const handleEditMonitor = useCallback((row: StoreAppointment) => {
+    if (!currentAccountKey) {
+      Toast.warning('请先选择或绑定账号');
+      return;
+    }
+    setEditingMonitorId(row.id);
+    setNameMonitorInitialValues({
+      listen_mode: row.listen_mode || 'store',
+      activity_requirement: row.activity_requirement || 'all',
+      keyword: row.keyword || row.store_name || '',
+      match_mode: row.match_mode || 'contains',
+      platform: row.platform || 'all',
+      rebate_mode_filter: row.rebate_mode_filter || 'all',
+      min_rebate_price: Number(row.min_rebate_price || 0),
+      min_rebate_rate: Number(row.min_rebate_rate || 0),
+      timeout_sec: timeoutSecFromUntilTime(row.until_time),
+      until_time: row.until_time || '',
+      check_interval: Number(row.check_interval || 10),
+      auto_stop_on_success: row.auto_stop_on_success !== 0,
+      redpack_mode: Number(row.redpack_mode ?? 0),
+      redpack_id: row.redpack_id || '',
+      use_advance_card: Boolean(row.use_advance_card),
+    });
+    setNameMonitorInitialKeyword(row.keyword || row.store_name || '');
+    setNameMonitorVisible(true);
+  }, [currentAccountKey]);
 
   const handleSubmitNameMonitor = async (values: any) => {
     if (!currentAccountKey) return;
@@ -1609,11 +1665,20 @@ export const StoreSniping: React.FC = () => {
       openLocationModal(currentAccountKey);
       return;
     }
-    const kw = (values.keyword || '').trim();
-    if (!kw) {
-      Toast.warning('请输入商户名称或搜索关键词');
+    const listenMode = values.listen_mode === 'general' ? 'general' : 'store';
+    const kw = listenMode === 'store' ? (values.keyword || '').trim() : '';
+    if (listenMode === 'store' && !kw) {
+      Toast.warning('店名监听需要输入商户名称或搜索关键词');
       return;
     }
+    const modeLabel = listenMode === 'general' ? '常规监听' : `店名监听「${kw}」`;
+    const rebateFilter = values.rebate_mode_filter || 'all';
+    const minPrice = rebateFilter === 'percent' ? 0 : Number(values.min_rebate_price || 0);
+    const minRate = rebateFilter === 'fixed' ? 0 : Number(values.min_rebate_rate || 0);
+    const activityRequirement = rebateFilter === 'percent' ? 'all' : (values.activity_requirement || 'all');
+    const monitorPlatform = rebateFilter === 'percent' && ['eleme', 'jingdong'].includes(values.platform)
+      ? 'meituan'
+      : (values.platform || 'all');
     setNameMonitorSubmitting(true);
     try {
       const rpMode = values.redpack_mode ?? 0;
@@ -1627,18 +1692,30 @@ export const StoreSniping: React.FC = () => {
         }
       }
 
+      const timeoutSec = values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200;
+      let untilTime: string | undefined = timeoutSec === 0 ? '23:59' : undefined;
+      if (
+        editingMonitorId &&
+        nameMonitorInitialValues?.until_time &&
+        Number(nameMonitorInitialValues.timeout_sec) === timeoutSec
+      ) {
+        untilTime = String(nameMonitorInitialValues.until_time);
+      }
+
       const res = await api.createNameMonitor({
         account_key: currentAccountKey,
         keyword: kw,
+        listen_mode: listenMode,
+        activity_requirement: activityRequirement,
         match_mode: values.match_mode || 'contains',
-        platform: values.platform || 'all',
-        rebate_mode_filter: values.rebate_mode_filter || 'all',
-        min_rebate_price: Number(values.min_rebate_price || 0),
-        min_rebate_rate: Number(values.min_rebate_rate || 0),
+        platform: monitorPlatform,
+        rebate_mode_filter: rebateFilter,
+        min_rebate_price: minPrice,
+        min_rebate_rate: minRate,
         max_order_money: 0,
         auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
-        timeout_sec: values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200,
-        until_time: Number(values.timeout_sec) === 0 ? '23:59' : undefined,
+        timeout_sec: timeoutSec,
+        until_time: untilTime,
         check_interval: Number(values.check_interval ?? 10),
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
@@ -1647,8 +1724,17 @@ export const StoreSniping: React.FC = () => {
       });
 
       if (res.ok) {
-        Toast.success(res.message || `已启动「${kw}」店名抢单监听`);
+        if (editingMonitorId) {
+          try {
+            await api.cancelAppointment(editingMonitorId);
+          } catch { /* 旧任务已停止，删除失败不影响新任务运行 */ }
+          Toast.success(`已启动${modeLabel}`);
+        } else {
+          Toast.success(res.message || `已启动${modeLabel}抢单监听`);
+        }
         setNameMonitorVisible(false);
+        setEditingMonitorId(null);
+        setNameMonitorInitialValues(null);
         await fetchAppointments(true);
       } else {
         Toast.warning(res.message || '创建监听任务失败');
@@ -1751,6 +1837,14 @@ export const StoreSniping: React.FC = () => {
                     可用红包
                   </Tag>
                 )}
+                {renderActivityRequirementTags(
+                  row.promotions?.length
+                    ? (row.promotions.find((p) => p.promotion_id === currentPid)?.activity_tags || [])
+                    : row.activity_tags
+                )}
+                {row.is_brand_store && (
+                  <Tag color="amber" size="small" shape="square">大牌商家</Tag>
+                )}
                 {hasMulti && (
                   <Tag color="violet" size="small" shape="circle">
                     共 {row.promotions?.length} 档活动
@@ -1813,7 +1907,7 @@ export const StoreSniping: React.FC = () => {
         const activePromo = (row.promotions && row.promotions.find(p => p.promotion_id === currentPid)) || row;
         const isPercent = activePromo.rebate_type === 'percent';
         const desc = activePromo.rebate_desc || `满${activePromo.order_money}返${activePromo.rebate_price}元`;
-        const typeText = activePromo.rebate_type_text || (isPercent ? '比例返现' : '实付满返');
+        const typeText = activePromo.rebate_type_text || (isPercent ? '比例返' : '实付满返');
         const hasMulti = row.promotions && row.promotions.length > 1;
         const currentIdx = row.promotions ? row.promotions.findIndex(p => p.promotion_id === currentPid) : -1;
 
@@ -2050,6 +2144,7 @@ export const StoreSniping: React.FC = () => {
                     可用红包
                   </Tag>
                 )}
+                {renderActivityRequirementTags(row.activity_tags)}
               </div>
               <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                 <Tag color={fixedLeft > 0 ? 'cyan' : 'grey'} size="small" shape="square">
@@ -2458,11 +2553,12 @@ export const StoreSniping: React.FC = () => {
       title: '任务类型',
       dataIndex: 'task_type',
       width: 130,
-      render: (t: string) => {
+      render: (t: string, row?: StoreAppointment) => {
         if (t === 'name_monitor' || t === 'keyword') {
+          const isGeneral = row?.listen_mode === 'general';
           return (
-            <Tag color="cyan" shape="square">
-              店名监听
+            <Tag color={isGeneral ? 'green' : 'cyan'} shape="square">
+              {isGeneral ? '常规监听' : '店名监听'}
             </Tag>
           );
         }
@@ -2478,7 +2574,9 @@ export const StoreSniping: React.FC = () => {
       title: '店铺与活动',
       dataIndex: 'store_name',
       render: (name: string, row?: StoreAppointment) => {
-        const isNameMon = row?.task_type === 'name_monitor' || row?.task_type === 'keyword';
+        const isMonitorTask = row?.task_type === 'name_monitor' || row?.task_type === 'keyword';
+        const isGeneral = row?.listen_mode === 'general';
+        const isNameMon = isMonitorTask && !isGeneral;
         const platInfo = getPlatformBadge(row?.platform);
         const iconSrc = row?.store_icon || row?.icon || (row?.store_id ? storeIconMap.get(row.store_id) : undefined) || (name ? storeIconMap.get(name) : undefined);
         return (
@@ -2487,10 +2585,10 @@ export const StoreSniping: React.FC = () => {
               <Avatar
                 size="medium"
                 shape="square"
-                src={iconSrc || undefined}
+                src={isGeneral ? undefined : (iconSrc || undefined)}
                 color={platInfo.avatarColor}
               >
-                {cleanEmoji(name)?.[0] || '店'}
+                {isGeneral ? '全' : (cleanEmoji(name)?.[0] || '店')}
               </Avatar>
             </div>
             <div className="min-w-0 flex-1">
@@ -2498,23 +2596,28 @@ export const StoreSniping: React.FC = () => {
                 <Tag color={platInfo.color} size="small" shape="square" className="flex-shrink-0">
                   {row?.platform === 'all' ? '全平台' : platInfo.label}
                 </Tag>
-                <StoreNameCell name={name} maxWidth={240} />
+                {isGeneral ? (
+                  <Tag color="green" size="small" shape="square">不区分店名</Tag>
+                ) : (
+                  <StoreNameCell name={name} maxWidth={240} />
+                )}
                 {isNameMon && (
                   <Tag color="light-blue" size="small" shape="square">
                     {row?.match_mode === 'exact' ? '精确匹配' : '包含匹配'}
                   </Tag>
                 )}
               </div>
-              {isNameMon ? (
+              {isMonitorTask ? (
                 <div className="flex items-center gap-2 mt-1 text-xs text-semi-color-text-2 flex-wrap">
                   {row?.min_rebate_price ? <span>最低返利: ¥{row.min_rebate_price}</span> : null}
                   {row?.min_rebate_rate ? <span>最低比例: {row.min_rebate_rate}%</span> : null}
                   {row?.max_order_money ? <span>门槛≤¥{row.max_order_money}</span> : null}
                   {row?.rebate_mode_filter && row.rebate_mode_filter !== 'all' ? (
                     <Tag color="purple" size="small" shape="square">
-                      {row.rebate_mode_filter === 'fixed' ? '仅实付满返' : '仅按比例返'}
+                      {row.rebate_mode_filter === 'fixed' ? '实付满返' : '比例返'}
                     </Tag>
                   ) : null}
+                  {row?.activity_requirement && row.activity_requirement !== 'all' && renderActivityRequirementTags(row.activity_requirement)}
                   {row?.auto_stop_on_success ? (
                     <Tag color="green" size="small" shape="square">成单自停</Tag>
                   ) : null}
@@ -2525,7 +2628,7 @@ export const StoreSniping: React.FC = () => {
                     {cleanEmoji(row.rebate_desc)}
                   </span>
                   <Tag color={row.rebate_type === 'percent' ? 'purple' : 'blue'} size="small" shape="square">
-                    {row.rebate_type === 'percent' ? '比例返现' : '实付满返'}
+                    {row.rebate_type === 'percent' ? '比例返' : '实付满返'}
                   </Tag>
                 </div>
               ) : null}
@@ -2648,7 +2751,7 @@ export const StoreSniping: React.FC = () => {
     {
       title: '操作',
       dataIndex: 'actions',
-      width: 110,
+      width: 180,
       fixed: 'right',
       render: (_: any, row?: StoreAppointment) => {
         if (!row) return null;
@@ -2675,15 +2778,27 @@ export const StoreSniping: React.FC = () => {
           );
         }
         return (
-          <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
-            <Button theme="borderless" type="tertiary" size="small">
-              删除
-            </Button>
-          </Popconfirm>
+          <div className="flex items-center gap-1 flex-wrap">
+            {row.task_type === 'name_monitor' && (
+              <Button
+                theme="light"
+                type="primary"
+                size="small"
+                onClick={() => handleEditMonitor(row)}
+              >
+                编辑
+              </Button>
+            )}
+            <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
+              <Button theme="borderless" type="tertiary" size="small">
+                删除
+              </Button>
+            </Popconfirm>
+          </div>
         );
       },
     },
-  ], [handleStopAppoint, handleCancelAppoint, storeIconMap, calcAdvanceTime]);
+  ], [handleStopAppoint, handleCancelAppoint, handleEditMonitor, storeIconMap, calcAdvanceTime]);
 
 
 
@@ -2963,12 +3078,12 @@ export const StoreSniping: React.FC = () => {
             >
               <TabPane tab={`附近店铺 (${regularStores.length})`} itemKey="stores" />
               {sortBy !== 'distance' && (
-                <TabPane tab={`大牌券专享 (${brandCouponStores.length})`} itemKey="brand_coupon" />
+                <TabPane tab={`大牌专享 (${brandCouponStores.length})`} itemKey="brand_coupon" />
               )}
               <TabPane
                 tab={
                   <div className="flex items-center gap-1.5">
-                    <span>美团同店双返利</span>
+                    <span>同店双返</span>
                     {dualScanDone && (
                       <Tag color="amber" size="small" shape="circle">{dualStores.length}</Tag>
                     )}
@@ -2976,7 +3091,7 @@ export const StoreSniping: React.FC = () => {
                 }
                 itemKey="dual_rebate"
               />
-              <TabPane tab={`预约与监听 (${appointments.length})`} itemKey="appointments" />
+              <TabPane tab={`预约监听 (${appointments.length})`} itemKey="appointments" />
             </Tabs>
 
             {/* 店铺主 Tab / 大牌券 Tab 搜索框与店名抢单监听按钮 */}
@@ -3127,7 +3242,21 @@ export const StoreSniping: React.FC = () => {
                   >
                     <Radio value="all">全部</Radio>
                     <Radio value="no_review">无需评价</Radio>
-                    <Radio value="good_review">需要图文好评</Radio>
+                    <Radio value="good_review">图文反馈</Radio>
+                  </RadioGroup>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <Text type="secondary" className="text-sm font-medium">活动要求:</Text>
+                  <RadioGroup
+                    type="button"
+                    buttonSize="middle"
+                    value={activityRequirementFilter}
+                    onChange={(e) => setActivityRequirementFilter(e.target.value)}
+                  >
+                    <Radio value="all">全部</Radio>
+                    <Radio value="specified_dish">指定餐品</Radio>
+                    <Radio value="repurchase">复购专享</Radio>
                   </RadioGroup>
                 </div>
 
@@ -3196,7 +3325,7 @@ export const StoreSniping: React.FC = () => {
                 dataSource={regularStores}
                 loading={loading}
                 pagination={false}
-                scroll={{ y: tabScrollHeights.stores || 480, x: '100%' }}
+                scroll={{ y: tabScrollHeights.stores || 480, x: 1300 }}
                 empty={
                   loading ? (
                     <div className="py-24" />
@@ -3298,7 +3427,7 @@ export const StoreSniping: React.FC = () => {
             </div>
           )}
 
-          {/* 大牌券专享分栏（周边门店通用专享） */}
+          {/* 大牌专享分栏（周边门店通用专享） */}
           {visitedTabs.has('brand_coupon') && (
             <div
               ref={brandContainerRef}
@@ -3317,7 +3446,7 @@ export const StoreSniping: React.FC = () => {
                 dataSource={brandCouponStores}
                 loading={loading}
                 pagination={false}
-                scroll={{ y: tabScrollHeights.brand_coupon || 480, x: '100%' }}
+                scroll={{ y: tabScrollHeights.brand_coupon || 480, x: 1300 }}
                 empty={
                   loading ? (
                     <div className="py-24" />
@@ -3340,7 +3469,7 @@ export const StoreSniping: React.FC = () => {
             </div>
           )}
 
-          {/* 美团同店双返利分栏（采用 Semi Design 标准企业级表格，严格约束内部滚动，彻底杜绝外层页面滚动条） */}
+          {/* 同店双返分栏（采用 Semi Design 标准企业级表格，严格约束内部滚动，彻底杜绝外层页面滚动条） */}
           {visitedTabs.has('dual_rebate') && (
             <div
               ref={dualContainerRef}
@@ -3465,7 +3594,7 @@ export const StoreSniping: React.FC = () => {
                     dataSource={displayedDualStores}
                     loading={dualScanLoading}
                     pagination={false}
-                    scroll={{ y: tabScrollHeights.dual_rebate || 440, x: '100%' }}
+                    scroll={{ y: tabScrollHeights.dual_rebate || 440, x: 1100 }}
                     empty={
                       dualScanLoading ? (
                         <div className="py-24" />
@@ -3492,7 +3621,7 @@ export const StoreSniping: React.FC = () => {
                           <div className="py-16 text-center text-semi-color-text-3">
                             <div>
                               {(dualSearchKeyword || '').trim()
-                                ? `未发现包含「${dualSearchKeyword}」的美团同店双返利店铺`
+                                ? `未发现包含「${dualSearchKeyword}」的同店双返店铺`
                                 : `在检索的 ${dualTotalStores} 家美团商户中未发现同时开放双返利规则的店铺`}
                             </div>
                             <div className="text-xs mt-2">您可以尝试清除搜索词或切换商圈定位后再次扫描</div>
@@ -3506,7 +3635,7 @@ export const StoreSniping: React.FC = () => {
                     <div className="store-table-footer flex-shrink-0 mt-auto border-t border-semi-color-border bg-semi-color-fill-0 py-2.5 px-4 flex items-center justify-between">
                       <div className="text-xs text-semi-color-text-3 flex items-center gap-2">
                         <Tag color="grey" size="small">已到底部</Tag>
-                        <span>已呈现全部 {displayedDualStores.length} 家美团同店双返利商户</span>
+                        <span>已呈现全部 {displayedDualStores.length} 家同店双返商户</span>
                       </div>
                     </div>
                   )}
@@ -3567,7 +3696,7 @@ export const StoreSniping: React.FC = () => {
                   pageSize: 10,
                   showTotal: true,
                 }}
-                scroll={{ y: tabScrollHeights.appointments || 480, x: '100%' }}
+                scroll={{ y: tabScrollHeights.appointments || 480, x: 1000 }}
                 empty={
                   appointmentsLoading ? (
                     <div className="py-24" />
@@ -3583,7 +3712,7 @@ export const StoreSniping: React.FC = () => {
 
 
 
-      {/* 预约与监听配置弹窗 */}
+      {/* 预约监听配置弹窗 */}
       <Modal
         title={appointModalMode === 'countdown' ? '预约抢单配置' : '名额监听配置'}
         visible={appointModalVisible}
@@ -3658,7 +3787,7 @@ export const StoreSniping: React.FC = () => {
               value: (
                 <Space spacing="tight">
                   <Tag color={selectedPromo?.rebate_type === 'percent' ? 'purple' : 'blue'} size="small" shape="square">
-                    {selectedPromo?.rebate_type === 'percent' ? '比例返现' : '实付满返'}
+                    {selectedPromo?.rebate_type === 'percent' ? '比例返' : '实付满返'}
                   </Tag>
                   <Text type="danger" strong>
                     {selectedPromo?.rebate_desc || `满${selectedPromo?.order_money}返${selectedPromo?.rebate_price}元`}
@@ -3773,7 +3902,7 @@ export const StoreSniping: React.FC = () => {
                     <Col xs={24} sm={12}>
                       <Form.Select
                         field="redpack_mode"
-                        label="红包使用策略"
+                        label="红包策略"
                         initValue={0}
                         helpText="若指定红包在端外已用将平滑自愈替换"
                         style={{ width: '100%' }}
@@ -3810,7 +3939,7 @@ export const StoreSniping: React.FC = () => {
                   <Col xs={24}>
                     <Form.Select
                       field="redpack_mode"
-                      label="红包使用策略"
+                      label="红包策略"
                       initValue={0}
                       helpText="捡漏抢单时使用的红包策略"
                       style={{ width: '100%' }}
@@ -4108,9 +4237,13 @@ export const StoreSniping: React.FC = () => {
 
       {/* 店名抢单监听配置弹窗 */}
       <Modal
-        title="店名抢单监听配置"
+        title={editingMonitorId ? '编辑抢单监听' : '抢单监听'}
         visible={nameMonitorVisible}
-        onCancel={() => setNameMonitorVisible(false)}
+        onCancel={() => {
+          setNameMonitorVisible(false);
+          setEditingMonitorId(null);
+          setNameMonitorInitialValues(null);
+        }}
         width={640}
         style={{ maxWidth: '94vw' }}
         centered
@@ -4126,7 +4259,11 @@ export const StoreSniping: React.FC = () => {
               size="default"
               theme="light"
               type="tertiary"
-              onClick={() => setNameMonitorVisible(false)}
+              onClick={() => {
+                setNameMonitorVisible(false);
+                setEditingMonitorId(null);
+                setNameMonitorInitialValues(null);
+              }}
             >
               取消
             </Button>
@@ -4138,15 +4275,17 @@ export const StoreSniping: React.FC = () => {
               onClick={() => nameMonitorFormApiRef.current?.submitForm()}
               className="px-5 font-medium"
             >
-              确定
+              {editingMonitorId ? '启动' : '确定'}
             </Button>
           </div>
         }
       >
         <Form
-          key={nameMonitorInitialKeyword}
+          key={`${editingMonitorId || 'new'}-${nameMonitorInitialKeyword}`}
           getFormApi={(api) => { nameMonitorFormApiRef.current = api; }}
           initValues={{
+            listen_mode: 'store',
+            activity_requirement: 'all',
             keyword: nameMonitorInitialKeyword,
             match_mode: 'contains',
             platform: 'all',
@@ -4157,21 +4296,42 @@ export const StoreSniping: React.FC = () => {
             check_interval: 10,
             auto_stop_on_success: true,
             redpack_mode: 0,
+            redpack_id: '',
             use_advance_card: assetStats.advanceCouponCount > 0,
+            ...(nameMonitorInitialValues || {}),
           }}
           onSubmit={handleSubmitNameMonitor}
         >
           {({ values }: { values: any }) => (
             <div className="flex flex-col gap-3.5">
-              {/* 关键词输入 */}
-              <Form.Input
-                field="keyword"
-                label="商户名称 / 关键词"
-                size="large"
-                placeholder="请输入店铺名称，例如：霸王茶姬"
-                rules={[{ required: true, message: '请输入要监听的店铺关键词' }]}
-                showClear
-              />
+              {/* 监听模式 */}
+              <Form.RadioGroup
+                field="listen_mode"
+                label="监听模式"
+                type="button"
+                buttonSize="middle"
+                className="w-full"
+              >
+                <Radio value="store">店名监听</Radio>
+                <Radio value="general">常规监听</Radio>
+              </Form.RadioGroup>
+
+              {/* 关键词输入：常规监听不区分店名，无需填写 */}
+              {values?.listen_mode !== 'general' && (
+                <Form.Input
+                  field="keyword"
+                  label="商户名称 / 关键词"
+                  size="large"
+                  placeholder="请输入店铺名称，例如：霸王茶姬"
+                  showClear
+                />
+              )}
+
+              {values?.listen_mode === 'general' && (
+                <div className="px-3 py-2 rounded-lg bg-semi-color-fill-0 border border-semi-color-border text-xs text-semi-color-text-2">
+                  常规监听将按下方平台、活动方案与返利门槛筛选当前定位附近的所有活动，不限制商户名称。
+                </div>
+              )}
 
               {/* 超前抢单券加速 Card - 与预约抢单配置保持高度统一 */}
               <Card
@@ -4217,75 +4377,156 @@ export const StoreSniping: React.FC = () => {
                 )}
               </Card>
 
-              {/* 平台与匹配模式：2列排布 */}
+              {/* 红包策略：列表中「自动最优红包」标签对应此处配置 */}
+              <Form.Select
+                field="redpack_mode"
+                label="红包策略"
+                helpText="抢单命中时自动使用对应红包，指定红包失效时自动平滑替换为最优红包"
+                style={{ width: '100%' }}
+              >
+                <Select.Option value={0}>自动最优红包</Select.Option>
+                <Select.Option value={1}>指定具体可用红包</Select.Option>
+                <Select.Option value={2}>不使用红包</Select.Option>
+              </Form.Select>
+
+              {values?.redpack_mode === 1 && (
+                <Form.Select
+                  field="redpack_id"
+                  label="选择指定红包"
+                  placeholder="请选择要绑定的红包"
+                  rules={[{ required: true, message: '请选择要使用的红包' }]}
+                  className="w-full"
+                >
+                  {(assetDetail?.redpacks || []).map((rp: any) => {
+                    const rId = String(rp.user_red_pack_id || rp.id || '');
+                    const rName = rp.name || rp.title || '外卖满返红包';
+                    const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
+                    const rReward = `¥${((Number(rawVal) || 0) / 100).toFixed(2)}`;
+                    const thresholdStr = rp.threshold_num ? `满${(rp.threshold_num / 100).toFixed(0)}元可用` : '无门槛';
+                    const rExpire = rp.end_time ? formatTimestamp(rp.end_time) : (rp.expire_time ? formatTimestamp(rp.expire_time) : '');
+                    return (
+                      <Select.Option key={rId} value={rId}>
+                        <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="font-medium text-semi-color-text-0 truncate max-w-[220px]">{cleanEmoji(rName)}</span>
+                            <span className="text-[11px] text-semi-color-text-2 shrink-0">({thresholdStr})</span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="font-bold text-semi-color-danger">{rReward}</span>
+                            {rExpire && <span className="text-semi-color-text-2 text-[11px]">至 {rExpire}</span>}
+                          </div>
+                        </div>
+                      </Select.Option>
+                    );
+                  })}
+                </Form.Select>
+              )}
+
+              {/* 平台与匹配模式：常规监听不显示店名匹配模式 */}
               <Row gutter={[16, 0]}>
-                <Col xs={24} sm={12}>
+                <Col xs={24} sm={values?.listen_mode === 'general' ? 24 : 14}>
                   <Form.RadioGroup
                     field="platform"
-                    label="目标外卖平台"
+                    label="外卖平台"
                     type="button"
-                    buttonSize="middle"
-                    className="w-full"
+                    buttonSize="small"
+                    className="w-full monitor-platform-radio"
                   >
                     <Radio value="all">全部平台</Radio>
                     <Radio value="meituan">美团外卖</Radio>
-                    <Radio value="eleme">饿了么</Radio>
+                    <Radio value="eleme" disabled={values?.rebate_mode_filter === 'percent'}>饿了么</Radio>
+                    <Radio value="jingdong" disabled={values?.rebate_mode_filter === 'percent'}>京东外卖</Radio>
                   </Form.RadioGroup>
                 </Col>
+                {values?.listen_mode !== 'general' && (
+                  <Col xs={24} sm={10}>
+                    <Form.RadioGroup
+                      field="match_mode"
+                      label="店名匹配"
+                      type="button"
+                      buttonSize="small"
+                      className="w-full"
+                    >
+                      <Radio value="contains">包含匹配</Radio>
+                      <Radio value="exact">完全匹配</Radio>
+                    </Form.RadioGroup>
+                  </Col>
+                )}
+              </Row>
+
+              {/* 返利形式与活动要求：2列排布 */}
+              <Row gutter={[16, 0]}>
                 <Col xs={24} sm={12}>
                   <Form.RadioGroup
-                    field="match_mode"
-                    label="店名匹配模式"
+                    field="rebate_mode_filter"
+                    label="返利形式"
                     type="button"
                     buttonSize="middle"
                     className="w-full"
+                    onChange={(value: any) => {
+                      if (String(value) === 'percent') {
+                        nameMonitorFormApiRef.current?.setValue('platform', 'meituan');
+                        nameMonitorFormApiRef.current?.setValue('activity_requirement', 'all');
+                      }
+                    }}
                   >
-                    <Radio value="contains">包含匹配</Radio>
-                    <Radio value="exact">完全匹配</Radio>
+                    <Radio value="all">全部方案</Radio>
+                    <Radio value="fixed">实付满返</Radio>
+                    <Radio value="percent">比例返</Radio>
                   </Form.RadioGroup>
                 </Col>
+                {values?.rebate_mode_filter !== 'percent' && (
+                  <Col xs={24} sm={12}>
+                    <Form.RadioGroup
+                      field="activity_requirement"
+                      label="活动要求"
+                      type="button"
+                      buttonSize="middle"
+                      className="w-full"
+                    >
+                      <Radio value="all">全部</Radio>
+                      <Radio value="specified_dish">指定餐品</Radio>
+                      <Radio value="repurchase">复购专享</Radio>
+                    </Form.RadioGroup>
+                  </Col>
+                )}
               </Row>
 
-              {/* 活动方案偏好 */}
-              <Form.RadioGroup
-                field="rebate_mode_filter"
-                label="活动方案偏好"
-                type="button"
-                buttonSize="middle"
-              >
-                <Radio value="all">全部方案</Radio>
-                <Radio value="fixed">仅实付满返</Radio>
-                <Radio value="percent">仅按比例返</Radio>
-              </Form.RadioGroup>
+              {/* 返利门槛：按活动方案偏好联动展示 */}
+              {(values?.rebate_mode_filter || 'all') !== 'percent' && (
+                <Row gutter={[16, 0]}>
+                  <Col span={24}>
+                    <Form.InputNumber
+                      field="min_rebate_price"
+                      label="最低返利金额门槛"
+                      prefix="¥"
+                      min={0}
+                      step={1}
+                      placeholder="不设门槛"
+                      helpText="实付满返方案返现金额低于此值将忽略"
+                      style={{ width: '100%' }}
+                    />
+                  </Col>
+                </Row>
+              )}
 
-              {/* 返利门槛：2列排布 */}
-              <Row gutter={[16, 0]}>
-                <Col xs={24} sm={12}>
-                  <Form.InputNumber
-                    field="min_rebate_price"
-                    label="最低返利金额门槛"
-                    prefix="¥"
-                    min={0}
-                    step={1}
-                    placeholder="不设门槛"
-                    helpText="实付满返方案返现金额低于此值将忽略"
-                    style={{ width: '100%' }}
-                  />
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Form.InputNumber
-                    field="min_rebate_rate"
-                    label="最低返利比例门槛"
-                    suffix="%"
-                    min={0}
-                    max={100}
-                    step={5}
-                    placeholder="不设门槛"
-                    helpText="按比例返方案返现比低于此值将忽略"
-                    style={{ width: '100%' }}
-                  />
-                </Col>
-              </Row>
+              {(values?.rebate_mode_filter || 'all') !== 'fixed' && (
+                <Row gutter={[16, 0]}>
+                  <Col span={24}>
+                    <Form.InputNumber
+                      field="min_rebate_rate"
+                      label="最低返利比例门槛"
+                      suffix="%"
+                      min={0}
+                      max={100}
+                      step={5}
+                      placeholder="不设门槛"
+                      helpText="按比例返方案返现比低于此值将忽略"
+                      style={{ width: '100%' }}
+                    />
+                  </Col>
+                </Row>
+              )}
 
               {/* 持续时长与轮询频率：2列排布 */}
               <Row gutter={[16, 0]}>
@@ -4301,6 +4542,12 @@ export const StoreSniping: React.FC = () => {
                     <Select.Option value={7200}>2 小时</Select.Option>
                     <Select.Option value={14400}>4 小时</Select.Option>
                     <Select.Option value={0}>今日结束</Select.Option>
+                    {editingMonitorId && nameMonitorInitialValues?.timeout_sec &&
+                      ![1800, 3600, 7200, 14400, 0].includes(Number(nameMonitorInitialValues.timeout_sec)) && (
+                        <Select.Option value={Number(nameMonitorInitialValues.timeout_sec)}>
+                          保持原截止时间 {nameMonitorInitialValues.until_time || ''}
+                        </Select.Option>
+                      )}
                   </Form.Select>
                 </Col>
                 <Col xs={24} sm={12}>

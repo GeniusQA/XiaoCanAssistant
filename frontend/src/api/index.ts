@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { Toast } from '@douyinfe/semi-ui';
-import type { Account, AccountDetailData, UserCardItem, TaskItem, FlashSaleShelfResponse, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, DelayCardInfo, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse, MeituanPromotionItem } from '../types';
+import type { Account, AccountDetailData, UserCardItem, TaskItem, FlashSaleShelfResponse, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, DelayCardInfo, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, DevicePairStartResult, DevicePairStatusResult, PairedDevice, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse, MeituanPromotionItem } from '../types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -131,7 +131,7 @@ export const api = {
   getMeituanPromotions: () => client.get<{ ok: boolean; promotions: MeituanPromotionItem[] }>('/meituan/promotions').then(r => r.data),
 
   // 店铺与附近霸王餐 (支持经纬度、平台、搜索过滤、触底流式分页)
-  getStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; rebate_type?: string; sort_by?: string; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) =>
+  getStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; activity_requirement?: string; rebate_type?: string; sort_by?: string; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) =>
     client.get<{ ok: boolean; stores: StoreItem[]; total: number; raw_total?: number; source?: string; has_more?: boolean; next_offset?: number; page_pv_id?: string; keyword?: string; location_required?: boolean; code?: string; message?: string; error?: string }>('/store/list', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, signal }).then(r => r.data),
   scanDualRebateStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; platform?: string; keyword?: string; max_stores?: number; max_fixed_stores?: number; max_percent_stores?: number; delay_min?: number; delay_max?: number; page_delay?: number }) =>
     client.get<{
@@ -212,6 +212,20 @@ export const api = {
   
   // 用户中心 (免付费状态)
   getMe: () => client.get<{ ok: boolean; user: UserInfo }>('/me').then(r => r.data),
+
+  // 设备协同（局域网短时票据 + 一次性同步）
+  startDevicePair: (localState: Record<string, any>) =>
+    client.post<DevicePairStartResult>('/device/pair/start', { local_state: localState }).then(r => r.data),
+  getDevicePairStatus: (ticket: string) =>
+    client.get<DevicePairStatusResult>('/device/pair/status', { params: { ticket } }).then(r => r.data),
+  getPairedDevices: () =>
+    client.get<{ ok: boolean; devices: PairedDevice[] }>('/device/list').then(r => r.data),
+  checkDeviceSession: (deviceToken: string) =>
+    client.post<{ ok: boolean; status: string; message?: string }>('/device/session/check', { device_token: deviceToken }).then(r => r.data),
+  revokePairedDevice: (deviceId: string) =>
+    client.post<{ ok: boolean; message: string }>('/device/revoke', { device_id: deviceId }).then(r => r.data),
+  deletePairedDevice: (deviceId: string) =>
+    client.post<{ ok: boolean; message: string }>('/device/delete', { device_id: deviceId }).then(r => r.data),
 
   // 系统配置与通知管理
   getSettings: () => client.get<SystemSettings>('/settings').then(r => r.data),

@@ -50,6 +50,7 @@ import {
   IconFile,
   IconInfoCircle,
   IconChevronRight,
+  IconChevronLeft,
   IconSmartphoneStroked,
   IconCode,
   IconEyeOpened,
@@ -71,6 +72,7 @@ import { useAppStore, hasValidAccountLocation } from '../store/useAppStore';
 import { api } from '../api';
 import { getNtpNowMs } from '../utils/ntpTime';
 import { useOnActivated } from '../utils/useOnActivated';
+import { DeviceSyncPanel } from '../components/DeviceSyncPanel';
 import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode, ClawBotStatus } from '../types';
 
 const { Title, Text, Paragraph } = Typography;
@@ -987,7 +989,7 @@ export const Accounts: React.FC = () => {
 
   return (
     <div className="w-full">
-      <div className="flex justify-between items-center mb-4">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
         <div>
           <Title heading={3}>账号管理</Title>
           <Text type="secondary">多平台安全托管中心 · 电脑微信直连 · 美团官方扫码 · 自动领券打卡</Text>
@@ -1877,6 +1879,19 @@ export const Accounts: React.FC = () => {
               </div>
             </div>
           </TabPane>
+
+          {/* TAB 4: 设备协同 */}
+          <TabPane
+            tab={
+              <span className="flex items-center gap-1.5">
+                <IconQrCode />
+                <span>设备协同</span>
+              </span>
+            }
+            itemKey="device"
+          >
+            <DeviceSyncPanel />
+          </TabPane>
         </Tabs>
       </Modal>
 
@@ -1884,8 +1899,20 @@ export const Accounts: React.FC = () => {
       <SideSheet
         title={
           <div className="flex items-center justify-between w-full pr-8">
-            <div className="flex items-center gap-2">
-              <span>账号详情与资产中心</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <Button
+                className="account-detail-back"
+                theme="borderless"
+                type="tertiary"
+                size="small"
+                icon={<IconChevronLeft />}
+                aria-label="返回账号列表"
+                onClick={() => {
+                  setDetailVisible(false);
+                  detailAccountRef.current = null;
+                }}
+              />
+              <span className="truncate">账号详情与资产中心</span>
               {detailAccount && (
                 <Tag color="blue" size="small" type="light">
                   {detailAccount.nickname}
@@ -1930,6 +1957,7 @@ export const Accounts: React.FC = () => {
           detailAccountRef.current = null;
         }}
         width={620}
+        className="account-detail-sidesheet"
       >
         {detailAccount && (
           <div className="space-y-4 py-1">

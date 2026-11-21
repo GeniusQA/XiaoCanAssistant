@@ -193,6 +193,38 @@ def init_db():
     )
     """)
 
+    # 5.5 设备协同：临时配对票据与已授权设备凭证
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS device_pair_tickets (
+        ticket TEXT PRIMARY KEY,
+        status TEXT DEFAULT 'pending',
+        created_at REAL,
+        expires_at REAL,
+        consumed_at REAL,
+        device_id TEXT,
+        device_name TEXT,
+        client_ip TEXT,
+        user_agent TEXT,
+        snapshot TEXT DEFAULT ''
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS paired_devices (
+        id TEXT PRIMARY KEY,
+        name TEXT DEFAULT '',
+        token_hash TEXT,
+        device_id TEXT,
+        created_at REAL,
+        last_seen_at REAL,
+        revoked_at REAL,
+        client_ip TEXT,
+        user_agent TEXT
+    )
+    """)
+    pair_cols = {row[1] for row in c.execute("PRAGMA table_info(device_pair_tickets)")}
+    if "snapshot" not in pair_cols:
+        c.execute("ALTER TABLE device_pair_tickets ADD COLUMN snapshot TEXT DEFAULT ''")
+
     # 6. 霸王餐订单表
     c.execute("""
     CREATE TABLE IF NOT EXISTS orders (
@@ -321,6 +353,10 @@ def init_db():
         c.execute("ALTER TABLE store_appointments ADD COLUMN keyword TEXT DEFAULT ''")
     if "match_mode" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN match_mode TEXT DEFAULT 'contains'")
+    if "listen_mode" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN listen_mode TEXT DEFAULT 'store'")
+    if "activity_requirement" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN activity_requirement TEXT DEFAULT 'all'")
     if "min_rebate_price" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN min_rebate_price REAL DEFAULT 0")
     if "min_rebate_rate" not in apt_cols:
@@ -1136,9 +1172,9 @@ def add_appointment(data: Dict[str, Any]) -> int:
             task_type, start_time, until_time, notified_31m, notified_1m,
             check_interval, platform, order_money, rebate_price, rebate_desc, rebate_type, log_id,
             use_advance_card, redpack_id, redpack_name,
-            keyword, match_mode, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
+            keyword, match_mode, listen_mode, activity_requirement, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["account_key"],
             str(data.get("store_id", "")),
@@ -1168,6 +1204,8 @@ def add_appointment(data: Dict[str, Any]) -> int:
             str(data.get("redpack_name") or ""),
             str(data.get("keyword") or ""),
             str(data.get("match_mode") or "contains"),
+            str(data.get("listen_mode") or "store"),
+            str(data.get("activity_requirement") or "all"),
             float(data.get("min_rebate_price") or 0.0),
             float(data.get("min_rebate_rate") or 0.0),
             str(data.get("rebate_mode_filter") or "all"),
@@ -1209,6 +1247,98 @@ def set_setting(key: str, value: Any):
         INSERT INTO settings (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (key, json.dumps(value)))
+        conn.commit()
+
+
+# ---------------- 设备协同接口 ---------------- #
+
+def create_pair_ticket(ticket: str, ttl_seconds: int = 300, snapshot: Optional[Dict[str, Any]] = None) -> None:
+    now = time.time()
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO device_pair_tickets (ticket, status, created_at, expires_at, snapshot)
+        VALUES (?, 'pending', ?, ?, ?)
+        """, (ticket, now, now + ttl_seconds, json.dumps(snapshot or {}, ensure_ascii=False)))
+        conn.commit()
+
+
+def get_pair_ticket(ticket: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM device_pair_tickets WHERE ticket = ?", (ticket,)).fetchone()
+        return dict(row) if row else None
+
+
+def claim_pair_ticket(ticket: str, device_id: str, device_name: str, client_ip: str = "", user_agent: str = "") -> bool:
+    """原子认领票据：仅 pending 且未过期可认领，防止同一票据被重复消费。"""
+    with get_conn() as conn:
+        cur = conn.execute("""
+        UPDATE device_pair_tickets
+        SET status = 'claimed', consumed_at = ?, device_id = ?, device_name = ?, client_ip = ?, user_agent = ?
+        WHERE ticket = ? AND status = 'pending' AND expires_at > ?
+        """, (time.time(), device_id, device_name, client_ip, user_agent, ticket, time.time()))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def mark_pair_ticket_used(ticket: str) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE device_pair_tickets SET status = 'used' WHERE ticket = ?", (ticket,))
+        conn.commit()
+
+
+def save_paired_device(device_id: str, name: str, token_hash: str, client_ip: str = "", user_agent: str = "") -> None:
+    now = time.time()
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO paired_devices (id, name, token_hash, device_id, created_at, last_seen_at, revoked_at, client_ip, user_agent)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            token_hash = excluded.token_hash,
+            device_id = excluded.device_id,
+            last_seen_at = excluded.last_seen_at,
+            revoked_at = 0,
+            client_ip = excluded.client_ip,
+            user_agent = excluded.user_agent
+        """, (device_id, name, token_hash, device_id, now, now, client_ip, user_agent))
+        conn.commit()
+
+
+def list_paired_devices() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM paired_devices ORDER BY created_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_paired_device_by_token_hash(token_hash: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM paired_devices WHERE token_hash = ?", (token_hash,)).fetchone()
+        return dict(row) if row else None
+
+
+def touch_paired_device(device_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE paired_devices SET last_seen_at = ? WHERE id = ?", (time.time(), device_id))
+        conn.commit()
+
+
+def revoke_paired_device(device_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE paired_devices SET revoked_at = ? WHERE id = ? AND revoked_at = 0", (time.time(), device_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_paired_device(device_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM paired_devices WHERE id = ?", (device_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_expired_pair_tickets() -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM device_pair_tickets WHERE expires_at < ?", (time.time() - 86400,))
         conn.commit()
 
 

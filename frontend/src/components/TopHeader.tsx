@@ -140,8 +140,8 @@ export const TopHeader: React.FC = () => {
 
   return (
     <Header className="h-[60px] px-6 border-b border-semi-color-border bg-semi-color-bg-0/90 semi-glass-header flex items-center justify-between sticky top-0 z-20 transition-colors duration-200">
-      {/* 左侧：收起/展开侧边栏 */}
-      <div className="flex items-center">
+      {/* 左侧：桌面端收起/展开侧边栏（手机端隐藏，由独立抽屉按钮替代） */}
+      <div className="flex items-center desktop-sider-toggle">
         <Tooltip content={isSidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} position="bottom">
           <Button
             theme="borderless"
@@ -212,6 +212,7 @@ export const TopHeader: React.FC = () => {
           </div>
         </Tooltip>
 
+        <div className="header-user-actions">
         <Divider layout="vertical" margin="2px" />
 
         {/* 3. 主题模式切换 */}
@@ -229,9 +230,9 @@ export const TopHeader: React.FC = () => {
         {/* 4. 最右侧账号头像区域：只显示头像，鼠标移入出现切换账号与退出账号 */}
         <Dropdown
           position="bottomRight"
-          trigger="hover"
+          trigger="click"
           render={
-            <Dropdown.Menu style={{ width: 270, padding: 0, overflow: 'hidden' }}>
+            <Dropdown.Menu style={{ width: 270, maxWidth: 'calc(100vw - 24px)', padding: 0, overflow: 'hidden' }}>
               {/* 顶部当前账号卡片：贴合顶边无白边 */}
               <div className="px-3.5 py-3 border-b border-semi-color-border bg-semi-color-fill-0">
                 <div className="flex items-center gap-2.5">
@@ -358,6 +359,7 @@ export const TopHeader: React.FC = () => {
             </Avatar>
           </div>
         </Dropdown>
+        </div>
       </Space>
 
       {/* 全局账号位置绑定弹窗 */}

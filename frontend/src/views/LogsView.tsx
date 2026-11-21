@@ -59,8 +59,8 @@ const TASK_LABELS: Record<string, string> = {
   free_order: '订单全额免单券',
   expire_remind: '凭据/JWT到期预警',
   coupon_remind: '卡券/红包到期提醒',
-  dual_rebate_scan: '美团同店双返利扫描',
-  dual_rebate_monitor: '美团同店双返利监控',
+  dual_rebate_scan: '同店双返扫描',
+  dual_rebate_monitor: '同店双返监控',
   meituan_coupon: '美团官方领券打卡',
   meituan_auth: '美团官方扫码授权',
   // 核心业务与资产操作
@@ -686,7 +686,7 @@ export const LogsView: React.FC = () => {
                 setPageSize(changeInfo.pagination.pageSize);
               }
             }}
-            scroll={{ y: tableScrollY, x: 1060 }}
+            scroll={{ y: tableScrollY, x: 1200 }}
             size="middle"
             empty={
               loading ? (
