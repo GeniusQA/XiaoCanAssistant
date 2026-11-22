@@ -9,7 +9,7 @@ import json
 import os
 import time
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from ..core import time_service
 
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
@@ -135,6 +135,8 @@ def init_db():
         c.execute("ALTER TABLE accounts ADD COLUMN location_remark TEXT DEFAULT ''")
     if "last_official_sync" not in acc_cols:
         c.execute("ALTER TABLE accounts ADD COLUMN last_official_sync REAL DEFAULT 0")
+    if "nick_name" not in acc_cols:
+        c.execute("ALTER TABLE accounts ADD COLUMN nick_name TEXT DEFAULT ''")
 
     # 2. 自动化任务开关与调度表
     c.execute("""
@@ -184,6 +186,81 @@ def init_db():
     job_cols = {row[1] for row in c.execute("PRAGMA table_info(job_logs)")}
     if "result" not in job_cols:
         c.execute("ALTER TABLE job_logs ADD COLUMN result TEXT DEFAULT ''")
+    if "account_name" not in job_cols:
+        c.execute("ALTER TABLE job_logs ADD COLUMN account_name TEXT DEFAULT ''")
+    if "account_type" not in job_cols:
+        c.execute("ALTER TABLE job_logs ADD COLUMN account_type TEXT DEFAULT ''")
+
+    # 历史日志账号快照回填：不依赖 output 文本猜测，只按真实账号表映射。
+    try:
+        c.execute("""
+            UPDATE job_logs
+            SET account_type = CASE WHEN TRIM(COALESCE(account_key, '')) = '' THEN 'system' ELSE 'user' END,
+                account_name = CASE WHEN TRIM(COALESCE(account_key, '')) = '' THEN '系统任务' ELSE '历史任务' END
+            WHERE COALESCE(account_name, '') = ''
+        """)
+        for log_row in c.execute(
+            "SELECT DISTINCT account_key FROM job_logs WHERE account_type = 'user' AND account_key != ''"
+        ).fetchall():
+            key = str(log_row[0] or "")
+            account_row = c.execute("SELECT nickname FROM accounts WHERE key = ? LIMIT 1", (key,)).fetchone()
+            if not account_row:
+                continue
+            nickname = str(account_row[0] or "").strip()
+            lowered = nickname.lower()
+            if not nickname or lowered in {"system", "all", "unknown", "默认账号", "系统", "系统任务"} or any(
+                token in lowered for token in ("验证码", "waf", "stgw", "风控", "拦截")
+            ):
+                suffix = key.split("_")[-1] if "_" in key else key
+                nickname = f"账号 {suffix[:8]}"
+            c.execute(
+                "UPDATE job_logs SET account_name = ? WHERE account_type = 'user' AND account_key = ? AND COALESCE(account_name, '') = '历史任务'",
+                (nickname, key),
+            )
+    except Exception:
+        pass
+
+    # 官方 GetClientUserInfo 的 nickname 可能为空字符串/不换行空格，真实展示名在 real_name。
+    try:
+        for account_row in c.execute("SELECT key, nickname, real_name FROM accounts").fetchall():
+            key = str(account_row[0] or "")
+            nickname = str(account_row[1] or "")
+            real_name = str(account_row[2] or "").strip()
+            if not nickname.strip() and real_name:
+                c.execute("UPDATE accounts SET nickname = ? WHERE key = ?", (real_name, key))
+    except Exception:
+        pass
+
+    # 登录/抓包可能把验证码文案写入昵称，启动时统一纠正，避免污染所有任务展示。
+    try:
+        for account_row in c.execute("SELECT key, nickname FROM accounts").fetchall():
+            key = str(account_row[0] or "")
+            nickname = str(account_row[1] or "").strip()
+            lowered = nickname.lower()
+            account_real_name = str(account_row["real_name"] if "real_name" in account_row.keys() else "").strip()
+            if not nickname or lowered in {"system", "all", "unknown", "默认账号", "系统", "系统任务"} or any(
+                token in lowered for token in ("验证码", "waf", "stgw", "风控", "拦截")
+            ):
+                suffix = key.split("_")[-1] if "_" in key else key
+                replacement = account_real_name or f"账号 {suffix[:8]}"
+                c.execute("UPDATE accounts SET nickname = ? WHERE key = ?", (replacement, key))
+    except Exception:
+        pass
+
+    # 历史修复：抢单成功后，删除/停止监听动作曾把日志状态错误降级为 error。
+    try:
+        c.execute("""
+            UPDATE job_logs
+            SET status = 'success'
+            WHERE status IN ('error', 'failed', 'aborted')
+              AND (
+                result LIKE '抢单成功%'
+                OR output LIKE '%任务已达成并自动停止%'
+                OR output LIKE '%抢单成功锁定%'
+              )
+        """)
+    except Exception:
+        pass
 
     # 5. 系统与通知配置表
     c.execute("""
@@ -296,6 +373,33 @@ def init_db():
         c.execute("ALTER TABLE orders ADD COLUMN delay_count INTEGER DEFAULT 0")
     if "delay_card_used_count" not in cols:
         c.execute("ALTER TABLE orders ADD COLUMN delay_card_used_count INTEGER DEFAULT 0")
+    if "vip_extra_silk" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN vip_extra_silk INTEGER DEFAULT 0")
+    if "vip_extra_silk_radio" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN vip_extra_silk_radio REAL DEFAULT 0")
+    if "official_reduce" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN official_reduce TEXT DEFAULT ''")
+    if "official_order_desc" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN official_order_desc TEXT DEFAULT ''")
+    if "coupon_bonus" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN coupon_bonus REAL DEFAULT 0")
+    if "total_rebate" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN total_rebate REAL DEFAULT 0")
+    if "vip_extra_reward" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN vip_extra_reward REAL DEFAULT 0")
+    if "receipt_uploaded_at" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN receipt_uploaded_at TEXT DEFAULT ''")
+    if "expected_rebate" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN expected_rebate REAL DEFAULT 0")
+    if "actual_paid_amount" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN actual_paid_amount REAL DEFAULT 0")
+    if "threshold_shortfall" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN threshold_shortfall REAL DEFAULT 0")
+    apt_cols = [r[1] for r in c.execute("PRAGMA table_info(store_appointments)").fetchall()]
+    if "auto_use_best_vip_card" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN auto_use_best_vip_card INTEGER DEFAULT 1")
+    if "min_rebate_gap" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN min_rebate_gap REAL DEFAULT 0")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -694,10 +798,22 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         key = f"acc_{uuid.uuid4().hex[:8]}"
 
-    # 昵称保护：如果新昵称为默认占位符而已有真实昵称，优先保留已有昵称
-    nickname = data.get("nickname") or (existing.get("nickname") if existing else "小蚕用户")
-    if (not nickname or nickname.startswith("小蚕用户") or nickname == "小蚕微信用户") and existing and existing.get("nickname") and not existing["nickname"].startswith("小蚕用户"):
-        nickname = existing["nickname"]
+    # 昵称保护：过滤抓包/WAF 页面误识别文案，避免“腾讯验证码”等污染任务执行账号。
+    def _valid_nickname(value: Any) -> bool:
+        text = str(value or "").strip()
+        lowered = text.lower()
+        return bool(text) and lowered not in INVALID_ACCOUNT_NICKNAMES and not any(
+            token in lowered for token in ("验证码", "waf", "stgw", "风控", "拦截")
+        )
+
+    candidate_nickname = data.get("nickname")
+    existing_nickname = existing.get("nickname") if existing else ""
+    nickname = candidate_nickname if _valid_nickname(candidate_nickname) else ""
+    if not nickname and _valid_nickname(existing_nickname):
+        nickname = existing_nickname
+    if not nickname:
+        suffix = user_id or silk_id or key.split("_")[-1]
+        nickname = f"小蚕用户_{str(suffix)[-4:]}"
 
     # 头像保护
     avatar = data.get("avatar") or (existing.get("avatar") if existing else "")
@@ -709,6 +825,7 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
     vip_expired_at = data.get("vip_expired_at") or (existing.get("vip_expired_at") if existing else 0)
     phone = data.get("phone") or (existing.get("phone") if existing else "")
     real_name = data.get("real_name") or (existing.get("real_name") if existing else "")
+    nick_name = data.get("nick_name") or (existing.get("nick_name") if existing else "")
 
     # 城市与定位保护：禁止任何默认城市/坐标兜底；仅接受完整合法坐标绑定或保留已有合法绑定
     has_existing_loc = bool(existing and has_valid_location(existing))
@@ -761,8 +878,8 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
 
     with get_conn() as conn:
         conn.execute("""
-        INSERT INTO accounts (key, user_id, silk_id, nickname, avatar, token, vip_level, is_plus, phone, real_name, vip_score, vip_expired_at, silk, withdrawing, withdraw_total, completed_number, yb_point, unreceived_points, city_code, city_name, longitude, latitude, address_name, short_name, full_address, location_source, location_source_name, location_remark, last_official_sync, expires_at, client_mode, is_active, created_at, updated_at)
-        VALUES (:key, :user_id, :silk_id, :nickname, :avatar, :token, :vip_level, :is_plus, :phone, :real_name, :vip_score, :vip_expired_at, :silk, :withdrawing, :withdraw_total, :completed_number, :yb_point, :unreceived_points, :city_code, :city_name, :longitude, :latitude, :address_name, :short_name, :full_address, :location_source, :location_source_name, :location_remark, :last_official_sync, :expires_at, :client_mode, :is_active, :created_at, :updated_at)
+        INSERT INTO accounts (key, user_id, silk_id, nickname, avatar, token, vip_level, is_plus, phone, real_name, nick_name, vip_score, vip_expired_at, silk, withdrawing, withdraw_total, completed_number, yb_point, unreceived_points, city_code, city_name, longitude, latitude, address_name, short_name, full_address, location_source, location_source_name, location_remark, last_official_sync, expires_at, client_mode, is_active, created_at, updated_at)
+        VALUES (:key, :user_id, :silk_id, :nickname, :avatar, :token, :vip_level, :is_plus, :phone, :real_name, :nick_name, :vip_score, :vip_expired_at, :silk, :withdrawing, :withdraw_total, :completed_number, :yb_point, :unreceived_points, :city_code, :city_name, :longitude, :latitude, :address_name, :short_name, :full_address, :location_source, :location_source_name, :location_remark, :last_official_sync, :expires_at, :client_mode, :is_active, :created_at, :updated_at)
         ON CONFLICT(key) DO UPDATE SET
             user_id=excluded.user_id,
             silk_id=CASE WHEN excluded.silk_id != '' THEN excluded.silk_id ELSE accounts.silk_id END,
@@ -773,6 +890,7 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
             is_plus=excluded.is_plus,
             phone=excluded.phone,
             real_name=excluded.real_name,
+            nick_name=excluded.nick_name,
             vip_score=excluded.vip_score,
             vip_expired_at=excluded.vip_expired_at,
             silk=excluded.silk,
@@ -807,6 +925,7 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
             "is_plus": is_plus,
             "phone": phone,
             "real_name": real_name,
+            "nick_name": nick_name,
             "vip_score": vip_score,
             "vip_expired_at": vip_expired_at,
             "silk": silk,
@@ -989,44 +1108,136 @@ def save_task_config(account_key: str, task_id: str, enabled: bool, cron_time: O
 
 
 def summarize_job_result(output: str, status: str = "") -> str:
-    """从执行步骤输出中抽取官方接口返回的具体报错/结论，作为「执行结果」字段。
+    """从执行步骤输出中抽取真实执行结果，作为「执行结果」字段。
 
-    任务常在分支内捕获官方报错（如 HTTP 403 / WAF 拦截）后继续跑完，最终状态仍为成功，
-    因此必须扫描完整 output，而不是只看 status。
+    优先级：官方/执行异常 > 业务跳过或条件不满足 > 具体成功事件 > 通用完成文案。
+    这样即使任务整体状态为成功，也能在列表中直接看到“余额不足/资格拦截/名额售罄”等真实原因，
+    不会被最后一行「处理完毕」覆盖。
     """
     lines = [ln.strip() for ln in (output or "").split("\n") if ln.strip()]
     if not lines:
         return "无执行输出"
+
+    def clean(line: str) -> str:
+        return line.split("] ", 1)[-1] if line.startswith("[") else line
+
+    normalized_status = str(status or "").strip().lower()
     error_keys = (
         "HTTP 403", "HTTP 429", "WAF", "STGW", "STGM", "风控", "拦截",
-        "返回失败", "错误码", "异常:", "接口返回失败", "被拒绝", "冷却",
-        # 不满足条件/资格校验失败类：任务整体仍记为成功，但执行结果必须显示真实原因
+        "返回失败", "错误码", "异常:", "异常 ", "接口返回失败", "被拒绝", "冷却",
         "账户校验", "未达到", "不满足", "无资格", "权限不足", "暂不可用",
-        "条件不足", "未开通", "未绑定", "缺少有效", "失败",
+        "条件不足", "未开通", "未绑定", "缺少有效", "失败", "出错", "中断",
+        "查询失败", "核验失败", "获取失败", "领取失败", "调用失败", "提交失败",
     )
+    # 这些属于“任务正常结束但业务未执行”，状态可保持成功，结果必须明确展示原因。
+    skip_keys = (
+        "跳过提现", "自动跳过", "已安全跳过", "本次跳过", "无需重复",
+        "低于门槛", "超过可用余额", "余额不足", "元宝不足", "已达上限", "达到上限",
+        "未中签", "未命中", "未分配到有效红包", "库存告罄", "已售罄", "名额已发完",
+        "名额已用完", "已领完", "无待收取", "暂无待开启", "暂无生效中的红包雨活动场次",
+        "当前暂无满足条件的剩余名额", "暂无即将", "长期有效", "状态良好",
+        "资格拦截", "等级预警", "暂无资格", "缺少资格", "今日已完成", "今日已签到",
+        "今日已提现", "继续余额核验", "领取上限", "状态码 1014",
+    )
+    generic_keys = ("处理完毕", "执行完成 (无异常)", "开始执行")
+
     for line in reversed(lines):
         if any(k in line for k in error_keys):
-            return line.split("] ", 1)[-1] if line.startswith("[") else line
-    success_keys = ("成功锁定", "抢单成功", "成功入库", "领取成功", "打卡成功", "处理完毕", "执行完成", "成功获取定位")
+            return clean(line)
+
+    if normalized_status not in ("success", ""):
+        for line in reversed(lines):
+            if any(k in line for k in skip_keys) and not any(k in line for k in generic_keys):
+                return clean(line)
+
+    for line in reversed(lines):
+        if any(k in line for k in skip_keys) and not any(k in line for k in generic_keys):
+            return clean(line)
+
+    success_keys = (
+        "成功锁定", "抢单成功", "成功入库", "领取成功", "打卡成功",
+        "成功获取定位", "提现申请已提交", "奖励已入账", "同步成功",
+    )
     for line in reversed(lines):
         if any(k in line for k in success_keys):
-            return line.split("] ", 1)[-1] if line.startswith("[") else line
+            return clean(line)
+
     for line in reversed(lines):
-        if "开始执行" not in line:
-            return line.split("] ", 1)[-1] if line.startswith("[") else line
+        if not any(k in line for k in generic_keys):
+            return clean(line)
+
+    for line in reversed(lines):
+        if "处理完毕" in line or "执行完成" in line:
+            return clean(line)
     return "—"
+
+
+INVALID_ACCOUNT_NICKNAMES = {
+    "system", "all", "unknown", "默认账号", "系统", "系统任务", "全局任务",
+    "腾讯验证码", "验证码", "验证", "waf", "stgw", "风控拦截",
+}
+
+
+def _normalize_log_account(account_key: str) -> Tuple[str, str, str]:
+    """返回日志的稳定账号 key、显示名和类型，避免昵称污染显示。"""
+    key = str(account_key or "").strip()
+    if not key or key in ("system", "all", "__system__", "__global__"):
+        return "", "系统任务", "system"
+
+    row = None
+    with get_conn() as conn:
+        row = conn.execute("SELECT key, nickname FROM accounts WHERE key = ? LIMIT 1", (key,)).fetchone()
+    if not row:
+        return key, "历史任务", "unknown"
+
+    nickname = str(row["nickname"] or "").strip()
+    lowered = nickname.lower()
+    if not nickname or lowered in INVALID_ACCOUNT_NICKNAMES or any(
+        token in lowered for token in ("验证码", "waf", "stgw", "风控", "拦截")
+    ):
+        suffix = key.split("_")[-1] if "_" in key else key
+        nickname = f"账号 {suffix[:8]}"
+    return key, nickname, "user"
 
 
 def add_job_log(job_id: str, account_key: str, task_id: str, status: str, output: str, result: str = "") -> int:
     now = time_service.format_now_dt()
     final_result = result or summarize_job_result(output, status)
+    stable_key, account_name, account_type = _normalize_log_account(account_key)
     with get_conn() as conn:
         cur = conn.execute("""
-        INSERT INTO job_logs (job_id, account_key, task_id, status, output, result, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (job_id, account_key, task_id, status, output, final_result, now))
+        INSERT INTO job_logs (job_id, account_key, task_id, status, output, result, account_name, account_type, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (job_id, stable_key, task_id, status, output, final_result, account_name, account_type, now))
         conn.commit()
         return cur.lastrowid
+
+
+def append_job_log_note(log_id: int, text: str, fallback_status: str = "error") -> bool:
+    """追加日志说明；已成功完成的任务不得被后续删除/停止动作降级。"""
+    if not log_id:
+        return False
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status, result, output FROM job_logs WHERE id = ? LIMIT 1",
+            (log_id,)
+        ).fetchone()
+        if not row:
+            return False
+        prev_status = str(row["status"] or "")
+        new_output = ((row["output"] or "") + "\n" + str(text or "")).strip()
+        if prev_status in ("success", "completed"):
+            conn.execute(
+                "UPDATE job_logs SET output = ?, result = ? WHERE id = ?",
+                (new_output, row["result"] or summarize_job_result(new_output, prev_status), log_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE job_logs SET status = ?, output = ?, result = ? WHERE id = ?",
+                (fallback_status, new_output, summarize_job_result(new_output, fallback_status), log_id)
+            )
+        conn.commit()
+        return True
 
 
 def update_job_log(log_id: int, status: Optional[str] = None, output: Optional[str] = None, result: Optional[str] = None) -> bool:
@@ -1171,10 +1382,10 @@ def add_appointment(data: Dict[str, Any]) -> int:
             early_ms, rebate_card_id, redpack_mode, outcome, created_at,
             task_type, start_time, until_time, notified_31m, notified_1m,
             check_interval, platform, order_money, rebate_price, rebate_desc, rebate_type, log_id,
-            use_advance_card, redpack_id, redpack_name,
+            use_advance_card, redpack_id, redpack_name, auto_use_best_vip_card, min_rebate_gap,
             keyword, match_mode, listen_mode, activity_requirement, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["account_key"],
             str(data.get("store_id", "")),
@@ -1202,6 +1413,8 @@ def add_appointment(data: Dict[str, Any]) -> int:
             int(data.get("use_advance_card") or 0),
             str(data.get("redpack_id") or ""),
             str(data.get("redpack_name") or ""),
+            int(bool(data.get("auto_use_best_vip_card", True))),
+            float(data.get("min_rebate_gap") or 0),
             str(data.get("keyword") or ""),
             str(data.get("match_mode") or "contains"),
             str(data.get("listen_mode") or "store"),
@@ -1471,23 +1684,23 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if promo_id > 0:
             if acc_key:
                 existing = conn.execute(
-                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time FROM orders WHERE promotion_order_id = ? AND account_key = ? ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC LIMIT 1",
+                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time, receipt_uploaded_at FROM orders WHERE promotion_order_id = ? AND account_key = ? ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC LIMIT 1",
                     (promo_id, acc_key)
                 ).fetchone()
             else:
                 existing = conn.execute(
-                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time FROM orders WHERE promotion_order_id = ? ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC LIMIT 1",
+                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time, receipt_uploaded_at FROM orders WHERE promotion_order_id = ? ORDER BY (platform_order_id != '') DESC, (status != 'pending') DESC, id DESC LIMIT 1",
                     (promo_id,)
                 ).fetchone()
         if not existing and sn:
             if acc_key:
                 existing = conn.execute(
-                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time FROM orders WHERE order_sn = ? AND account_key = ? LIMIT 1",
+                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time, receipt_uploaded_at FROM orders WHERE order_sn = ? AND account_key = ? LIMIT 1",
                     (sn, acc_key)
                 ).fetchone()
             else:
                 existing = conn.execute(
-                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time FROM orders WHERE order_sn = ? LIMIT 1",
+                    "SELECT id, order_sn, platform_order_id, status, delay_count, delay_card_used_count, timeout_time, expire_time, receipt_uploaded_at FROM orders WHERE order_sn = ? LIMIT 1",
                     (sn,)
                 ).fetchone()
 
@@ -1502,6 +1715,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             chosen_delay_card_count = max(int(existing.get("delay_card_used_count") or 0), int(data.get("delay_card_used_count") or 0))
             chosen_tt = max(int(existing.get("timeout_time") or 0), int(data.get("timeout_time") or 0))
             chosen_exp = existing.get("expire_time") if (chosen_tt == int(existing.get("timeout_time") or 0) and existing.get("expire_time")) else data.get("expire_time", "")
+            chosen_uploaded_at = str(data.get("receipt_uploaded_at") or "").strip() or str(existing.get("receipt_uploaded_at") or "").strip()
             if not chosen_plat_id and chosen_tt > 0 and chosen_tt < time_service.now_int():
                 new_status = "cancelled"
 
@@ -1522,6 +1736,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 status = :status,
                 condition = :condition,
                 receipt_img = :receipt_img,
+                receipt_uploaded_at = :receipt_uploaded_at,
                 reject_reason = :reject_reason,
                 expire_time = :expire_time,
                 order_time = :order_time,
@@ -1529,6 +1744,16 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 rebate_ratio = :rebate_ratio,
                 delay_count = :delay_count,
                 delay_card_used_count = :delay_card_used_count,
+                vip_extra_silk = :vip_extra_silk,
+                vip_extra_silk_radio = :vip_extra_silk_radio,
+                official_reduce = :official_reduce,
+                official_order_desc = :official_order_desc,
+                coupon_bonus = :coupon_bonus,
+                total_rebate = :total_rebate,
+                vip_extra_reward = :vip_extra_reward,
+                expected_rebate = :expected_rebate,
+                actual_paid_amount = :actual_paid_amount,
+                threshold_shortfall = :threshold_shortfall,
                 updated_at = :updated_at
             WHERE id = :id
             """, {
@@ -1548,6 +1773,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "status": new_status,
                 "condition": data.get("condition", "无需评价"),
                 "receipt_img": data.get("receipt_img", ""),
+                "receipt_uploaded_at": chosen_uploaded_at,
                 "reject_reason": data.get("reject_reason", ""),
                 "expire_time": chosen_exp,
                 "updated_at": now,
@@ -1555,7 +1781,17 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "order_type": int(data.get("order_type") or 0),
                 "rebate_ratio": float(data.get("rebate_ratio") or 0),
                 "delay_count": chosen_delay_count,
-                "delay_card_used_count": chosen_delay_card_count
+                "delay_card_used_count": chosen_delay_card_count,
+                "vip_extra_silk": int(bool(data.get("vip_extra_silk"))),
+                "vip_extra_silk_radio": float(data.get("vip_extra_silk_radio") or 0),
+                "official_reduce": str(data.get("official_reduce") or ""),
+                "official_order_desc": str(data.get("official_order_desc") or ""),
+                "coupon_bonus": float(data.get("coupon_bonus") or 0),
+                "total_rebate": float(data.get("total_rebate") or 0),
+                "vip_extra_reward": float(data.get("vip_extra_reward") or 0),
+                "expected_rebate": float(data.get("expected_rebate") or 0),
+                "actual_paid_amount": float(data.get("actual_paid_amount") or 0),
+                "threshold_shortfall": float(data.get("threshold_shortfall") or 0)
             })
             if promo_id > 0:
                 conn.execute(
@@ -1566,8 +1802,8 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return get_order_by_id(target_id)
 
         cursor = conn.execute("""
-        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, reject_reason, expire_time, created_at, updated_at, order_time, order_type, rebate_ratio, delay_count, delay_card_used_count)
-        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :order_type, :rebate_ratio, :delay_count, :delay_card_used_count)
+        INSERT INTO orders (account_key, order_sn, promotion_order_id, platform_order_id, store_id, store_name, store_icon, platform, order_money, rebate_money, original_user_rebate, redpack_reward_num, timeout_time, status, condition, receipt_img, receipt_uploaded_at, reject_reason, expire_time, created_at, updated_at, order_time, order_type, rebate_ratio, delay_count, delay_card_used_count, vip_extra_silk, vip_extra_silk_radio, official_reduce, official_order_desc, coupon_bonus, total_rebate, vip_extra_reward, expected_rebate, actual_paid_amount, threshold_shortfall)
+        VALUES (:account_key, :order_sn, :promotion_order_id, :platform_order_id, :store_id, :store_name, :store_icon, :platform, :order_money, :rebate_money, :original_user_rebate, :redpack_reward_num, :timeout_time, :status, :condition, :receipt_img, :receipt_uploaded_at, :reject_reason, :expire_time, :created_at, :updated_at, :order_time, :order_type, :rebate_ratio, :delay_count, :delay_card_used_count, :vip_extra_silk, :vip_extra_silk_radio, :official_reduce, :official_order_desc, :coupon_bonus, :total_rebate, :vip_extra_reward, :expected_rebate, :actual_paid_amount, :threshold_shortfall)
         ON CONFLICT(order_sn) DO UPDATE SET
             promotion_order_id = excluded.promotion_order_id,
             platform_order_id = excluded.platform_order_id,
@@ -1580,6 +1816,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             redpack_reward_num = excluded.redpack_reward_num,
             timeout_time = excluded.timeout_time,
             receipt_img = excluded.receipt_img,
+            receipt_uploaded_at = CASE WHEN excluded.receipt_uploaded_at != '' THEN excluded.receipt_uploaded_at ELSE orders.receipt_uploaded_at END,
             reject_reason = excluded.reject_reason,
             order_time = excluded.order_time,
             expire_time = excluded.expire_time,
@@ -1587,6 +1824,16 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             order_type = excluded.order_type,
             rebate_ratio = excluded.rebate_ratio,
             delay_count = excluded.delay_count,
+            vip_extra_silk = excluded.vip_extra_silk,
+            vip_extra_silk_radio = excluded.vip_extra_silk_radio,
+            official_reduce = excluded.official_reduce,
+            official_order_desc = excluded.official_order_desc,
+            coupon_bonus = excluded.coupon_bonus,
+            total_rebate = excluded.total_rebate,
+            vip_extra_reward = excluded.vip_extra_reward,
+            expected_rebate = excluded.expected_rebate,
+            actual_paid_amount = excluded.actual_paid_amount,
+            threshold_shortfall = excluded.threshold_shortfall,
             created_at = excluded.created_at,
             updated_at = excluded.updated_at
         """, {
@@ -1606,6 +1853,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "status": "cancelled" if (not data.get("platform_order_id") and int(data.get("timeout_time") or 0) > 0 and int(data.get("timeout_time") or 0) < time_service.now_int()) else data.get("status", "pending"),
             "condition": data.get("condition", "无需评价"),
             "receipt_img": data.get("receipt_img", ""),
+            "receipt_uploaded_at": str(data.get("receipt_uploaded_at") or ""),
             "reject_reason": data.get("reject_reason", ""),
             "expire_time": data.get("expire_time", ""),
             "created_at": data.get("created_at", now),
@@ -1614,8 +1862,18 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "order_type": int(data.get("order_type") or 0),
             "rebate_ratio": float(data.get("rebate_ratio") or 0),
             "delay_count": int(data.get("delay_count") or 0),
-            "delay_card_used_count": int(data.get("delay_card_used_count") or 0)
-        })
+            "delay_card_used_count": int(data.get("delay_card_used_count") or 0),
+            "vip_extra_silk": int(bool(data.get("vip_extra_silk"))),
+            "vip_extra_silk_radio": float(data.get("vip_extra_silk_radio") or 0),
+            "official_reduce": str(data.get("official_reduce") or ""),
+            "official_order_desc": str(data.get("official_order_desc") or ""),
+            "coupon_bonus": float(data.get("coupon_bonus") or 0),
+            "total_rebate": float(data.get("total_rebate") or 0),
+            "vip_extra_reward": float(data.get("vip_extra_reward") or 0),
+            "expected_rebate": float(data.get("expected_rebate") or 0),
+            "actual_paid_amount": float(data.get("actual_paid_amount") or 0),
+            "threshold_shortfall": float(data.get("threshold_shortfall") or 0)
+            })
         conn.commit()
         last_id = cursor.lastrowid
         return get_order_by_id(last_id) if last_id else None
@@ -1623,7 +1881,7 @@ def save_order(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def update_order(order_id: int, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     allowed = [
-        "platform_order_id", "status", "receipt_img", "reject_reason",
+        "platform_order_id", "status", "receipt_img", "receipt_uploaded_at", "reject_reason",
         "order_money", "rebate_money", "original_user_rebate",
         "redpack_reward_num", "timeout_time", "expire_time", "store_icon",
         "delay_count", "delay_card_used_count"

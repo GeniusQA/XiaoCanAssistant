@@ -11,6 +11,7 @@ export interface Account {
   vip_expired_at?: number;
   phone?: string;
   real_name?: string;
+  nick_name?: string;
   city_code?: number;
   city_name?: string;
   longitude?: string;
@@ -286,6 +287,7 @@ export interface Order {
   status: 'pending' | 'auditing' | 'completed' | 'rejected' | 'cancelled';
   condition: string;
   receipt_img?: string;
+  receipt_uploaded_at?: string;
   reject_reason?: string;
   expire_time?: string;
   timeout_time?: number;
@@ -294,6 +296,16 @@ export interface Order {
   rebate_ratio?: number;
   delay_count?: number;
   delay_card_used_count?: number;
+  vip_extra_silk?: number | boolean;
+  vip_extra_silk_radio?: number;
+  official_reduce?: string;
+  official_order_desc?: string;
+  coupon_bonus?: number;
+  total_rebate?: number;
+  vip_extra_reward?: number;
+  expected_rebate?: number;
+  actual_paid_amount?: number;
+  threshold_shortfall?: number;
   created_at: string;
   updated_at?: string;
 }
@@ -334,12 +346,14 @@ export interface StoreAppointment {
   redpack_mode?: number;
   redpack_id?: string;
   redpack_name?: string;
+  auto_use_best_vip_card?: boolean;
   use_advance_card?: number | boolean;
   keyword?: string;
   listen_mode?: 'store' | 'general' | string;
   activity_requirement?: 'all' | 'specified_dish' | 'repurchase' | string;
   match_mode?: 'contains' | 'exact' | string;
   min_rebate_price?: number;
+  min_rebate_gap?: number;
   min_rebate_rate?: number;
   rebate_mode_filter?: 'all' | 'fixed' | 'percent' | string;
   auto_stop_on_success?: number | boolean;
@@ -358,6 +372,7 @@ export interface NameMonitorPayload {
   platform?: 'all' | 'meituan' | 'eleme' | 'jingdong';
   rebate_mode_filter?: 'all' | 'fixed' | 'percent';
   min_rebate_price?: number;
+  min_rebate_gap?: number;
   min_rebate_rate?: number;
   max_order_money?: number;
   auto_stop_on_success?: number;
@@ -368,6 +383,7 @@ export interface NameMonitorPayload {
   redpack_mode?: number;
   redpack_id?: string;
   redpack_name?: string;
+  auto_use_best_vip_card?: boolean;
   use_advance_card?: number | boolean;
   store_icon?: string;
 }
@@ -376,6 +392,8 @@ export interface JobLog {
   id: number;
   job_id: string;
   account_key: string;
+  account_name?: string;
+  account_type?: 'user' | 'system' | 'unknown' | string;
   task_id: string;
   status: 'success' | 'error' | 'failed' | 'running' | 'aborted' | string;
   output: string;
@@ -572,6 +590,14 @@ export interface ClawBotStatus {
   account_id: string;
   has_context_token: boolean;
   saved_at: string;
+  session_active?: boolean;
+  session_status?: 'active' | 'expiring' | 'expired' | 'pending' | 'unverified' | 'credential_expired' | string;
+  context_token_at?: number;
+  expires_at?: number;
+  remaining_seconds?: number;
+  last_verified_at?: number;
+  last_fail_code?: number;
+  daily_sent_count?: number;
 }
 
 export interface ClawBotQrResponse {
@@ -595,6 +621,13 @@ export interface ClawBotActivationResponse {
   ok: boolean;
   activated: boolean;
   has_context_token?: boolean;
+  session_active?: boolean;
+  session_status?: string;
+  context_token_at?: number;
+  expires_at?: number;
+  remaining_seconds?: number;
+  last_verified_at?: number;
+  last_fail_code?: number;
   message: string;
 }
 
@@ -605,6 +638,11 @@ export interface SystemSettings {
   clawbot_auth_path?: string;
   clawbot_auth_json?: string;
   clawbot_status?: ClawBotStatus;
+  clawbot_renewal_reminder_enabled?: boolean;
+  clawbot_renewal_warn_hours?: number;
+  clawbot_daily_limit?: number;
+  clawbot_daily_warn_remaining?: number;
+  clawbot_daily_sent_count?: number;
   // Server酱 (Turbo / 3)
   serverchan_enabled: boolean;
   serverchan_sendkey: string;
@@ -673,6 +711,7 @@ export interface SystemSettings {
   notify_on_token_warn: boolean;
   notify_on_coupon_expire: boolean;
   notify_on_task_fail: boolean;
+  notify_on_claw_renewal?: boolean;
   // 位置服务与多地图源 (优先级: 高德 > 百度 > 天地图)
   amap_enabled?: boolean;
   amap_key?: string;
@@ -764,6 +803,7 @@ export interface AccountDetailData {
     avatar?: string;
     phone?: string;
     real_name?: string;
+    nick_name?: string;
     silk?: number;
     withdrawing?: number;
     withdraw_total?: number;

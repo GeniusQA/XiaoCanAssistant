@@ -24,6 +24,64 @@ from . import time_service
 
 logger = logging.getLogger("xiaocan.appointment_worker")
 
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_card_valid(item: Dict[str, Any]) -> bool:
+    expire = _as_int(item.get("expire_time") or (item.get("card") or {}).get("expire_time"), 0)
+    return expire <= 0 or expire > time.time()
+
+
+def _card_ratio(item: Dict[str, Any]) -> int:
+    card = item.get("card") or {}
+    text = " ".join(str(card.get(k) or item.get(k) or "") for k in ("name", "title", "desc"))
+    match = re.search(r"(\d{2,3})\s*%\s*返利券", text)
+    if match:
+        return int(match.group(1))
+    return 100
+
+
+def _pick_vip_cards(cards: List[Dict[str, Any]]) -> Tuple[Optional[int], Optional[int], str]:
+    """从用户自有卡券中挑选最优返利券；不把超前抢单券当作返利券。"""
+    rebate_cards = []
+    extra_cards = []
+    blocked = ("超前", "延时", "单号修改", "免审", "饭票", "探店")
+    for item in cards:
+        if not isinstance(item, dict) or not _is_card_valid(item):
+            continue
+        card = item.get("card") or {}
+        name = str(card.get("name") or item.get("name") or "")
+        desc = str(card.get("desc") or item.get("desc") or "")
+        if any(k in name for k in blocked):
+            continue
+        user_card_id = _as_int(item.get("id") or item.get("user_card_id"), 0)
+        catalog_id = _as_int(card.get("id") or item.get("card_id"), 0)
+        if user_card_id <= 0:
+            continue
+        if "返利券" in name or "额外返" in name or "返利券" in desc:
+            rebate_cards.append((_card_ratio(item), -user_card_id, user_card_id, name, catalog_id))
+        elif "额外" in name or "加赠" in name or "蚕豆卡" in name:
+            extra_cards.append((user_card_id, name))
+
+    promo_id = None
+    extra_id = None
+    desc = ""
+    if rebate_cards:
+        rebate_cards.sort(reverse=True)
+        _, _, promo_id, name, catalog_id = rebate_cards[0]
+        desc = f"最优返利券【{name}】#{promo_id}"
+        if catalog_id > 0:
+            desc += f" (卡种#{catalog_id})"
+    if extra_cards:
+        extra_id = extra_cards[0][0]
+    return promo_id, extra_id, desc
+
+
 client = XiaoCanClient()
 _worker_task: Optional[asyncio.Task] = None
 _is_running = False
@@ -220,8 +278,25 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
         else:
             rp_desc = "用户设置不使用红包"
 
+        # 官方APP默认会同时勾选最优活动返利红包与会员返利券；返利券/额外返券来自用户自有卡券。
+        vip_promotion_card_id = _as_int(apt.get("vip_promotion_card_id"), 0) or None
+        vip_extra_silk_card_id = _as_int(apt.get("vip_extra_silk_card_id"), 0) or None
+        if apt.get("auto_use_best_vip_card", True) and not (vip_promotion_card_id and vip_extra_silk_card_id):
+            try:
+                card_res = await client.get_user_card_list(
+                    token=token, silk_id=silk_id, user_id=user_id,
+                    city_code=city_code, status=0, offset=0, number=100
+                )
+                best_promo, best_extra, best_desc = _pick_vip_cards(list(card_res.get("list") or []))
+                vip_promotion_card_id = vip_promotion_card_id or best_promo
+                vip_extra_silk_card_id = vip_extra_silk_card_id or best_extra
+                if best_desc:
+                    log_steps.append(f"[{time_service.format_now_ms()}] 资产策略: 官方APP默认最优组合 - {best_desc}")
+            except Exception as card_err:
+                logger.info(f"自动选择抢单返利券跳过: {card_err}")
+
         t_step2 = time_service.format_now_ms()
-        log_steps.append(f"[{t_step2}] 步骤 2/4: 红包策略决策 - {rp_desc}")
+        log_steps.append(f"[{t_step2}] 步骤 2/4: 资产策略决策 - {rp_desc}；返利券#{vip_promotion_card_id or '无'}；额外返券#{vip_extra_silk_card_id or '无'}")
 
         try:
             t_step3 = time_service.format_now_ms()
@@ -238,6 +313,8 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                 latitude=lat,
                 longitude=lon,
                 redpack_id=redpack_id,
+                vip_promotion_card_id=vip_promotion_card_id,
+                vip_extra_silk_card_id=vip_extra_silk_card_id,
                 store_id=str(apt.get("store_id") or ""),
                 store_name=str(apt.get("store_name") or ""),
                 wm_poi_id=str(apt.get("wm_poi_id") or "")
@@ -552,6 +629,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 if target_plat in ("eleme", "jingdong"):
                     target_plat = "meituan"
             min_rebate_price = float(apt.get("min_rebate_price") or 0.0)
+            min_rebate_gap = float(apt.get("min_rebate_gap") or 0.0) if rebate_mode_filter != "percent" else 0.0
             min_rebate_rate = float(apt.get("min_rebate_rate") or 0.0)
             max_order_money = float(apt.get("max_order_money") or 0.0)
             auto_stop = int(apt.get("auto_stop_on_success") if apt.get("auto_stop_on_success") is not None else 1)
@@ -650,12 +728,20 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         if activity_requirement not in c_activity_tags:
                             continue
 
-                    # 5. 最低返利金额
+                    # 5. 最低返利金额与实付满返差额：两者均设置时满足其一即可
                     c_rebate_price = float(c.get("rebate_price") or 0.0)
-                    if min_rebate_price > 0 and c_rebate_price < min_rebate_price:
-                        continue
+                    c_rebate_gap = float(c.get("rebate_gap") or 0.0)
+                    if c_rtype == "percent":
+                        # 比例返没有“满X返Y”门槛，只受最低返利金额约束。
+                        if min_rebate_price > 0 and c_rebate_price < min_rebate_price:
+                            continue
+                    elif min_rebate_price > 0 or min_rebate_gap > 0:
+                        meets_rebate = min_rebate_price > 0 and c_rebate_price >= min_rebate_price
+                        meets_gap = min_rebate_gap > 0 and c_rebate_gap <= min_rebate_gap
+                        if not (meets_rebate or meets_gap):
+                            continue
 
-                    # 5. 最低返利比例
+                    # 6. 最低返利比例
                     c_rebate_rate = float(c.get("rebate_rate") or 0.0)
                     if min_rebate_rate > 0 and c_rebate_rate < min_rebate_rate:
                         continue

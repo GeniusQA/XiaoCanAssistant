@@ -457,6 +457,7 @@ export const Automation: React.FC = () => {
   const [execResultModal, setExecResultModal] = useState<boolean>(false);
   const [execOutput, setExecOutput] = useState<string>('');
   const [execTitle, setExecTitle] = useState<string>('任务执行日志');
+  const [execSuccess, setExecSuccess] = useState<boolean>(true);
 
   // 批量日常打卡结果弹窗
   const [batchResultModal, setBatchResultModal] = useState<boolean>(false);
@@ -648,15 +649,18 @@ export const Automation: React.FC = () => {
       if (res.ok) {
         setExecTitle(`执行完成 - ${task.label}`);
         setExecOutput(res.output || '执行成功，无额外输出日志');
+        setExecSuccess(true);
         setExecResultModal(true);
       } else {
         setExecTitle(`执行异常 - ${task.label}`);
         setExecOutput(res.output || '执行遇到错误');
+        setExecSuccess(false);
         setExecResultModal(true);
       }
     } catch (e: any) {
       setExecTitle(`执行失败 - ${task.label}`);
       setExecOutput(e.message || '网络连接或后端通信故障');
+      setExecSuccess(false);
       setExecResultModal(true);
     } finally {
       setRunningTaskId(null);
@@ -1788,7 +1792,7 @@ export const Automation: React.FC = () => {
         customTaskId={runningTaskId || undefined}
         customAccountKey={currentAccountKey}
         customCreatedAt={getNtpDate().toLocaleTimeString()}
-        customStatus={execTitle.includes('成功') ? 'success' : 'error'}
+        customStatus={execSuccess ? 'success' : 'error'}
         customOutput={execOutput}
       />
     </div>

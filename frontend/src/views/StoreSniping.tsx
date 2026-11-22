@@ -597,6 +597,7 @@ export const StoreSniping: React.FC = () => {
   const [nameMonitorVisible, setNameMonitorVisible] = useState(false);
   const [nameMonitorSubmitting, setNameMonitorSubmitting] = useState(false);
   const [nameMonitorInitialKeyword, setNameMonitorInitialKeyword] = useState('');
+  const [nameMonitorInitialIcon, setNameMonitorInitialIcon] = useState('');
   const [editingMonitorId, setEditingMonitorId] = useState<number | null>(null);
   const [nameMonitorInitialValues, setNameMonitorInitialValues] = useState<Record<string, any> | null>(null);
 
@@ -926,7 +927,7 @@ export const StoreSniping: React.FC = () => {
       // ignore
     }
     if (dualScanDone || dualStores.length > 0) {
-      handleTriggerDualScan(val, dualMaxPercent);
+      void handleTriggerDualScan(val, dualMaxPercent);
     }
   }, [dualScanDone, dualStores.length, dualMaxPercent, handleTriggerDualScan]);
 
@@ -938,7 +939,7 @@ export const StoreSniping: React.FC = () => {
       // ignore
     }
     if (dualScanDone || dualStores.length > 0) {
-      handleTriggerDualScan(dualMaxFixed, val);
+      void handleTriggerDualScan(dualMaxFixed, val);
     }
   }, [dualScanDone, dualStores.length, dualMaxFixed, handleTriggerDualScan]);
 
@@ -1520,6 +1521,8 @@ export const StoreSniping: React.FC = () => {
         rebate_price: targetPromo.rebate_price,
         rebate_desc: targetPromo.rebate_desc,
         rebate_type: targetPromo.rebate_type || store.rebate_type,
+        redpack_mode: 0,
+        auto_use_best_vip_card: true,
         advance: advance
       });
 
@@ -1591,6 +1594,7 @@ export const StoreSniping: React.FC = () => {
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
         redpack_name: chosenRpName,
+        auto_use_best_vip_card: true,
         use_advance_card: values.use_advance_card ? 1 : 0
       });
 
@@ -1604,7 +1608,7 @@ export const StoreSniping: React.FC = () => {
     }
   };
 
-  const handleOpenNameMonitor = useCallback((kw?: string) => {
+  const handleOpenNameMonitor = useCallback((kw?: string, icon?: string) => {
     if (!currentAccountKey) {
       Toast.warning('请先选择或绑定账号');
       return;
@@ -1617,6 +1621,7 @@ export const StoreSniping: React.FC = () => {
     setEditingMonitorId(null);
     setNameMonitorInitialValues(null);
     setNameMonitorInitialKeyword(kw || searchKeyword || '');
+    setNameMonitorInitialIcon(icon || '');
     setNameMonitorVisible(true);
   }, [currentAccountKey, searchKeyword, activeLocation, openLocationModal]);
 
@@ -1645,6 +1650,7 @@ export const StoreSniping: React.FC = () => {
       platform: row.platform || 'all',
       rebate_mode_filter: row.rebate_mode_filter || 'all',
       min_rebate_price: Number(row.min_rebate_price || 0),
+      min_rebate_gap: Number(row.min_rebate_gap || 0),
       min_rebate_rate: Number(row.min_rebate_rate || 0),
       timeout_sec: timeoutSecFromUntilTime(row.until_time),
       until_time: row.until_time || '',
@@ -1655,6 +1661,7 @@ export const StoreSniping: React.FC = () => {
       use_advance_card: Boolean(row.use_advance_card),
     });
     setNameMonitorInitialKeyword(row.keyword || row.store_name || '');
+    setNameMonitorInitialIcon(row.store_icon || '');
     setNameMonitorVisible(true);
   }, [currentAccountKey]);
 
@@ -1674,6 +1681,7 @@ export const StoreSniping: React.FC = () => {
     const modeLabel = listenMode === 'general' ? '常规监听' : `店名监听「${kw}」`;
     const rebateFilter = values.rebate_mode_filter || 'all';
     const minPrice = rebateFilter === 'percent' ? 0 : Number(values.min_rebate_price || 0);
+    const minGap = rebateFilter === 'percent' ? 0 : Number(values.min_rebate_gap || 0);
     const minRate = rebateFilter === 'fixed' ? 0 : Number(values.min_rebate_rate || 0);
     const activityRequirement = rebateFilter === 'percent' ? 'all' : (values.activity_requirement || 'all');
     const monitorPlatform = rebateFilter === 'percent' && ['eleme', 'jingdong'].includes(values.platform)
@@ -1705,12 +1713,14 @@ export const StoreSniping: React.FC = () => {
       const res = await api.createNameMonitor({
         account_key: currentAccountKey,
         keyword: kw,
+        store_icon: values.store_icon || '',
         listen_mode: listenMode,
         activity_requirement: activityRequirement,
         match_mode: values.match_mode || 'contains',
         platform: monitorPlatform,
         rebate_mode_filter: rebateFilter,
         min_rebate_price: minPrice,
+        min_rebate_gap: minGap,
         min_rebate_rate: minRate,
         max_order_money: 0,
         auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
@@ -1720,6 +1730,7 @@ export const StoreSniping: React.FC = () => {
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
         redpack_name: chosenRpName,
+        auto_use_best_vip_card: true,
         use_advance_card: values.use_advance_card ? 1 : 0
       });
 
@@ -2064,7 +2075,7 @@ export const StoreSniping: React.FC = () => {
                   type="tertiary"
                   size="small"
                   className="!px-2 text-semi-color-text-2 hover:text-semi-color-primary"
-                  onClick={() => handleOpenNameMonitor(cleanEmoji(row.name))}
+                  onClick={() => handleOpenNameMonitor(cleanEmoji(row.name), row.icon)}
                 >
                   店名蹲守
                 </Button>
@@ -2081,7 +2092,7 @@ export const StoreSniping: React.FC = () => {
               type="tertiary"
               size="small"
               className="!px-2 text-semi-color-text-2 hover:text-semi-color-primary"
-              onClick={() => handleOpenNameMonitor(cleanEmoji(row.name))}
+              onClick={() => handleOpenNameMonitor(cleanEmoji(row.name), row.icon)}
             >
               店名蹲守
             </Button>
@@ -2610,6 +2621,7 @@ export const StoreSniping: React.FC = () => {
               {isMonitorTask ? (
                 <div className="flex items-center gap-2 mt-1 text-xs text-semi-color-text-2 flex-wrap">
                   {row?.min_rebate_price ? <span>最低返利: ¥{row.min_rebate_price}</span> : null}
+                  {row?.min_rebate_gap ? <span>满返差额: ¥{row.min_rebate_gap}</span> : null}
                   {row?.min_rebate_rate ? <span>最低比例: {row.min_rebate_rate}%</span> : null}
                   {row?.max_order_money ? <span>门槛≤¥{row.max_order_money}</span> : null}
                   {row?.rebate_mode_filter && row.rebate_mode_filter !== 'all' ? (
@@ -3068,9 +3080,6 @@ export const StoreSniping: React.FC = () => {
               onChange={(k) => {
                 const tabKey = String(k);
                 setActiveTabKey(tabKey);
-                if (tabKey === 'dual_rebate' && !dualScanDone && !dualScanLoading) {
-                  handleTriggerDualScan();
-                }
                 if (tabKey === 'appointments') {
                   fetchAppointments(true);
                 }
@@ -3172,29 +3181,19 @@ export const StoreSniping: React.FC = () => {
                   <Text type="secondary" className="text-sm font-medium whitespace-nowrap">商家范围:</Text>
                   {renderDualRangeSelector()}
                 </div>
-                <div className="flex items-center gap-2">
-                  <Input
-                    size="default"
-                    prefix={<IconSearch />}
-                    placeholder="搜索双返利店铺..."
-                    value={dualSearchKeyword}
-                    onChange={(val) => setDualSearchKeyword(val)}
-                    onEnterPress={() => handleTriggerDualScan()}
-                    showClear
-                    onClear={() => setDualSearchKeyword('')}
-                    style={{ width: 190 }}
-                  />
-                  <Button
-                    size="default"
-                    theme="solid"
-                    type="primary"
-                    icon={<IconSearch />}
-                    loading={dualScanLoading}
-                    onClick={() => handleTriggerDualScan()}
-                  >
-                    扫描
-                  </Button>
-                </div>
+                <Input
+                  size="default"
+                  prefix={<IconSearch />}
+                  placeholder="搜索双返利店铺..."
+                  value={dualSearchKeyword}
+                  onChange={(val) => setDualSearchKeyword(val)}
+                  onEnterPress={() => {
+                    if (dualScanDone) void handleTriggerDualScan();
+                  }}
+                  showClear
+                  onClear={() => setDualSearchKeyword('')}
+                  style={{ width: 190 }}
+                />
               </div>
             )}
           </div>
@@ -3482,14 +3481,7 @@ export const StoreSniping: React.FC = () => {
                 ['--table-scroll-y' as any]: `${tabScrollHeights.dual_rebate || 440}px`
               }}
             >
-              {dualScanLoading ? (
-                <div className="flex-1 w-full h-full flex flex-col items-center justify-center p-16 m-auto">
-                  <Spin size="large" />
-                  <div className="text-base font-medium text-semi-color-text-0 mt-4">
-                    正在加载附近店铺并筛选...
-                  </div>
-                </div>
-              ) : !dualScanDone ? (
+              {!dualScanDone ? (
                 <div className="p-16 text-center">
                   <Empty
                     title="美团外卖同店双返利智能检索"
@@ -3556,11 +3548,13 @@ export const StoreSniping: React.FC = () => {
                       theme="solid"
                       type="primary"
                       size="large"
-                      icon={<IconSearch />}
+                      icon={dualScanLoading ? undefined : <IconSearch />}
+                      loading={dualScanLoading}
+                      disabled={dualScanLoading}
                       onClick={() => handleTriggerDualScan()}
                       className="mt-3"
                     >
-                      开始扫描美团双返利商户
+                      {dualScanLoading ? '扫描中...' : '开始扫描美团双返利商户'}
                     </Button>
                   </Empty>
                 </div>
@@ -3904,7 +3898,7 @@ export const StoreSniping: React.FC = () => {
                         field="redpack_mode"
                         label="红包策略"
                         initValue={0}
-                        helpText="若指定红包在端外已用将平滑自愈替换"
+                        helpText="抢单时自动勾选最优红包与返利券；指定红包失效时平滑自愈替换"
                         style={{ width: '100%' }}
                       >
                         <Select.Option value={0}>自动匹配最优红包</Select.Option>
@@ -4287,10 +4281,12 @@ export const StoreSniping: React.FC = () => {
             listen_mode: 'store',
             activity_requirement: 'all',
             keyword: nameMonitorInitialKeyword,
+            store_icon: nameMonitorInitialIcon,
             match_mode: 'contains',
             platform: 'all',
             rebate_mode_filter: 'all',
             min_rebate_price: 0,
+            min_rebate_gap: 0,
             min_rebate_rate: 0,
             timeout_sec: 7200,
             check_interval: 10,
@@ -4381,7 +4377,7 @@ export const StoreSniping: React.FC = () => {
               <Form.Select
                 field="redpack_mode"
                 label="红包策略"
-                helpText="抢单命中时自动使用对应红包，指定红包失效时自动平滑替换为最优红包"
+                helpText="抢单命中时自动勾选最优红包与返利券；指定红包失效时自动平滑替换"
                 style={{ width: '100%' }}
               >
                 <Select.Option value={0}>自动最优红包</Select.Option>
@@ -4504,6 +4500,24 @@ export const StoreSniping: React.FC = () => {
                       step={1}
                       placeholder="不设门槛"
                       helpText="实付满返方案返现金额低于此值将忽略"
+                      style={{ width: '100%' }}
+                    />
+                  </Col>
+                </Row>
+              )}
+
+              {(values?.rebate_mode_filter || 'all') !== 'percent' && (
+                <Row gutter={[16, 0]}>
+                  <Col span={24}>
+                    <Form.InputNumber
+                      field="min_rebate_gap"
+                      label="实付满返差额"
+                      prefix="¥"
+                      min={0}
+                      step={1}
+                      precision={2}
+                      placeholder="不设门槛"
+                      helpText="实付满返差额=门槛金额-返利金额，与最低返利金额门槛满足其一即可；差额越小返利越多，例如设置5表示接受差额≤5（满20返15命中）"
                       style={{ width: '100%' }}
                     />
                   </Col>

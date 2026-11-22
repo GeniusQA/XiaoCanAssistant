@@ -18,7 +18,7 @@ from apscheduler.triggers.combining import OrTrigger
 
 from ..models import database as db
 from ..protocol.client import XiaoCanClient, XiaoCanRPCError, is_waf_blocked, format_waf_block_message, waf_account_key
-from . import time_service
+from . import clawbot_client, time_service
 from .notifier import send_system_notification
 from .notification import NotificationEvent, NotificationLevel
 
@@ -174,6 +174,47 @@ TASK_DEFAULT_TIME = {
 _task_completion_events: Dict[Tuple[str, str], asyncio.Event] = {}
 _account_running_tasks: Dict[str, Set[str]] = {}
 _account_routine_locks: Dict[str, asyncio.Lock] = {}
+
+# 调度边界去重：NTP 漂移/配置重载可能让同一任务在 xx:59:59 与 xx:00:00 各触发一次。
+# 只针对 cron 触发，按账号+任务ID在同一次调度窗口内去重；手动与批量执行不受影响。
+_SCHEDULE_DEDUPE_WINDOW_SECONDS = 90
+_SCHEDULE_DEDUPE_RETENTION_SECONDS = 180
+_scheduled_executions: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_scheduled_dedupe_lock = asyncio.Lock()
+
+
+async def _claim_scheduled_execution(account_key: str, task_id: str, job_id: str, trigger_type: str) -> Optional[Dict[str, Any]]:
+    """尝试占用一次调度窗口；返回已有记录表示重复触发，应跳过。"""
+    if trigger_type != "cron":
+        return None
+    now = time.time()
+    key = (account_key, task_id)
+    async with _scheduled_dedupe_lock:
+        for old_key, entry in list(_scheduled_executions.items()):
+            if now - float(entry.get("started_at") or 0) > _SCHEDULE_DEDUPE_RETENTION_SECONDS:
+                _scheduled_executions.pop(old_key, None)
+        existing = _scheduled_executions.get(key)
+        if existing and now - float(existing.get("started_at") or 0) <= _SCHEDULE_DEDUPE_WINDOW_SECONDS:
+            return dict(existing)
+        entry = {
+            "job_id": job_id,
+            "started_at": now,
+            "status": "running",
+            "result": "",
+        }
+        _scheduled_executions[key] = entry
+        return None
+
+
+async def _finish_scheduled_execution(account_key: str, task_id: str, job_id: str, status: str, result: Any) -> None:
+    """更新调度窗口结果；状态保留到窗口过期，重复触发可直接返回原结果。"""
+    key = (account_key, task_id)
+    async with _scheduled_dedupe_lock:
+        entry = _scheduled_executions.get(key)
+        if entry and entry.get("job_id") == job_id:
+            entry["status"] = status
+            entry["result"] = str(result or "")
+
 
 def _get_routine_lock(account_key: str) -> asyncio.Lock:
     if account_key not in _account_routine_locks:
@@ -338,16 +379,30 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
         await notify_task_result(account_key, task_id, task_label, "error", trigger_type, "账号不存在")
         return {"ok": False, "msg": "账号不存在"}
 
+    duplicate = await _claim_scheduled_execution(account_key, task_id, job_id, trigger_type)
+    if duplicate:
+        prior_status = str(duplicate.get("status") or "running")
+        return {
+            "ok": prior_status == "success",
+            "skipped": True,
+            "reason": "duplicate_schedule",
+            "job_id": duplicate.get("job_id"),
+            "prior_status": prior_status,
+            "msg": f"同一任务在 {_SCHEDULE_DEDUPE_WINDOW_SECONDS} 秒调度窗口内已触发，跳过重复执行",
+        }
+
     token = account.get("token")
     if not token:
         msg = f"账号 [{account.get('nickname')}] 未配置有效 Token，请先登录绑定"
         db.add_job_log(job_id, account_key, task_id, "error", msg, result=msg)
+        await _finish_scheduled_execution(account_key, task_id, job_id, "error", msg)
         await notify_task_result(account_key, task_id, task_label, "error", trigger_type, msg)
         return {"ok": False, "msg": msg}
 
     if not db.has_valid_location(account):
         msg = f"账号 [{account.get('nickname') or account_key}] 尚未绑定有效定位地址，请先绑定地址后再执行自动化任务"
         db.add_job_log(job_id, account_key, task_id, "error", msg, result=msg)
+        await _finish_scheduled_execution(account_key, task_id, job_id, "error", msg)
         await notify_task_result(account_key, task_id, task_label, "error", trigger_type, msg)
         return {"ok": False, "code": "LOCATION_REQUIRED", "msg": msg, "output": msg}
 
@@ -377,7 +432,7 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
         "meituan_coupon": "美团神券每日一键领",
         "store_grab": "霸王餐即时抢单",
         "store_appoint": "倒计时预约抢单",
-        "store_monitor": "实时名额监听",
+        "store_monitor": "实时抢单名额监听",
         "store_keyword": "店名定时搜索",
         "store_search": "商户定向嗅探",
         "store_cancel": "霸王餐名额取消",
@@ -573,8 +628,8 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
             else:
                 draw_gap = max(0.1, float(raw_gap))
 
+            opened_count = 0
             if effective_draw_times > 0:
-                opened_count = 0
                 for spin_i in range(effective_draw_times):
                     sleep_t = max(0.18, draw_gap + random.uniform(-0.06, 0.10))
                     if spin_i > 0:
@@ -611,13 +666,60 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
 
             # 5. 阶梯累计抽奖进度展示与即时自动领取
             try:
+                def _to_int(value: Any, default: int = 0) -> int:
+                    try:
+                        return int(float(value))
+                    except (TypeError, ValueError):
+                        return default
+
+                def _parse_lottery_progress(response: Dict[str, Any]) -> Dict[str, Any]:
+                    root = response or {}
+                    candidates = [root, root.get("data"), root.get("lottery_progress"), (root.get("data") or {}).get("lottery_progress")]
+                    prog = next((c for c in candidates if isinstance(c, dict) and (
+                        c.get("lottery_count") is not None or
+                        c.get("first_step_count") is not None or
+                        c.get("second_step_count") is not None
+                    )), {})
+                    count = next((
+                        _to_int(prog.get(k), -1) for k in (
+                            "lottery_count", "total_lottery_count", "draw_count",
+                            "lottery_num", "progress", "current_progress"
+                        ) if prog.get(k) is not None
+                    ), 0)
+                    if count < 0:
+                        count = 0
+                    step1 = _to_int(prog.get("first_step_count"), 3) or 3
+                    step2 = _to_int(prog.get("second_step_count"), 9) or 9
+                    return {
+                        "lottery_count": count,
+                        "first_step_count": step1,
+                        "second_step_count": step2,
+                        "has_got_first_step_prize": bool(prog.get("has_got_first_step_prize", False)),
+                        "has_got_second_step_prize": bool(prog.get("has_got_second_step_prize", False)),
+                    }
+
                 prog_res = await client.get_lottery_progress(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
-                prog = prog_res.get("lottery_progress") or {}
-                lottery_cnt = int(prog.get("lottery_count", 0))
-                step1_cnt = int(prog.get("first_step_count", 3))
-                step2_cnt = int(prog.get("second_step_count", 9))
-                has_got1 = bool(prog.get("has_got_first_step_prize", False))
-                has_got2 = bool(prog.get("has_got_second_step_prize", False))
+                progress_data = _parse_lottery_progress(prog_res)
+                lottery_cnt = progress_data["lottery_count"]
+                step1_cnt = progress_data["first_step_count"]
+                step2_cnt = progress_data["second_step_count"]
+                has_got1 = progress_data["has_got_first_step_prize"]
+                has_got2 = progress_data["has_got_second_step_prize"]
+
+                # 官方进度可能存在短暂最终一致性延迟：刚开完红包后短间隔重试，避免把 9/9 误判成 8/9。
+                if opened_count > 0 and lottery_cnt < step2_cnt and not has_got2:
+                    for retry_i in range(3):
+                        await asyncio.sleep(0.4 * (retry_i + 1))
+                        retry_res = await client.get_lottery_progress(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                        retried = _parse_lottery_progress(retry_res)
+                        lottery_cnt = max(lottery_cnt, retried["lottery_count"])
+                        has_got1 = has_got1 or retried["has_got_first_step_prize"]
+                        has_got2 = has_got2 or retried["has_got_second_step_prize"]
+                        step1_cnt = retried["first_step_count"] or step1_cnt
+                        step2_cnt = retried["second_step_count"] or step2_cnt
+                        if lottery_cnt >= step2_cnt or has_got2:
+                            log_output += f"[{time_service.format_now()}] 官方抽奖进度已刷新: 当前 {lottery_cnt}/{step2_cnt}\n"
+                            break
 
                 # 自动领取第一阶段奖励 (3次满额未领)
                 if lottery_cnt >= step1_cnt and not has_got1:
@@ -1709,7 +1811,7 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                     log_output += f"[{time_service.format_now()}] 今日已提现 {today_count}/{max_per_day} 次，继续余额核验\n"
             except Exception as e:
                 log_output += f"[{time_service.format_now()}] 提现记录查询失败，出于资金安全终止本次执行: {e}\n"
-                status = "skipped"
+                status = "failed"
 
             if status != "skipped":
                 # 2) 实时余额核验：余额低于门槛不提现，且金额不得超过可用余额
@@ -1888,9 +1990,12 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 db.update_job_log(log_id, status=status, output=log_output, result=task_result)
             else:
                 db.add_job_log(job_id, account_key, task_id, status, log_output, result=task_result)
+            await _finish_scheduled_execution(account_key, task_id, job_id, status, task_result)
             # 统一推送执行结果；已有专用成功通知的任务不重复发成功消息，失败一律推送
             if status != "success" or not dedicated_notified:
                 await notify_task_result(account_key, task_id, task_label, status, trigger_type, task_result)
+        else:
+            await _finish_scheduled_execution(account_key, task_id, job_id, status, "任务已中断")
     return {"ok": status == "success", "job_id": job_id, "output": log_output}
 
 
@@ -1925,6 +2030,76 @@ async def _periodic_ntp_sync_job():
         reload_schedules()
 
 
+async def _periodic_clawbot_session_check():
+    """会话自动捕获、到期/每日额度预警：getupdates 不消耗主动推送额度。"""
+    try:
+        auth, _ = clawbot_client.load_auth()
+        if auth and auth.get("token"):
+            # 微信侧用户发信会由 getupdates 返回 context_token；后台自动捕获，
+            # 避免用户已经发信但只有手动点击检测才刷新会话状态。
+            await clawbot_client.check_activation(timeout=5.0)
+
+        if not db.get_setting("clawbot_renewal_reminder_enabled", True):
+            return
+        session = clawbot_client.get_session_status(auth)
+        if not session.get("session_active") or not session.get("has_context_token"):
+            return
+
+        warn_hours = int(db.get_setting("clawbot_renewal_warn_hours", 2) or 2)
+        warn_hours = min(max(warn_hours, 1), 72)
+        ctx_key = str(session.get("context_token_at") or session.get("last_verified_at") or 0)
+        remaining = int(session.get("remaining_seconds") or 0)
+        notified_ctx = str(db.get_setting("clawbot_renewal_notified_ctx", "") or "")
+
+        status_name = str(session.get("session_status") or "")
+        if status_name == "unverified":
+            legacy_key = f"legacy:{(auth or {}).get('savedAt') or 'unknown'}"
+            if legacy_key != notified_ctx:
+                await send_system_notification(
+                    title="微信 ClawBot 会话需要重新核验",
+                    content=(
+                        "当前会话缺少最近一次微信发信时间，无法准确计算到期时间。"
+                        "请在手机微信向 ClawBot 发送任意消息完成续期，然后在设置中点击“检测会话激活”。"
+                    ),
+                    level="warning",
+                    event=NotificationEvent.CLAW_SESSION_RENEWAL,
+                )
+                db.set_setting("clawbot_renewal_notified_ctx", legacy_key)
+        elif ctx_key and ctx_key != notified_ctx and remaining > 0 and remaining <= warn_hours * 3600:
+            expires_text = time_service.format_ts(session["expires_at"], "%Y-%m-%d %H:%M:%S")
+            await send_system_notification(
+                title="微信 ClawBot 会话即将中断",
+                content=(
+                    f"当前推送会话预计在 {expires_text} 到期（剩余约 {round(remaining / 3600, 1)} 小时）。"
+                    "请尽快在手机微信向 ClawBot 发送任意消息，以刷新会话并完成续期；否则抢单、秒杀与任务异常通知将无法送达。"
+                ),
+                level="warning",
+                event=NotificationEvent.CLAW_SESSION_RENEWAL,
+            )
+            db.set_setting("clawbot_renewal_notified_ctx", ctx_key)
+
+        daily_limit = int(db.get_setting("clawbot_daily_limit", 10) or 10)
+        warn_remaining = int(db.get_setting("clawbot_daily_warn_remaining", 2) or 2)
+        if daily_limit > 0:
+            used = clawbot_client.get_daily_send_count()
+            left = daily_limit - used
+            today = time.strftime("%Y-%m-%d")
+            warned_day = str(db.get_setting("clawbot_quota_warned_date", "") or "")
+            if 0 < left <= warn_remaining and warned_day != today:
+                await send_system_notification(
+                    title="微信 ClawBot 今日推送额度即将用完",
+                    content=(
+                        f"今日已通过 ClawBot 推送 {used} 条，预计剩余 {left} 条。"
+                        "请优先保留额度用于关键抢单与秒杀通知，并通过其他已启用通道接收一般提醒。"
+                    ),
+                    level="warning",
+                    event=NotificationEvent.CLAW_SESSION_RENEWAL,
+                )
+                db.set_setting("clawbot_quota_warned_date", today)
+    except Exception as exc:
+        logger.debug(f"ClawBot 会话周期检测跳过: {exc}")
+
+
 def reload_schedules():
     """重新加载所有账号的定时调度任务 (全部基于阿里云 NTP 标准时间)"""
     time_service.sync_aliyun_ntp()
@@ -1934,6 +2109,15 @@ def reload_schedules():
         trigger=NtpCronTrigger(minute="*/10", second=15),
         id="_system_ntp_sync",
         name="阿里云NTP时钟周期校准",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True
+    )
+    scheduler.add_job(
+        _periodic_clawbot_session_check,
+        trigger=NtpCronTrigger(minute="*/15", second=35),
+        id="_system_clawbot_session_check",
+        name="微信ClawBot会话续期预警",
         max_instances=1,
         coalesce=True,
         replace_existing=True
@@ -2029,6 +2213,8 @@ def reload_schedules():
                     args=[key, task_id, "cron"],
                     id=f"{key}_{task_id}",
                     name=f"{acc.get('nickname')}_{task_id}",
+                    max_instances=1,
+                    coalesce=True,
                     misfire_grace_time=60,
                     replace_existing=True
                 )

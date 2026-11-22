@@ -18,6 +18,7 @@ import {
   Spin,
   Popconfirm,
   Collapsible,
+  Select,
 } from '@douyinfe/semi-ui';
 import {
   IconSave,
@@ -591,6 +592,15 @@ const STRATEGIES: StrategyItem[] = [
     iconBg: 'bg-semi-color-fill-0',
     description: '15 个自动化任务每次执行结束（成功或失败）均推送任务名称、账号与执行结果摘要，便于统一监控任务运行状态。',
   },
+  {
+    field: 'notify_on_claw_renewal',
+    title: '微信 ClawBot 会话续期预警',
+    tagText: '通道保障',
+    tagColor: 'orange' as const,
+    icon: <IconBell className="text-semi-color-warning" />,
+    iconBg: 'bg-semi-color-warning-light-default',
+    description: '在微信推送会话即将超过 24 小时滑动窗口或每日额度即将用尽时，提前提醒你向 ClawBot 发送任意消息完成续期。',
+  },
 ];
 
 export const SettingsView: React.FC = () => {
@@ -614,10 +624,15 @@ export const SettingsView: React.FC = () => {
   const activeTab = useAppStore((s) => s.settingsSubTab);
   const setActiveTab = useAppStore((s) => s.setSettingsSubTab);
   const [selectedChannelKey, setSelectedChannelKey] = useState<string>('clawbot');
+  const [settingsFormVersion, setSettingsFormVersion] = useState<number>(0);
   const [initialValues, setInitialValues] = useState<Partial<SystemSettings>>({
     clawbot_enabled: false,
     clawbot_auth_path: '',
     clawbot_auth_json: '',
+    clawbot_renewal_reminder_enabled: true,
+    clawbot_renewal_warn_hours: 2,
+    clawbot_daily_limit: 10,
+    clawbot_daily_warn_remaining: 2,
     serverchan_enabled: false,
     serverchan_sendkey: '',
     wxpusher_enabled: false,
@@ -673,6 +688,7 @@ export const SettingsView: React.FC = () => {
     notify_on_token_warn: true,
     notify_on_coupon_expire: true,
     notify_on_task_fail: true,
+    notify_on_claw_renewal: true,
     amap_enabled: true,
     amap_key: '',
     baidu_enabled: false,
@@ -760,6 +776,7 @@ export const SettingsView: React.FC = () => {
         setClawbotStatus(res.clawbot_status);
       }
       setInitialValues(res);
+      setSettingsFormVersion((v) => v + 1);
       if (formApiRef.current) {
         formApiRef.current.setValues(res);
       }
@@ -808,8 +825,17 @@ export const SettingsView: React.FC = () => {
           account_id: res.account_id || '',
           has_context_token: !!res.has_context_token,
           saved_at: res.saved_at || '',
+          session_active: res.session_active,
+          session_status: res.session_status,
+          context_token_at: res.context_token_at,
+          expires_at: res.expires_at,
+          remaining_seconds: res.remaining_seconds,
+          last_verified_at: res.last_verified_at,
+          last_fail_code: res.last_fail_code,
+          daily_sent_count: res.daily_sent_count,
         });
         Toast.success(res.ready ? 'ClawBot 凭据有效已就绪' : res.message);
+        await loadData();
       } else {
         Toast.warning(res.message || '未检测到有效 ClawBot 凭证');
       }
@@ -837,8 +863,24 @@ export const SettingsView: React.FC = () => {
     setCheckingActivation(true);
     try {
       const res = await api.checkClawBotActivation();
+      if (typeof res.session_status === 'string') {
+        setClawbotStatus((prev) => prev ? {
+          ...prev,
+          session_active: res.session_active,
+          session_status: res.session_status,
+          has_context_token: Boolean(res.has_context_token),
+          context_token_at: res.context_token_at,
+          expires_at: res.expires_at,
+          remaining_seconds: res.remaining_seconds,
+          last_verified_at: res.last_verified_at,
+          last_fail_code: res.last_fail_code,
+        } : prev);
+      }
       if (res.activated) {
         Toast.success('微信会话上下文活跃已就绪');
+        await loadData();
+      } else if (res.session_active && res.session_status !== 'expired') {
+        Toast.success('微信会话状态已同步，当前推送通道可用');
         await loadData();
       } else {
         Toast.warning(res.message || '暂未检测到微信新消息，请向 ClawBot 发送任意消息后重试');
@@ -869,6 +911,9 @@ export const SettingsView: React.FC = () => {
     setTestingChannel(channel);
     try {
       const res = await api.testNotify(channel, currentValues);
+      if (channel === 'clawbot') {
+        await loadData();
+      }
       if (res.ok) {
         Toast.success(`[成功] ${res.message}`);
       } else {
@@ -1023,12 +1068,14 @@ export const SettingsView: React.FC = () => {
   const handleSave = async (values: any) => {
     setLoading(true);
     try {
-      const payload: Record<string, any> = { ...values };
-      for (const [k, defVal] of Object.entries(initialValues)) {
-        if (k === 'ok' || k === 'clawbot_status') continue;
-        if (payload[k] === undefined || payload[k] === null) {
-          payload[k] = typeof defVal === 'boolean' ? false : typeof defVal === 'number' ? 0 : '';
-        }
+      const readonlyKeys = new Set([
+        'ok', 'clawbot_status', 'active_protocol_profile', 'waf_block_detail',
+        'clawbot_daily_sent_count',
+      ]);
+      const payload: Record<string, any> = {};
+      for (const [k, value] of Object.entries(values || {})) {
+        if (readonlyKeys.has(k) || value === undefined || value === null) continue;
+        payload[k] = value;
       }
       await api.saveSettings(payload);
       Toast.success('系统设置已成功保存');
@@ -1146,6 +1193,7 @@ export const SettingsView: React.FC = () => {
         getFormApi={(api) => {
           formApiRef.current = api;
         }}
+        key={`settings-form-${settingsFormVersion}`}
         initValues={initialValues}
         onSubmit={handleSave}
       >
@@ -1313,10 +1361,18 @@ export const SettingsView: React.FC = () => {
                                             <div className="flex items-center gap-2 flex-wrap">
                                               <Text strong>连接状态：</Text>
                                               <Tag color="green" prefixIcon={<IconTick />}>已连接就绪</Tag>
-                                              {clawbotStatus.has_context_token ? (
-                                                <Tag color="cyan" prefixIcon={<IconTick />}>微信会话活跃</Tag>
-                                              ) : (
+                                              {clawbotStatus.session_status === 'expired' ? (
+                                                <Tag color="red" prefixIcon={<IconAlertCircle />}>会话已过期</Tag>
+                                              ) : clawbotStatus.session_status === 'credential_expired' ? (
+                                                <Tag color="red" prefixIcon={<IconAlertCircle />}>凭据已过期</Tag>
+                                              ) : clawbotStatus.session_status === 'pending' || !clawbotStatus.has_context_token ? (
                                                 <Tag color="amber" prefixIcon={<IconAlertCircle />}>待发信激活</Tag>
+                                              ) : clawbotStatus.session_status === 'unverified' ? (
+                                                <Tag color="violet" prefixIcon={<IconAlertCircle />}>会话待核验</Tag>
+                                              ) : clawbotStatus.session_status === 'expiring' ? (
+                                                <Tag color="orange" prefixIcon={<IconAlertCircle />}>会话即将到期</Tag>
+                                              ) : (
+                                                <Tag color="cyan" prefixIcon={<IconTick />}>微信会话活跃</Tag>
                                               )}
                                             </div>
                                             <Space>
@@ -1352,9 +1408,41 @@ export const SettingsView: React.FC = () => {
                                             <div>凭据说明: {clawbotStatus.source}</div>
                                             {clawbotStatus.user_id && <div>用户 ID: <span className="font-mono">{clawbotStatus.user_id}</span></div>}
                                             {clawbotStatus.account_id && <div>授权账号: <span className="font-mono">{clawbotStatus.account_id}</span></div>}
+                                            {clawbotStatus.expires_at ? (
+                                              <div>
+                                                会话预计到期: {new Date(clawbotStatus.expires_at * 1000).toLocaleString('zh-CN')}
+                                                {clawbotStatus.remaining_seconds !== undefined && (
+                                                  <span className="ml-2">剩余约 {Math.max(0, Math.round(clawbotStatus.remaining_seconds / 3600))} 小时</span>
+                                                )}
+                                              </div>
+                                            ) : (
+                                              <div>会话有效期: 尚未记录最近一次微信发信时间，建议重新发信激活以启用到期预警。</div>
+                                            )}
+                                            <div>今日推送用量: {clawbotStatus.daily_sent_count ?? 0} 条</div>
                                           </div>
 
-                                          {!clawbotStatus.has_context_token && (
+                                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                                            <Form.Switch
+                                              field="clawbot_renewal_reminder_enabled"
+                                              label="会话续期预警"
+                                              extraText="到期前自动提醒微信发信续期"
+                                            />
+                                            <Form.Select field="clawbot_renewal_warn_hours" label="提前预警" style={{ width: '100%' }}>
+                                              <Select.Option value={1}>提前 1 小时</Select.Option>
+                                              <Select.Option value={2}>提前 2 小时</Select.Option>
+                                              <Select.Option value={6}>提前 6 小时</Select.Option>
+                                              <Select.Option value={12}>提前 12 小时</Select.Option>
+                                            </Form.Select>
+                                            <Form.InputNumber
+                                              field="clawbot_daily_limit"
+                                              label="预计每日额度"
+                                              min={0}
+                                              max={99}
+                                              step={1}
+                                            />
+                                          </div>
+
+                                          {(clawbotStatus.session_status === 'expired' || clawbotStatus.session_status === 'credential_expired' || !clawbotStatus.has_context_token) && (
                                             <div className="p-2.5 rounded-lg bg-semi-color-warning-light-default border border-semi-color-warning text-xs text-semi-color-text-1 flex items-center justify-between gap-2 flex-wrap">
                                               <span>提示：微信要求首条交互由用户发起。请在微信向「微信 ClawBot」发送任意文字以激活会话。</span>
                                               <Button

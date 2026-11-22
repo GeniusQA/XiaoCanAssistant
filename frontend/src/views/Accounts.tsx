@@ -1585,7 +1585,7 @@ export const Accounts: React.FC = () => {
             tab={
               <span className="flex items-center gap-1.5">
                 <IconDesktop />
-                <span>电脑微信直连</span>
+                <span>PC感知</span>
               </span>
             }
             itemKey="wechat"
@@ -1693,7 +1693,7 @@ export const Accounts: React.FC = () => {
             tab={
               <span className="flex items-center gap-1.5">
                 <IconFile />
-                <span>手动粘贴导入</span>
+                <span>凭证提取</span>
               </span>
             }
             itemKey="token"
@@ -1787,7 +1787,7 @@ export const Accounts: React.FC = () => {
             tab={
               <span className="flex items-center gap-1.5">
                 <IconHelpCircle />
-                <span>抓包图文指引</span>
+                <span>图文指引</span>
               </span>
             }
             itemKey="guide"
@@ -1809,7 +1809,7 @@ export const Accounts: React.FC = () => {
                 </Paragraph>
                 <div className="bg-semi-color-fill-0 rounded-lg p-2.5 text-xs text-semi-color-text-1 space-y-1">
                   <div>1. 在电脑端微信中打开一次<b>【小蚕霸王餐】</b>小程序；</div>
-                  <div>2. 返回本系统，在「电脑微信直连」标签下点击<b>「立即一键提取」</b>；</div>
+                  <div>2. 返回本系统，在「PC感知」标签下点击<b>「立即一键提取」</b>；</div>
                   <div>3. 提取成功后自动载入昵称、VIP等级及会员资产。</div>
                 </div>
               </div>
@@ -1839,7 +1839,7 @@ export const Accounts: React.FC = () => {
                     <b>3. 复制凭证：</b>选中任意请求，在 Request Headers 中找到 <code>x-Sivir</code> 或 <code>token</code> 字段并复制完整字符串；
                   </div>
                   <div>
-                    <b>4. 录入系统：</b>切换至「手动粘贴导入」标签，直接粘贴并点击保存。
+                    <b>4. 录入系统：</b>切换至「凭证提取」标签，直接粘贴并点击保存。
                   </div>
                 </div>
               </div>
@@ -1970,12 +1970,12 @@ export const Accounts: React.FC = () => {
                   color="orange"
                   className="shadow-sm shrink-0"
                 >
-                  {(detailData?.user_info?.nickname || detailAccount.nickname)?.[0] || '蚕'}
+                  {(detailData?.account?.nickname || detailAccount.nickname)?.[0] || '蚕'}
                 </Avatar>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <Text strong className="text-lg text-semi-color-text-0">
-                      {detailData?.user_info?.nickname || detailAccount.nickname}
+                      {detailData?.account?.nickname || detailAccount.nickname}
                     </Text>
                     {(() => {
                       const vipInfo = detailData?.user_info?.vip_level_info;
@@ -1996,6 +1996,9 @@ export const Accounts: React.FC = () => {
                     <div>用户 ID: {detailAccount.user_id || detailData?.user_info?.silk_id || '—'}</div>
                     <div>绑定手机: {detailData?.user_info?.phone || detailAccount.phone || '未设置'}</div>
                     <div>实名认证: {detailData?.user_info?.real_name || detailAccount.real_name || '未设置'}</div>
+                    {(detailData?.user_info?.nick_name || detailAccount.nick_name) && (
+                      <div className="col-span-2">邀请昵称: {detailData?.user_info?.nick_name || detailAccount.nick_name}</div>
+                    )}
                   </div>
                 </div>
               </div>

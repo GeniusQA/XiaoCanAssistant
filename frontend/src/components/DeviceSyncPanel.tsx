@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import jsQR from 'jsqr';
 import { Button, Card, Empty, Popconfirm, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import {
   IconDelete,
@@ -33,6 +34,12 @@ export const DeviceSyncPanel: React.FC = () => {
   const [pairStatus, setPairStatus] = useState('');
   const [pairedDevices, setPairedDevices] = useState<PairedDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const scanFileRef = useRef<HTMLInputElement | null>(null);
 
   const loadPairedDevices = async (silent = false) => {
     if (!silent) setLoadingDevices(true);
@@ -105,6 +112,118 @@ export const DeviceSyncPanel: React.FC = () => {
     }
   };
 
+  const stopScan = useCallback(() => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setScanning(false);
+  }, []);
+
+  const handleScannedUrl = useCallback((value: string) => {
+    const raw = String(value || '').trim();
+    let target = raw;
+    try {
+      const url = new URL(raw, window.location.href);
+      if (!url.searchParams.get('ticket')) {
+        throw new Error('二维码中没有配对票据');
+      }
+      target = url.toString();
+      window.location.assign(target);
+    } catch {
+      setScanError('识别到的二维码不是有效的设备协同二维码，请扫描 PC 端生成的二维码');
+    }
+  }, []);
+
+  const decodeQrFromCanvas = (canvas: HTMLCanvasElement): string => {
+    const width = canvas.width;
+    const height = canvas.height;
+    if (!width || !height) return '';
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return '';
+    const image = context.getImageData(0, 0, width, height);
+    return jsQR(image.data, width, height)?.data || '';
+  };
+
+  const useFrame = () => {
+    const video = videoRef.current;
+    if (!video || !streamRef.current) return;
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (context) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const decoded = decodeQrFromCanvas(canvas);
+        if (decoded) {
+          stopScan();
+          handleScannedUrl(decoded);
+          return;
+        }
+      }
+    }
+    rafRef.current = window.requestAnimationFrame(useFrame);
+  };
+
+  const startScan = async () => {
+    setScanError('');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScanError('当前浏览器不允许调用相机（移动端需 HTTPS 或 localhost），请改用下方“系统相机/相册选图”。');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setScanning(true);
+      window.setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          void videoRef.current.play();
+          useFrame();
+        }
+      }, 0);
+    } catch (e: any) {
+      setScanError(`无法打开相机: ${e?.message || '请检查相机权限'}。可改用下方“系统相机/相册选图”。`);
+    }
+  };
+
+  const handleScanFile = async (file?: File) => {
+    if (!file) return;
+    setScanError('');
+    try {
+      const imageUrl = URL.createObjectURL(file);
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error('图片读取失败'));
+        image.src = imageUrl;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth || image.width;
+      canvas.height = image.naturalHeight || image.height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) throw new Error('当前浏览器不支持图片解析');
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(imageUrl);
+      const decoded = decodeQrFromCanvas(canvas);
+      if (!decoded) throw new Error('未在图片中识别到二维码');
+      handleScannedUrl(decoded);
+    } catch (e: any) {
+      setScanError(`扫码失败: ${e?.message || '未知错误'}`);
+    } finally {
+      if (scanFileRef.current) scanFileRef.current.value = '';
+    }
+  };
+
+  useEffect(() => stopScan, [stopScan]);
+
   return (
     <div className="space-y-4">
       <div className="text-xs text-semi-color-text-2 leading-relaxed space-y-1">
@@ -117,8 +236,52 @@ export const DeviceSyncPanel: React.FC = () => {
           <IconSmartphoneStroked className="text-semi-color-primary" size="extra-large" />
           <div>
             <Text strong>移动端扫码入口</Text>
-            <p className="text-xs text-semi-color-text-2 mt-1">请使用手机相机或微信扫一扫 PC 端展示的二维码；扫码后自动进入确认与同步页面。</p>
+            <p className="text-xs text-semi-color-text-2 mt-1">直接调用手机相机扫描 PC 端二维码，识别后自动进入确认与同步页面。</p>
           </div>
+
+          {!scanning ? (
+            <Button theme="solid" type="primary" icon={<IconQrCode />} onClick={() => void startScan()}>
+              打开相机扫码
+            </Button>
+          ) : (
+            <div className="space-y-2">
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                autoPlay
+                className="w-full max-h-[320px] rounded-lg bg-black object-cover"
+              />
+              <Button size="small" theme="light" onClick={stopScan}>关闭相机</Button>
+            </div>
+          )}
+
+          <div>
+            <Button
+              size="small"
+              theme="light"
+              onClick={() => scanFileRef.current?.click()}
+            >
+              系统相机 / 相册选图
+            </Button>
+            <input
+              ref={scanFileRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={(e) => void handleScanFile(e.target.files?.[0])}
+            />
+          </div>
+
+          {scanError && (
+            <div className="text-xs text-semi-color-danger leading-relaxed bg-semi-color-danger-light-0 rounded-md p-2 text-left">
+              {scanError}
+            </div>
+          )}
+          <p className="text-[11px] text-semi-color-text-3 leading-relaxed">
+            手机浏览器仅在 HTTPS 或 localhost 下允许网页直接调用相机；局域网 HTTP 可使用系统相机/相册选图。
+          </p>
         </div>
       ) : (
         <div className="flex flex-col sm:flex-row gap-4 items-center sm:items-center">

@@ -16,54 +16,12 @@ import {
   IconSpin
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
+import { getTaskLabel } from '../constants/taskLabels';
+import { getLogAccountDisplay } from '../utils/logAccount';
 import type { JobLog } from '../types';
 
 const { Text } = Typography;
 
-const TASK_LABELS: Record<string, string> = {
-  // 霸王餐抢单与预约
-  store_grab: '霸王餐即时抢单',
-  store_appoint: '倒计时预约抢单',
-  store_monitor: '实时名额监听捡漏',
-  store_keyword: '商户定时搜索捡漏',
-  store_search: '商户定向搜索捡漏',
-  store_cancel: '霸王餐名额取消',
-  delay_card: '使用延时券',
-  delay_voucher: '领红包延时',
-
-  // 日常自动化任务
-  yb_task: '轻松赚元宝',
-  user_sign: '每日签到打卡',
-  vip_task: '会员日常成长任务',
-  brand_flash: 'SVIP大牌神券秒杀',
-  svip_rebate: 'SVIP专属返利券秒杀',
-  free_order: '全平台免单券秒杀',
-  media_vip: '腾讯/网易影视周卡秒杀',
-  flash_sale: '元宝秒杀券兑换',
-  daily_redpack: '每日全平台红包雨',
-  lottery: '免费开红包与抽奖',
-  step_reward: '阶段阶梯打卡进度领取',
-  auto_withdraw: '账户佣金自动提现',
-  check_assets: '全资产与明细轮询',
-  token_refresh: '多账号鉴权状态巡检',
-  dual_rebate_scan: '同店双返扫描',
-  dual_rebate_monitor: '同店双返监控',
-  meituan_coupon: '美团官方领券打卡',
-  meituan_auth: '美团官方扫码授权',
-  // 核心业务与资产操作
-  token_capture: '抓包凭据捕获',
-  order_bind: '回填外卖单号',
-  flash_exchange: '元宝秒杀兑换',
-  account_sync: '官方资产同步',
-  notify_test: '通知推送测试',
-  expire_remind: '凭据/JWT到期预警',
-  coupon_remind: '卡券/红包到期提醒',
-  collect_points: '收取未收元宝',
-  daily: '元宝乐园综合打卡',
-  group_lottery: '免费开红包与抽奖',
-  redpack_rain: '整点红包雨',
-  vip_expand: '会员每日签到',
-};
 
 export interface LogDetailModalProps {
   visible: boolean;
@@ -100,10 +58,15 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
 
   const activeLog = selectedLog || log;
   const taskId = customTaskId || activeLog?.task_id || '';
-  const taskName = customTitle || TASK_LABELS[taskId] || (taskId ? `任务 [${taskId}]` : '调度任务');
+  const taskName = customTitle || getTaskLabel(taskId);
   const accountKey = customAccountKey || activeLog?.account_key || '';
   const matchedAccount = accounts.find((a) => a.key === accountKey);
-  const accountNickname = matchedAccount?.nickname || accountKey || '默认账号';
+  const accountDisplay = getLogAccountDisplay({
+    account_key: accountKey,
+    account_name: activeLog?.account_name,
+    account_type: activeLog?.account_type,
+  }, matchedAccount);
+  const accountNickname = accountDisplay.name;
   const createdAt = customCreatedAt || activeLog?.created_at || '-';
   const status = customStatus || activeLog?.status || 'success';
   const output = customOutput !== undefined ? customOutput : (activeLog?.output || '');
@@ -178,7 +141,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
             >
               {logs.map((l) => (
                 <Select.Option key={l.id} value={l.id}>
-                  [{l.created_at?.split(' ')[1] || l.created_at}] {TASK_LABELS[l.task_id] || l.task_id} ({l.status === 'success' ? '成功' : l.status === 'failed' ? '失败' : l.status})
+                  [{l.created_at?.split(' ')[1] || l.created_at}] {getTaskLabel(l.task_id)} ({l.status === 'success' ? '成功' : l.status === 'failed' ? '失败' : l.status})
                 </Select.Option>
               ))}
             </Select>
@@ -193,8 +156,11 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
             padding: '10px 16px',
             backgroundColor: 'var(--semi-color-fill-0)',
             borderRadius: 'var(--semi-border-radius-medium)',
-            border: '1px solid var(--semi-color-border)'
+            border: '1px solid var(--semi-color-border)',
+            maxWidth: '100%',
+            overflow: 'hidden'
           }}
+          className="[&_.semi-description-item]:min-w-0 [&_.semi-description-item-content]:min-w-0 [&_.semi-description-item-content]:max-w-full"
           data={[
             {
               key: '执行时间',
@@ -232,13 +198,18 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
             {
               key: '执行结果',
               value: (
-                <Text
-                  size="small"
-                  ellipsis={{ showTooltip: true }}
-                  className={/403|429|WAF|STGW|STGM|风控|拦截|失败|异常|错误码|被拒绝|冷却/.test(String(activeLog?.result || '')) ? 'text-red-500' : ''}
+                <div
+                  className="min-w-0 max-w-full break-words whitespace-normal leading-relaxed"
+                  style={{ maxWidth: 460 }}
+                  title={String(activeLog?.result || '').trim() || '—'}
                 >
-                  {String(activeLog?.result || '').trim() || '—'}
-                </Text>
+                  <Text
+                    size="small"
+                    className={/403|429|WAF|STGW|STGM|风控|拦截|失败|异常|错误码|被拒绝|冷却|跳过|低于门槛|余额不足|元宝不足|资格拦截|未中签|未命中|售罄|已领完|名额已发完|名额已用完|无资格|不满足|未开通|未绑定/.test(String(activeLog?.result || '')) ? 'text-red-500' : ''}
+                  >
+                    {String(activeLog?.result || '').trim() || '—'}
+                  </Text>
+                </div>
               )
             }
           ]}

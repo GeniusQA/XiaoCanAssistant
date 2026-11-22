@@ -421,7 +421,7 @@ class MeituanAuthManager:
             try:
                 log_id = db.add_job_log(
                     job_id=job_id,
-                    account_key=account_key or "system",
+                    account_key=account_key or "__system__",
                     task_id="meituan_auth",
                     status="running",
                     output=init_output

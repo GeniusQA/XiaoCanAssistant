@@ -17,6 +17,7 @@ class NotificationEvent(str, Enum):
     TOKEN_WARN = "token_warn"              # 账号凭据失效或安全风控报警
     COUPON_EXPIRE = "coupon_expire"        # 卡券即将到期预警
     TASK_FAIL = "task_fail"                # 抢单失败/名额售罄/异常中断
+    CLAW_SESSION_RENEWAL = "claw_session_renewal"  # 微信 ClawBot 会话/额度续期预警
     SYSTEM_TEST = "system_test"            # 通道连通性测试消息
 
 

@@ -153,7 +153,7 @@ export const api = {
       code?: string;
       message?: string;
     }>('/store/dual-rebate-scan', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, timeout: 120000 }).then(r => r.data),
-  grabStoreNow: (data: { account_key: string; store_id?: string; store_name?: string; store_icon?: string; promotion_id: string; platform?: string; order_money?: number; rebate_price?: number; rebate_desc?: string; rebate_type?: string; advance?: boolean; redpack_id?: string; redpack_name?: string; redpack_mode?: number }) =>
+  grabStoreNow: (data: { account_key: string; store_id?: string; store_name?: string; store_icon?: string; promotion_id: string; platform?: string; order_money?: number; rebate_price?: number; rebate_desc?: string; rebate_type?: string; advance?: boolean; redpack_id?: string; redpack_name?: string; redpack_mode?: number; auto_use_best_vip_card?: boolean; vip_promotion_card_id?: number; vip_extra_silk_card_id?: number }) =>
     client.post<{ ok: boolean; order_id?: number; can_monitor?: boolean; message: string }>('/store/grab-now', data).then(r => r.data),
   createAppointment: (data: Partial<StoreAppointment>) => client.post<{ ok: boolean; appointment_id: number; message: string }>('/store/appoint', data).then(r => r.data),
   createNameMonitor: (data: NameMonitorPayload) =>
@@ -264,7 +264,11 @@ export const api = {
   pollClawBotStatus: (qrcode: string, verifyCode?: string) =>
     client.get<ClawBotPollResponse>('/settings/clawbot/poll', { params: { qrcode, verify_code: verifyCode } }).then(r => r.data),
   checkClawBotActivation: () =>
-    client.post<ClawBotActivationResponse>('/settings/clawbot/check-activation').then(r => r.data),
+    client.post<ClawBotActivationResponse>(
+      '/settings/clawbot/check-activation',
+      undefined,
+      { timeout: 75000 }
+    ).then(r => r.data),
   unbindClawBot: () =>
     client.post<{ ok: boolean; message: string }>('/settings/clawbot/unbind').then(r => r.data),
 

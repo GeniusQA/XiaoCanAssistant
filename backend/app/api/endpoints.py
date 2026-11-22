@@ -485,14 +485,19 @@ async def get_account_detail_endpoint(key: str):
                     up_fields["withdraw_total"] = int(user_info["withdraw_total"])
                 if user_info.get("completed_number") is not None:
                     up_fields["completed_number"] = int(user_info["completed_number"])
-                if user_info.get("nickname"):
-                    up_fields["nickname"] = user_info["nickname"]
+                official_nickname = str(user_info.get("nickname") or "").replace("\u00a0", "").strip()
+                if official_nickname:
+                    up_fields["nickname"] = official_nickname
+                elif user_info.get("real_name"):
+                    up_fields["nickname"] = str(user_info["real_name"]).strip()
                 if user_info.get("avatar"):
                     up_fields["avatar"] = user_info["avatar"]
                 if user_info.get("phone"):
                     up_fields["phone"] = user_info["phone"]
                 if user_info.get("real_name"):
                     up_fields["real_name"] = user_info["real_name"]
+                if user_info.get("nick_name"):
+                    up_fields["nick_name"] = user_info["nick_name"]
 
                 if up_fields:
                     updated_acc = db.update_account_profile(key, up_fields)
@@ -604,8 +609,11 @@ async def parse_token_endpoint(data: Dict[str, Any] = Body(...)):
             ).strip()
             if official_silk_id and official_silk_id != "0":
                 silk_id = official_silk_id
-            if uinfo.get("nickname"):
-                nickname = uinfo["nickname"]
+            official_nickname = str(uinfo.get("nickname") or "").replace("\u00a0", "").strip()
+            if official_nickname:
+                nickname = official_nickname
+            elif uinfo.get("real_name"):
+                nickname = str(uinfo["real_name"]).strip()
             if uinfo.get("avatar"):
                 avatar = uinfo["avatar"]
             vinfo = uinfo.get("vip_level_info") or {}
@@ -715,6 +723,7 @@ async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[Xi
     is_plus = int(cred.get("is_plus", 0))
     phone = cred.get("phone") or ""
     real_name = cred.get("real_name") or ""
+    nick_name = cred.get("nick_name") or ""
     vip_score = cred.get("vip_score") or 0
     vip_expired_at = cred.get("vip_expired_at") or 0
     silk = int(cred.get("silk") or 0)
@@ -744,14 +753,19 @@ async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[Xi
                     if not uinfo.get("nickname"):
                         nickname = f"小蚕用户_{silk_id[-4:]}"
 
-            if uinfo.get("nickname"):
-                nickname = uinfo["nickname"]
+            official_nickname = str(uinfo.get("nickname") or "").replace("\u00a0", "").strip()
+            if official_nickname:
+                nickname = official_nickname
+            elif uinfo.get("real_name"):
+                nickname = str(uinfo["real_name"]).strip()
             if uinfo.get("avatar"):
                 avatar = uinfo["avatar"]
             if uinfo.get("phone"):
                 phone = uinfo["phone"]
             if uinfo.get("real_name"):
                 real_name = uinfo["real_name"]
+            if uinfo.get("nick_name"):
+                nick_name = uinfo["nick_name"]
             if uinfo.get("silk") is not None:
                 silk = int(uinfo["silk"])
             if uinfo.get("withdrawing") is not None:
@@ -797,6 +811,7 @@ async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[Xi
         "is_plus": is_plus,
         "phone": phone,
         "real_name": real_name,
+        "nick_name": nick_name,
         "vip_score": vip_score,
         "vip_expired_at": vip_expired_at,
         "silk": silk,
@@ -2190,6 +2205,7 @@ def _parse_store_promotion_item(
     if is_percent:
         rebate_type = "percent"
         rebate_type_text = "按比例返"
+        final_rebate_gap = 0.0
         cap_val = cap if cap > 0 else rebate
         pct_fmt = int(pct) if pct.is_integer() else round(pct, 1)
         cap_fmt = int(cap_val) if cap_val.is_integer() else round(cap_val, 1)
@@ -2214,6 +2230,8 @@ def _parse_store_promotion_item(
         final_order_money = round(order_money, 2)
         final_rebate_price = round(rb_val, 2)
         rebate_rate = round(rb_val / order_money * 100, 1) if order_money > 0 else 0
+        # 实付满返差额 = 满X门槛 - 返利金额（满20返15 => 5）
+        final_rebate_gap = round(max(0.0, final_order_money - final_rebate_price), 2)
 
     # 「大牌商家」官方标识：优先取 if_brand，其次兼容品牌券/品牌活动字段。
     # 注意：distance_text 中的「周边门店通用」只是适用范围文案，不代表大牌商家。
@@ -2276,6 +2294,7 @@ def _parse_store_promotion_item(
         "left_number": int(left_num or 0),
         "order_money": final_order_money,
         "rebate_price": final_rebate_price,
+        "rebate_gap": final_rebate_gap,
         "rebate_rate": rebate_rate,
         "rebate_desc": rebate_desc,
         "rebate_type": rebate_type,
@@ -3050,6 +3069,7 @@ async def get_stores(
             "promotion_id": s["promotion_id"],
             "order_money": s["order_money"],
             "rebate_price": s["rebate_price"],
+            "rebate_gap": s.get("rebate_gap", 0.0),
             "rebate_rate": s["rebate_rate"],
             "rebate_desc": s.get("rebate_desc", f"满{s['order_money']}返{s['rebate_price']}元"),
             "rebate_type": s.get("rebate_type", "fixed"),
@@ -3119,6 +3139,7 @@ async def get_stores(
                     existing["promotion_id"] = s["promotion_id"]
                     existing["order_money"] = s["order_money"]
                     existing["rebate_price"] = s["rebate_price"]
+                    existing["rebate_gap"] = s.get("rebate_gap", 0.0)
                     existing["rebate_rate"] = s["rebate_rate"]
                     existing["rebate_desc"] = s.get("rebate_desc")
                     existing["rebate_type"] = s.get("rebate_type")
@@ -3217,6 +3238,7 @@ async def get_stores(
                     s["promotion_id"] = best_f["promotion_id"]
                     s["order_money"] = best_f["order_money"]
                     s["rebate_price"] = best_f["rebate_price"]
+                    s["rebate_gap"] = best_f.get("rebate_gap", 0.0)
                     s["rebate_rate"] = best_f["rebate_rate"]
                     s["rebate_desc"] = best_f["rebate_desc"]
                     s["rebate_type"] = best_f["rebate_type"]
@@ -3438,6 +3460,7 @@ def _extract_all_promos_from_raw(
             )
             plan_item["order_money"] = round(p_om, 2)
             plan_item["rebate_price"] = round(rb_val, 2)
+            plan_item["rebate_gap"] = round(max(0.0, p_om - rb_val), 2)
             plan_item["rebate_rate"] = round(rb_val / p_om * 100, 1) if p_om > 0 else 0
 
         plan_item["name"] = _clean_emoji(plan_item.get("name", ""))
@@ -4074,8 +4097,8 @@ async def scan_dual_rebate_stores(
     )
 
     try:
-        resolved_acc_key = str(target_acc.get("key") or account_key or "")
-        acc_label = str(target_acc.get("nickname") or resolved_acc_key or "默认账号")
+        resolved_acc_key = str(target_acc.get("key") or account_key or "__system__")
+        acc_label = str(target_acc.get("nickname") or ("系统任务" if resolved_acc_key == "__system__" else resolved_acc_key))
         log_lines = [
             f"[同店双返扫描] {'触发WAF风控提前终止' if waf_aborted else '扫描完成'} (耗时 {elapsed_sec}s)",
             f"账号: {acc_label} ({resolved_acc_key}) | 城市: {city_code} | 坐标: {lon},{lat}" + (f" | 关键词: {keyword.strip()}" if keyword and keyword.strip() else ""),
@@ -4166,9 +4189,13 @@ async def grab_store_now(data: Dict[str, Any] = Body(...)):
         "rebate_price": float(data.get("rebate_price", 0.0)),
         "rebate_desc": data.get("rebate_desc", ""),
         "rebate_type": str(data.get("rebate_type") or ""),
-        "redpack_mode": int(data.get("redpack_mode", 0)),
+        "redpack_mode": _normalize_redpack_mode(data.get("redpack_mode", 0)),
         "redpack_id": data.get("redpack_id"),
-        "redpack_name": data.get("redpack_name", "")
+        "redpack_name": data.get("redpack_name", ""),
+        "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
+        "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
+        "vip_promotion_card_id": data.get("vip_promotion_card_id"),
+        "vip_extra_silk_card_id": data.get("vip_extra_silk_card_id")
     }
 
     res = await execute_grab_for_appointment(apt_data, account, advance=bool(data.get("advance", False)), action_source="store_grab")
@@ -4223,6 +4250,7 @@ async def cancel_promotion_order(data: Dict[str, Any] = Body(...)):
         )
         t_fin = time_service.format_now_ms()
         cancel_steps.append(f"[{t_fin}] 步骤 2/2: 官方响应成功，订单名额已退还，本地及远程锁定解除")
+        cancel_steps.append(f"[{time_service.format_now_ms()}] 资产核验: 官方取消名额接口会同步释放该名额占用的饭票、活动返利红包与会员返利券；卡券到账状态以官方账户资产为准")
         cancel_steps.append(f"[{time_service.format_now_ms()}] 流程结束 - 取消名额成功")
         try:
             db.add_job_log(job_id, account_key, "store_cancel", "success", "\n".join(cancel_steps))
@@ -4281,6 +4309,19 @@ async def get_signup_redpacks(data: Dict[str, Any] = Body(...)):
         return {"ok": True, "items": [], "max_redpack": None}
 
 
+def _normalize_redpack_mode(value: Any) -> int:
+    """兼容旧版 auto/none 字符串与当前 0/1/2 数字红包模式。"""
+    if value in ("auto", "best"):
+        return 0
+    if value in ("none", "off"):
+        return 2
+    try:
+        mode = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return mode if mode in (0, 1, 2) else 0
+
+
 @router.post("/store/appoint")
 async def create_appointment(data: Dict[str, Any] = Body(...)):
     """提交店铺抢单预约或名额监听任务"""
@@ -4302,7 +4343,7 @@ async def create_appointment(data: Dict[str, Any] = Body(...)):
     plat_str = "美团外卖" if data.get("platform") == "meituan" else ("饿了么" if data.get("platform") == "eleme" else "京东外卖")
     use_adv = bool(data.get("use_advance_card"))
     adv_note = "【使用超前券·提前30分钟开抢】" if use_adv else ""
-    rp_mode = int(data.get("redpack_mode", 0))
+    rp_mode = _normalize_redpack_mode(data.get("redpack_mode", 0))
     rp_note = f"指定红包 #{data.get('redpack_id')} ({data.get('redpack_name', '')})" if rp_mode == 1 else ("不使用红包" if rp_mode == 2 else "自动最优红包")
     s_log = (
         f"[{time_service.format_now_ms()}] 初始化{task_name}成功 - 任务装载就绪\n"
@@ -4370,8 +4411,9 @@ async def create_stock_watch(data: Dict[str, Any] = Body(...)):
         "start_time": now.strftime("%H:%M"),
         "until_time": until_str,
         "check_interval": poll_sec,
-        "redpack_mode": 0 if data.get("redpack_mode") == "auto" else (2 if data.get("redpack_mode") == "none" else 1),
+        "redpack_mode": _normalize_redpack_mode(data.get("redpack_mode", 0)),
         "redpack_id": data.get("redpack_id"),
+        "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
         "platform": "meituan" if int(data.get("store_platform") or 1) == 1 else "eleme",
         "log_id": log_id
     }
@@ -4477,7 +4519,12 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         activity_requirement = "all"
         if platform in ("eleme", "jingdong"):
             platform = "meituan"
+    store_icon = str(data.get("store_icon") or data.get("icon") or "").strip()
+    if not store_icon and listen_mode != "general":
+        store_icon = await _resolve_store_icon_by_keyword(keyword, account)
+
     min_rebate_price = float(data.get("min_rebate_price") or 0.0)
+    min_rebate_gap = float(data.get("min_rebate_gap") or 0.0) if rebate_mode_filter != "percent" else 0.0
     min_rebate_rate = float(data.get("min_rebate_rate") or 0.0)
     max_order_money = float(data.get("max_order_money") or 0.0)
     auto_stop_on_success = int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1)
@@ -4519,6 +4566,8 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     req_parts = []
     if min_rebate_price > 0:
         req_parts.append(f"最低返利 ¥{min_rebate_price:.1f}")
+    if min_rebate_gap > 0:
+        req_parts.append(f"满返差额≤¥{min_rebate_gap:.2f} (与最低返利满足其一)")
     if min_rebate_rate > 0:
         req_parts.append(f"最低比例 {min_rebate_rate:.0f}%")
     if max_order_money > 0:
@@ -4545,7 +4594,7 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "account_key": account_key,
         "store_id": "0",
         "store_name": keyword,
-        "store_icon": data.get("store_icon") or "",
+        "store_icon": store_icon,
         "promotion_id": "0",
         "task_type": "name_monitor",
         "start_time": start_at,
@@ -4558,13 +4607,15 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "activity_requirement": activity_requirement,
         "rebate_mode_filter": rebate_mode_filter,
         "min_rebate_price": min_rebate_price,
+        "min_rebate_gap": min_rebate_gap,
         "min_rebate_rate": min_rebate_rate,
         "max_order_money": max_order_money,
         "auto_stop_on_success": auto_stop_on_success,
         "use_advance_card": use_advance_card,
-        "redpack_mode": int(data.get("redpack_mode", 0)),
+        "redpack_mode": _normalize_redpack_mode(data.get("redpack_mode", 0)),
         "redpack_id": str(data.get("redpack_id") or ""),
         "redpack_name": str(data.get("redpack_name") or ""),
+        "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
         "rebate_desc": f"{listen_desc} ({plat_desc})",
         "log_id": log_id
     }
@@ -4583,10 +4634,70 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     }
 
 
+async def _resolve_store_icon_by_keyword(keyword: str, account: Dict[str, Any]) -> str:
+    """按店名关键词从官方搜索结果解析店铺头像，失败时静默回退字符头像。"""
+    name = str(keyword or "").strip()
+    if not name or not account:
+        return ""
+    try:
+        res = await client.search_stores(
+            keyword=name,
+            city_code=int(account.get("city_code") or 0),
+            longitude=str(account.get("longitude") or ""),
+            latitude=str(account.get("latitude") or ""),
+            offset=0,
+            limit=20,
+            token=account.get("token") or "",
+            silk_id=account.get("silk_id"),
+            user_id=account.get("user_id")
+        )
+    except Exception:
+        return ""
+
+    candidates = []
+    for key in ("stores", "store_list", "list", "poi_list", "promotions", "promotion_list", "feed_items"):
+        value = res.get(key) if isinstance(res, dict) else None
+        if isinstance(value, list):
+            candidates.extend(value)
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        store_obj = raw.get("store") or {}
+        raw_name = str(store_obj.get("name") or raw.get("name") or raw.get("store_name") or "").strip()
+        if not raw_name:
+            continue
+        if name != raw_name and name not in raw_name and raw_name not in name:
+            continue
+        icon = (
+            store_obj.get("icon") or
+            store_obj.get("logo") or
+            store_obj.get("head_img") or
+            raw.get("icon") or
+            raw.get("picture") or
+            raw.get("store_icon") or
+            ""
+        )
+        if icon:
+            return str(icon)
+    return ""
+
+
 @router.get("/store/appointments")
 async def list_appointments(account_key: Optional[str] = Query(None)):
-    """获取预约队列列表"""
+    """获取预约队列列表；店名监听缺少头像时按官方搜索结果按需回填。"""
     items = db.get_appointments(account_key)
+    accounts = {a.get("key"): a for a in db.get_all_accounts() if a.get("key")}
+    for item in items:
+        if item.get("store_icon") or item.get("listen_mode") == "general":
+            continue
+        if item.get("task_type") not in ("name_monitor", "keyword"):
+            continue
+        account = accounts.get(item.get("account_key"))
+        keyword = item.get("keyword") or item.get("store_name") or ""
+        icon = await _resolve_store_icon_by_keyword(keyword, account)
+        if icon:
+            db.update_appointment(item["id"], {"store_icon": icon})
+            item["store_icon"] = icon
     return {"ok": True, "appointments": items, "total": len(items)}
 
 
@@ -4613,8 +4724,7 @@ async def stop_appointment(aid: int):
             with db.get_conn() as conn:
                 row = conn.execute("SELECT output FROM job_logs WHERE id = ?", (linked_log_id,)).fetchone()
                 prev_output = row["output"] if row else ""
-            new_output = (prev_output + "\n" + s_log).strip()
-            db.update_job_log(linked_log_id, status="error", output=new_output)
+            db.append_job_log_note(linked_log_id, s_log, fallback_status="error")
         except Exception:
             db.add_job_log(job_id, acc_key, "store_monitor", "error", s_log)
     else:
@@ -4645,8 +4755,7 @@ async def cancel_appointment(aid: int):
                 with db.get_conn() as conn:
                     row = conn.execute("SELECT output FROM job_logs WHERE id = ?", (linked_log_id,)).fetchone()
                     prev_output = row["output"] if row else ""
-                new_output = (prev_output + "\n" + s_log).strip()
-                db.update_job_log(linked_log_id, status="error", output=new_output)
+                db.append_job_log_note(linked_log_id, s_log, fallback_status="error")
             except Exception:
                 db.add_job_log(job_id, acc_key, "store_appoint", "error", s_log)
         else:
@@ -4811,6 +4920,26 @@ async def list_orders(
             raw_redpack = float(o.get("redpack_reward_num") or 0)
             redpack_reward = round(raw_redpack / 100.0, 2)
 
+            # 官方会员额外返：if_vip_extra_silk=true 且 ves_radio 为返利百分比。
+            # 截图订单：基础13元 + 红包0.34元 + 返利券(13×10%=1.30元) = 含用券共返1.64元，总额14.64元。
+            vip_extra_silk = bool(o.get("if_vip_extra_silk"))
+            ves_radio = float(o.get("ves_radio") or 0)
+            expected_base_rebate = raw_orig if raw_orig > 0 else raw_rebate
+            vip_extra_reward = round(expected_base_rebate * ves_radio / 100.0 / 100.0, 2) if vip_extra_silk and ves_radio > 0 else 0.0
+            coupon_bonus = redpack_reward if vip_extra_reward <= 0 else round(redpack_reward + vip_extra_reward, 2)
+            total_rebate = round(rebate_money + redpack_reward + vip_extra_reward, 2)
+            expected_rebate = round(orig_rebate + coupon_bonus, 2)
+            try:
+                actual_paid_amount = round(float(o.get("platform_order_total_price") or 0), 2)
+            except (TypeError, ValueError):
+                actual_paid_amount = 0.0
+            reduce_data = o.get("reduce") or {}
+            try:
+                threshold_shortfall = round(float(reduce_data.get("reduce_pay_dissatisfied") or 0) / 100.0, 2)
+            except (TypeError, ValueError):
+                threshold_shortfall = 0.0
+            reduce_json = json.dumps(reduce_data, ensure_ascii=False)
+
             sp = o.get("store_platform")
             if sp == 3:
                 order_platform = "jingdong"
@@ -4860,16 +4989,16 @@ async def list_orders(
                 cond_str = "无需评价"
             else:
                 cond_val = promo.get("rebate_condition")
-                cond_raw = promo.get("rebate_condition_str") or ("无需评价" if cond_val == 99 else ("随心好评" if cond_val == 2 else "图文反馈"))
-                cond_str = cond_raw.replace("（需含字含图）", "").replace("(需含字含图)", "").strip() if cond_raw else "图文反馈"
-                if not cond_str or cond_str == "图文反馈":
-                    cond_str = "图文反馈"
+                cond_raw = promo.get("rebate_condition_str") or cond_val
+                cond_str = _format_rebate_condition(cond_raw)
             screens = o.get("platform_evaluation_screenshot") or []
             receipt_img = screens[0] if screens else ""
             ot = o.get("order_time")
             c_at = time_service.format_ts(ot, "%Y-%m-%d %H:%M:%S") if ot else time_service.format_now_dt()
             tt = o.get("timeout_time")
             exp_at = time_service.format_ts(tt, "%Y-%m-%d %H:%M:%S") if tt else ""
+            upload_ts = o.get("upload_time") or o.get("uploaded_time") or 0
+            uploaded_at = time_service.format_ts(upload_ts, "%Y-%m-%d %H:%M:%S") if upload_ts else ""
             ot_num = int(ot or 0)
             tt_num = int(tt or 0)
             is_delayed_reward = (
@@ -4877,6 +5006,17 @@ async def list_orders(
                 (tt_num > 0 and ot_num > 0 and (tt_num - ot_num) >= 25200)
             )
             delay_count_val = 1 if is_delayed_reward else 0
+
+            if is_percent_order:
+                ratio_text = f"实付金额{round(rebate_ratio, 1)}%" if rebate_ratio > 0 else "按比例返"
+                max_text = f"，最高返{rebate_money:g}元" if rebate_money > 0 else ""
+                official_desc = f"{ratio_text}{max_text}"
+            else:
+                official_desc = f"满{order_money:g}返{expected_rebate:g}元"
+                if vip_extra_reward > 0:
+                    official_desc += f"，含用券共返{coupon_bonus:g}元"
+            if vip_extra_silk:
+                official_desc = f"SVP {official_desc}"
 
             db.save_order({
                 "account_key": account_key,
@@ -4895,13 +5035,24 @@ async def list_orders(
                 "status": status_str,
                 "condition": cond_str,
                 "receipt_img": receipt_img,
+                "receipt_uploaded_at": uploaded_at,
                 "reject_reason": "",
                 "expire_time": exp_at,
                 "created_at": c_at,
                 "order_time": int(ot or 0),
                 "order_type": 12 if is_percent_order else order_type_val,
                 "rebate_ratio": rebate_ratio,
-                "delay_count": delay_count_val
+                "delay_count": delay_count_val,
+                "vip_extra_silk": vip_extra_silk,
+                "vip_extra_silk_radio": ves_radio,
+                "official_reduce": reduce_json,
+                "official_order_desc": official_desc,
+                "coupon_bonus": coupon_bonus,
+                "total_rebate": total_rebate,
+                "vip_extra_reward": vip_extra_reward,
+                "expected_rebate": expected_rebate,
+                "actual_paid_amount": actual_paid_amount,
+                "threshold_shortfall": threshold_shortfall
             })
 
 
@@ -5118,11 +5269,14 @@ async def submit_platform_order_id(order_id: int, data: Dict[str, Any] = Body(..
 
     has_receipt = bool(data.get("receipt_img"))
     new_status = "auditing" if has_receipt else "pending"
-    updated = db.update_order(order_id, {
+    order_update = {
         "platform_order_id": platform_order_id,
         "status": new_status,
         "receipt_img": data.get("receipt_img", "")
-    })
+    }
+    if has_receipt:
+        order_update["receipt_uploaded_at"] = time_service.format_now_dt()
+    updated = db.update_order(order_id, order_update)
     msg = "外卖单号与评价凭证已提交审核！预计 2-24 小时内核销到账" if has_receipt else "外卖单号已成功绑定！待外卖送达后即可在小蚕APP提交评价反馈"
     
     t_fin = time_service.format_now_ms()
@@ -5649,19 +5803,26 @@ async def get_my_info():
 async def get_settings():
     """获取系统设置与各通知渠道当前状态"""
     clawbot_auth, clawbot_src = clawbot_client.load_auth()
+    clawbot_session = clawbot_client.get_session_status(clawbot_auth)
     return {
         "ok": True,
         # 微信 ClawBot (腾讯 iLink 原生内置通道)
         "clawbot_enabled": db.get_setting("clawbot_enabled", False),
         "clawbot_auth_path": db.get_setting("clawbot_auth_path", ""),
         "clawbot_auth_json": db.get_setting("clawbot_auth_json", ""),
+        "clawbot_renewal_reminder_enabled": db.get_setting("clawbot_renewal_reminder_enabled", True),
+        "clawbot_renewal_warn_hours": int(db.get_setting("clawbot_renewal_warn_hours", 2) or 2),
+        "clawbot_daily_limit": int(db.get_setting("clawbot_daily_limit", 10) or 10),
+        "clawbot_daily_warn_remaining": int(db.get_setting("clawbot_daily_warn_remaining", 2) or 2),
+        "clawbot_daily_sent_count": clawbot_client.get_daily_send_count(),
         "clawbot_status": {
             "ready": bool(clawbot_auth and clawbot_auth.get("token") and clawbot_auth.get("userId")),
             "source": clawbot_src,
             "user_id": clawbot_auth.get("userId", "") if clawbot_auth else "",
             "account_id": clawbot_auth.get("accountId", "") if clawbot_auth else "",
             "has_context_token": bool(clawbot_auth.get("contextToken")) if clawbot_auth else False,
-            "saved_at": clawbot_auth.get("savedAt", "") if clawbot_auth else ""
+            "saved_at": clawbot_auth.get("savedAt", "") if clawbot_auth else "",
+            **clawbot_session,
         },
         # Server酱 (Turbo / 3)
         "serverchan_enabled": db.get_setting("serverchan_enabled", False),
@@ -5731,6 +5892,7 @@ async def get_settings():
         "notify_on_token_warn": db.get_setting("notify_on_token_warn", True),
         "notify_on_coupon_expire": db.get_setting("notify_on_coupon_expire", True),
         "notify_on_task_fail": db.get_setting("notify_on_task_fail", True),
+        "notify_on_claw_renewal": db.get_setting("notify_on_claw_renewal", True),
         # 位置服务与多地图源 (优先级: 高德 > 百度 > 天地图)
         "amap_enabled": db.get_setting("amap_enabled", True),
         "amap_key": db.get_setting("amap_key", ""),
@@ -5747,10 +5909,28 @@ async def get_settings():
 @router.post("/settings")
 async def save_settings(data: Dict[str, Any] = Body(...)):
     """保存系统设置"""
-    readonly_keys = {"clawbot_status", "active_protocol_profile", "waf_block_detail"}
+    readonly_keys = {
+        "clawbot_status", "active_protocol_profile", "waf_block_detail",
+        "clawbot_daily_sent_count",
+    }
+    numeric_keys = {
+        "clawbot_renewal_warn_hours": (1, 72, 2),
+        "clawbot_daily_limit": (0, 99, 10),
+        "clawbot_daily_warn_remaining": (0, 99, 2),
+        "gotify_priority": (0, 10, 5),
+        "email_port": (1, 65535, 465),
+    }
     for k, v in data.items():
-        if k not in readonly_keys:
-            db.set_setting(k, v)
+        if k in readonly_keys:
+            continue
+        if k in numeric_keys:
+            low, high, default = numeric_keys[k]
+            try:
+                value = int(v)
+            except (TypeError, ValueError):
+                value = default
+            v = min(max(value, low), high)
+        db.set_setting(k, v)
     return {"ok": True, "message": "设置已保存"}
 
 
@@ -6081,7 +6261,9 @@ async def clawbot_status_endpoint(custom_path: Optional[str] = None):
         "user_id": auth.get("userId", ""),
         "account_id": auth.get("accountId", ""),
         "has_context_token": bool(auth.get("contextToken")),
-        "saved_at": auth.get("savedAt", "")
+        "saved_at": auth.get("savedAt", ""),
+        **clawbot_client.get_session_status(auth),
+        "daily_sent_count": clawbot_client.get_daily_send_count(),
     }
 
 
@@ -6106,7 +6288,7 @@ async def clawbot_poll_qr_endpoint(
 @router.post("/settings/clawbot/check-activation")
 async def clawbot_check_activation_endpoint():
     """长轮询检测并抓取用户发给 ClawBot 的消息以激活 context_token"""
-    res = await clawbot_client.check_activation(timeout=15.0)
+    res = await clawbot_client.check_activation(timeout=45.0)
     return res
 
 

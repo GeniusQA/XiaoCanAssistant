@@ -38,24 +38,6 @@ import type { Order, DelayCardInfo } from '../types';
 
 const { Title, Text } = Typography;
 
-const getConditionTagColor = (condition?: string): 'green' | 'cyan' | 'blue' | 'amber' | 'grey' => {
-  if (!condition) return 'green';
-  const c = condition.trim();
-  if (c.includes('无需') || c.includes('免评')) {
-    return 'green';
-  }
-  if (c.includes('用餐反馈') || c.includes('反馈')) {
-    return 'cyan';
-  }
-  if (c.includes('随心')) {
-    return 'blue';
-  }
-  if (c.includes('图文') || c.includes('好评') || c.includes('字') || c.includes('图')) {
-    return 'amber';
-  }
-  return 'cyan';
-};
-
 const formatRemainingTime = (remainingSec: number | null | undefined): string => {
   if (remainingSec === null || remainingSec === undefined) return '';
   if (remainingSec <= 0) return '已超时';
@@ -394,6 +376,21 @@ export const OrdersView: React.FC = () => {
                 <Tag color={platInfo.color} size="small" shape="square" className="flex-shrink-0">
                   {platInfo.label}
                 </Tag>
+                {row?.official_order_desc && (
+                  <Tag color="red" size="small" shape="square" className="text-[11px] !px-1.5">
+                    {row.official_order_desc}
+                  </Tag>
+                )}
+                {row?.condition && (
+                  <Tag
+                    color={row.condition.includes('无需') ? 'green' : 'violet'}
+                    size="small"
+                    shape="square"
+                    className="text-[11px] !px-1.5"
+                  >
+                    {row.condition}
+                  </Tag>
+                )}
                 <Typography.Text
                   ellipsis={{ showTooltip: true }}
                   strong
@@ -428,6 +425,12 @@ export const OrdersView: React.FC = () => {
         const redpackAmount = hasRedpack
           ? Number(row!.redpack_reward_num!).toFixed(2)
           : null;
+        const couponBonus = Number(row?.coupon_bonus || 0);
+        const vipExtraReward = Number(row?.vip_extra_reward || 0);
+        const officialTotal = Number(row?.total_rebate || 0);
+        const expectedRebate = Number(row?.expected_rebate || 0);
+        const actualPaid = Number(row?.actual_paid_amount || 0);
+        const thresholdShortfall = Number(row?.threshold_shortfall || 0);
         const isPercentOrder =
           row?.order_type === 12 ||
           Boolean(row?.rebate_ratio && row.rebate_ratio > 0) ||
@@ -437,19 +440,32 @@ export const OrdersView: React.FC = () => {
           <div className="space-y-1 py-1">
             <div className="flex items-baseline gap-1.5">
               <span className="text-base font-bold text-semi-color-danger font-mono tracking-tight">
-                ¥{row?.rebate_money}
+                ¥{officialTotal > 0 ? officialTotal.toFixed(2) : row?.rebate_money}
               </span>
-              {redpackAmount && (
+              {vipExtraReward > 0 && (
                 <span className="text-xs font-semibold text-semi-color-warning font-mono">
-                  +¥{redpackAmount}红包
+                  含用券共返 ¥{couponBonus.toFixed(2)}
                 </span>
               )}
+            </div>
+            <div className="text-[11px] text-semi-color-text-2 font-mono space-y-0.5">
+              {expectedRebate > officialTotal && (
+                <span className="block">预计返利 ¥{expectedRebate.toFixed(2)}</span>
+              )}
+              <span className="block">活动返利红包 ¥{redpackAmount || '0.00'}</span>
+              {vipExtraReward > 0 && (
+                <span className="block">会员返利券 ¥{vipExtraReward.toFixed(2)}</span>
+              )}
+              <span className="block">基础返利 ¥{row?.rebate_money}</span>
             </div>
             <div className="text-sm text-semi-color-text-1 font-mono">
               {isPercentOrder && !hasRealOrderMoney ? (
                 <span>按比例返: {row?.rebate_ratio ? `${row.rebate_ratio}%` : '比例返'}</span>
               ) : (
-                <span>门槛实付: ¥{row?.order_money}</span>
+                <span>实付金额: ¥{(actualPaid || Number(row?.order_money || 0)).toFixed(2)}</span>
+              )}
+              {thresholdShortfall > 0 && (
+                <div className="text-[11px] text-semi-color-danger">未满门槛扣减 ¥{thresholdShortfall.toFixed(2)}</div>
               )}
             </div>
           </div>
@@ -610,15 +626,18 @@ export const OrdersView: React.FC = () => {
       },
     },
     {
-      title: '评价要求',
-      dataIndex: 'condition',
+      title: '上传时间',
+      dataIndex: 'receipt_uploaded_at',
       width: 140,
-      render: (cond: string) => {
-        const text = cond || '无需评价';
+      render: (timeStr: string, row?: Order) => {
+        const uploadTime = String(timeStr || row?.receipt_uploaded_at || '').trim();
+        if (!uploadTime) {
+          return <span className="text-sm text-semi-color-text-3">未上传</span>;
+        }
         return (
-          <Tag color={getConditionTagColor(text)} size="small" shape="square">
-            {text}
-          </Tag>
+          <span className="text-sm text-semi-color-text-2 font-mono" title={uploadTime}>
+            {uploadTime.slice(5, 16)}
+          </span>
         );
       },
     },
@@ -662,9 +681,9 @@ export const OrdersView: React.FC = () => {
                       size="small"
                       loading={delayingOrderId === row.id}
                       onClick={() => handleDelayVoucher(row)}
-                      title="领红包免费延长有效期 2 小时"
+                      title="免费延长订单提交凭证有效期 2 小时"
                     >
-                      领红包延时2h
+                      订单延时
                     </Button>
                   ) : (
                     <Button
@@ -865,9 +884,11 @@ export const OrdersView: React.FC = () => {
           <TabPane tab="已取消" itemKey="cancelled" />
         </Tabs>
 
-        <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
+        <div className="flex items-center gap-3 flex-nowrap min-w-0">
           <RadioGroup
             type="button"
+            buttonSize="small"
+            className="orders-platform-radio"
             value={platformFilter}
             onChange={(e) => setPlatformFilter(e.target.value)}
           >
@@ -888,7 +909,7 @@ export const OrdersView: React.FC = () => {
               setSearchKeyword('');
               fetchOrders('');
             }}
-            style={{ width: '100%' }}
+            style={{ width: 220 }}
           />
         </div>
       </div>

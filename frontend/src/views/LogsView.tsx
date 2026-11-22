@@ -29,60 +29,12 @@ import { TaskIcon } from '../components/TaskIcons';
 import { LogDetailModal } from '../components/LogDetailModal';
 import { useOnActivated } from '../utils/useOnActivated';
 import { useGSAP, gsap } from '../utils/animations';
+import { ORDER_PRIVILEGE_TASK_KEYS, STORE_TASK_KEYS, getTaskLabel } from '../constants/taskLabels';
+import { getLogAccountDisplay } from '../utils/logAccount';
 import type { JobLog } from '../types';
 
 const { Title, Text } = Typography;
 
-const TASK_LABELS: Record<string, string> = {
-  // 霸王餐抢单与预约
-  store_grab: '霸王餐即时抢单',
-  store_appoint: '倒计时预约抢单',
-  store_monitor: '实时名额监听捡漏',
-  store_keyword: '商户定时搜索捡漏',
-  store_search: '商户定向搜索捡漏',
-  store_cancel: '霸王餐名额取消',
-
-  delay_card: '使用延时券',
-
-  delay_voucher: '领红包延时',
-  // 日常自动化任务
-  yb_task: '轻松赚元宝',
-  collect_points: '收取未收元宝',
-  daily: '元宝乐园综合打卡',
-  group_lottery: '免费开红包与抽奖',
-  redpack_rain: '整点红包雨',
-  flash_sale: '元宝秒杀抢券',
-  vip_expand: '会员每日签到',
-  brand_flash: '大牌畅享秒杀',
-  svip_rebate: 'SVIP高额返利券',
-  media_vip: '影音会员周卡',
-  free_order: '订单全额免单券',
-  expire_remind: '凭据/JWT到期预警',
-  coupon_remind: '卡券/红包到期提醒',
-  dual_rebate_scan: '同店双返扫描',
-  dual_rebate_monitor: '同店双返监控',
-  meituan_coupon: '美团官方领券打卡',
-  meituan_auth: '美团官方扫码授权',
-  // 核心业务与资产操作
-  order_bind: '回填外卖单号',
-  flash_exchange: '元宝秒杀兑换',
-  account_sync: '官方资产同步',
-  token_capture: '抓包凭据捕获',
-  notify_test: '通知推送测试',
-};
-
-const STORE_TASK_KEYS = new Set([
-  'store_grab',
-  'store_appoint',
-  'store_monitor',
-  'store_keyword',
-  'store_search',
-  'store_cancel',
-  'delay_card',
-  'delay_voucher',
-  'order_bind',
-  'dual_rebate_scan',
-]);
 
 export const LogsView: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
@@ -298,17 +250,22 @@ export const LogsView: React.FC = () => {
       title: '执行账号',
       dataIndex: 'account_key',
       width: 170,
-      render: (key: string) => {
+      render: (key: string, row?: JobLog) => {
         const acc = accounts.find(a => a.key === key);
-        const name = acc?.nickname || key;
+        const display = getLogAccountDisplay(row || { account_key: key }, acc);
         return (
           <div className="flex items-center gap-2 max-w-full">
-            <Avatar size="extra-small" color="orange" src={acc?.avatar || undefined} className="shrink-0">
-              {acc?.nickname?.[0] || '蚕'}
+            <Avatar
+              size="extra-small"
+              color={display.type === 'user' ? 'orange' : 'grey'}
+              src={display.type === 'user' ? (acc?.avatar || undefined) : undefined}
+              className="shrink-0"
+            >
+              {display.name[0]}
             </Avatar>
-            <Tooltip content={`账号: ${name} (Key: ${key})`}>
+            <Tooltip content={display.detail}>
               <Text ellipsis={{ showTooltip: false }} className="font-medium text-xs text-semi-color-text-0 truncate">
-                {name}
+                {display.name}
               </Text>
             </Tooltip>
           </div>
@@ -320,8 +277,8 @@ export const LogsView: React.FC = () => {
       dataIndex: 'task_id',
       width: 230,
       render: (tid: string) => {
-        const label = TASK_LABELS[tid] || tid;
-        const isDelay = tid === 'delay_card' || tid === 'delay_voucher';
+        const label = getTaskLabel(tid);
+        const isDelay = ORDER_PRIVILEGE_TASK_KEYS.has(tid);
         const isStore = STORE_TASK_KEYS.has(tid);
         const tagColor = isDelay ? 'violet' : (isStore ? 'red' : 'blue');
         const tagText = isDelay ? '订单特权' : (isStore ? '抢单预约' : '日常调度');
@@ -395,7 +352,7 @@ export const LogsView: React.FC = () => {
         if (!text) {
           return <Text type="tertiary" size="small">—</Text>;
         }
-        const isError = /403|429|WAF|STGW|STGM|风控|拦截|失败|异常|错误码|被拒绝|冷却/.test(text);
+        const isError = /403|429|WAF|STGW|STGM|风控|拦截|失败|异常|错误码|被拒绝|冷却|跳过|低于门槛|余额不足|元宝不足|资格拦截|未中签|未命中|售罄|已领完|名额已发完|名额已用完|无资格|不满足|未开通|未绑定/.test(text);
         return (
           <Tooltip content={text} position="top">
             <div className="flex items-start gap-1.5 cursor-pointer" onClick={() => handleOpenDetail(record)}>

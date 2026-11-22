@@ -458,6 +458,18 @@ html, body, #root {
   white-space: nowrap !important;
 }
 
+.orders-platform-radio .semi-radio-group {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  width: max-content !important;
+}
+.orders-platform-radio .semi-radio-button {
+  flex: 0 0 auto !important;
+  white-space: nowrap !important;
+  padding-left: 10px !important;
+  padding-right: 10px !important;
+}
+
 /* ==========================================================================
    Semi Design 模态框 (Modal) 统一视觉规范与间距调校
    核心遵循 Semi Design 官方视觉层级：

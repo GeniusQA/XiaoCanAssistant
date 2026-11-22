@@ -90,6 +90,7 @@ def is_event_subscribed(event: Union[str, NotificationEvent]) -> bool:
         NotificationEvent.TOKEN_WARN.value: ("notify_on_token_warn", True),
         NotificationEvent.COUPON_EXPIRE.value: ("notify_on_coupon_expire", True),
         NotificationEvent.TASK_FAIL.value: ("notify_on_task_fail", True),
+        NotificationEvent.CLAW_SESSION_RENEWAL.value: ("notify_on_claw_renewal", True),
     }
 
     if ev_str in mapping:

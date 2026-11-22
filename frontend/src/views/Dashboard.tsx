@@ -47,6 +47,8 @@ import { LogDetailModal } from '../components/LogDetailModal';
 import { NumberAnimation } from '../components/NumberAnimation';
 import { useGSAP, animateStaggerEnter, animateSmoothSwitch, gsap } from '../utils/animations';
 import { useOnActivated } from '../utils/useOnActivated';
+import { getTaskLabel } from '../constants/taskLabels';
+import { getLogAccountDisplay } from '../utils/logAccount';
 import type { JobLog, StoreAppointment, OrderStats, DashboardChartData, XiaoCanMessage, XiaoCanMessageChannel, Order, TaskItem } from '../types';
 
 const { Text } = Typography;
@@ -85,42 +87,6 @@ const formatRemainingTime = (remainingSec: number | null | undefined): string =>
   return `剩 ${Math.max(1, minutes)}分钟`;
 };
 
-const TASK_LABELS: Record<string, string> = {
-  // 霸王餐抢单与预约
-  store_grab: '霸王餐即时抢单',
-  store_appoint: '倒计时预约抢单',
-  store_monitor: '实时名额监听捡漏',
-  store_keyword: '商户定时搜索捡漏',
-  store_search: '商户定向搜索捡漏',
-  store_cancel: '霸王餐名额取消',
-  delay_card: '使用延时券',
-  delay_voucher: '领红包延时',
-  // 日常自动化任务
-  yb_task: '轻松赚元宝',
-  collect_points: '收取未收元宝',
-  daily: '元宝乐园综合打卡',
-  group_lottery: '免费开红包与抽奖',
-  redpack_rain: '整点红包雨',
-  flash_sale: '元宝秒杀抢券',
-  vip_expand: '会员每日签到',
-  brand_flash: '大牌畅享秒杀',
-  svip_rebate: 'SVIP高额返利券',
-  media_vip: '影音会员周卡',
-  free_order: '订单全额免单券',
-  expire_remind: '凭据/JWT到期预警',
-  coupon_remind: '卡券/红包到期提醒',
-  dual_rebate_monitor: '同店双返监控',
-  dual_rebate_scan: '同店双返扫描',
-  meituan_coupon: '美团官方领券打卡',
-  meituan_auth: '美团官方扫码授权',
-  auto_withdraw: '账户佣金自动提现',
-  // 核心业务与资产操作
-  order_bind: '回填外卖单号',
-  flash_exchange: '元宝秒杀兑换',
-  account_sync: '官方资产同步',
-  token_capture: '抓包凭据捕获',
-  notify_test: '通知推送测试',
-};
 
 // 小蚕官方消息频道元数据 (对应微服务 SilkwormMessageCenter)
 const CHANNEL_META: Record<number, { name: string; color: 'blue' | 'green' | 'amber' | 'purple' | 'grey'; icon: React.ReactNode }> = {
@@ -1756,8 +1722,9 @@ export const Dashboard: React.FC = () => {
                     {recentLogs.length > 0 ? (
                       recentLogs.map((log) => {
                         const acc = accounts.find((a) => a.key === log.account_key);
+                        const accountDisplay = getLogAccountDisplay(log, acc);
                         const summary = getLogSummary(log.output);
-                        const taskTitle = TASK_LABELS[log.task_id] || log.task_id;
+                        const taskTitle = getTaskLabel(log.task_id);
                         return (
                           <div
                             key={log.id}
@@ -1775,11 +1742,9 @@ export const Dashboard: React.FC = () => {
                               <span className="font-bold text-sm text-semi-color-text-0 truncate max-w-[140px]">
                                 {taskTitle}
                               </span>
-                              {acc && (
-                                <Tag size="small" color="grey" type="light" className="shrink-0 truncate max-w-[80px]">
-                                  {acc.nickname}
-                                </Tag>
-                              )}
+                              <Tag size="small" color={accountDisplay.type === 'user' ? 'grey' : 'light-blue'} type="light" className="shrink-0 truncate max-w-[80px]">
+                                {accountDisplay.name}
+                              </Tag>
                             </div>
 
                             <div className="flex items-center gap-1 shrink-0">
