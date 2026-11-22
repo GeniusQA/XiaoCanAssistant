@@ -17,6 +17,106 @@ const { Text } = Typography;
 const isMobileClient = typeof navigator !== 'undefined' &&
   /iPhone|iPad|iPod|Android|Windows Phone|Mobile|mobile/i.test(navigator.userAgent);
 
+const MAX_DECODE_SIZE = 1600;
+
+const loadImageElement = (file: File): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('图片读取失败，可能是 HEIC 等浏览器不支持的格式，请改用截图或 JPG/PNG'));
+    };
+    image.src = url;
+  });
+
+const drawSourceToCanvas = (
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+): { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D } | null => {
+  if (!width || !height) return null;
+  const scale = Math.min(1, MAX_DECODE_SIZE / Math.max(width, height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return null;
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return { canvas, context };
+};
+
+const grayscaleContrast = (source: ImageData): ImageData => {
+  const { data, width, height } = source;
+  const total = width * height;
+  const gray = new Uint8ClampedArray(total);
+  let min = 255;
+  let max = 0;
+  for (let i = 0, p = 0; p < total; i += 4, p += 1) {
+    const value = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+    gray[p] = value;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  const range = Math.max(1, max - min);
+  const out = new Uint8ClampedArray(total * 4);
+  for (let p = 0, i = 0; p < total; p += 1, i += 4) {
+    const value = ((gray[p] - min) * 255 / range) | 0;
+    out[i] = value;
+    out[i + 1] = value;
+    out[i + 2] = value;
+    out[i + 3] = 255;
+  }
+  return new ImageData(out, width, height);
+};
+
+const invertImage = (source: ImageData): ImageData => {
+  const { data, width, height } = source;
+  const out = new Uint8ClampedArray(data.length);
+  for (let i = 0; i < data.length; i += 4) {
+    out[i] = 255 - data[i];
+    out[i + 1] = 255 - data[i + 1];
+    out[i + 2] = 255 - data[i + 2];
+    out[i + 3] = data[i + 3];
+  }
+  return new ImageData(out, width, height);
+};
+
+const decodeQrFromFile = async (file: File): Promise<string> => {
+  const BarcodeDetectorCtor = (window as any).BarcodeDetector;
+  if (typeof BarcodeDetectorCtor !== 'undefined' && typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      const detector = new BarcodeDetectorCtor({ formats: ['qr_code'] });
+      const codes = await detector.detect(bitmap);
+      bitmap.close?.();
+      if (codes.length && codes[0].rawValue) return codes[0].rawValue;
+    } catch { /* 回退到 jsQR */ }
+  }
+
+  const image = await loadImageElement(file);
+  const built = drawSourceToCanvas(
+    image,
+    image.naturalWidth || image.width,
+    image.naturalHeight || image.height,
+  );
+  if (!built) throw new Error('当前浏览器不支持图片解析');
+  const { canvas, context } = built;
+  const original = context.getImageData(0, 0, canvas.width, canvas.height);
+
+  const enhanced = grayscaleContrast(original);
+  const attempts: ImageData[] = [original, enhanced, invertImage(enhanced)];
+  for (const data of attempts) {
+    const code = jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' });
+    if (code?.data) return code.data;
+  }
+  return '';
+};
+
 const collectLocalStateSnapshot = (): Record<string, any> => {
   const snapshot: Record<string, any> = {};
   Object.keys(localStorage).forEach((key) => {
@@ -145,7 +245,7 @@ export const DeviceSyncPanel: React.FC = () => {
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) return '';
     const image = context.getImageData(0, 0, width, height);
-    return jsQR(image.data, width, height)?.data || '';
+    return jsQR(image.data, width, height, { inversionAttempts: 'attemptBoth' })?.data || '';
   };
 
   const scanFrame = () => {
@@ -198,22 +298,8 @@ export const DeviceSyncPanel: React.FC = () => {
     if (!file) return;
     setScanError('');
     try {
-      const imageUrl = URL.createObjectURL(file);
-      const image = new Image();
-      await new Promise<void>((resolve, reject) => {
-        image.onload = () => resolve();
-        image.onerror = () => reject(new Error('图片读取失败'));
-        image.src = imageUrl;
-      });
-      const canvas = document.createElement('canvas');
-      canvas.width = image.naturalWidth || image.width;
-      canvas.height = image.naturalHeight || image.height;
-      const context = canvas.getContext('2d', { willReadFrequently: true });
-      if (!context) throw new Error('当前浏览器不支持图片解析');
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(imageUrl);
-      const decoded = decodeQrFromCanvas(canvas);
-      if (!decoded) throw new Error('未在图片中识别到二维码');
+      const decoded = await decodeQrFromFile(file);
+      if (!decoded) throw new Error('未在图片中识别到二维码，请靠近二维码重拍或改用截图');
       handleScannedUrl(decoded);
     } catch (e: any) {
       setScanError(`扫码失败: ${e?.message || '未知错误'}`);
@@ -268,7 +354,6 @@ export const DeviceSyncPanel: React.FC = () => {
               ref={scanFileRef}
               type="file"
               accept="image/*"
-              capture="environment"
               className="hidden"
               onChange={(e) => void handleScanFile(e.target.files?.[0])}
             />
