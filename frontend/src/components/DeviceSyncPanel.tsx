@@ -148,7 +148,7 @@ export const DeviceSyncPanel: React.FC = () => {
     return jsQR(image.data, width, height)?.data || '';
   };
 
-  const useFrame = () => {
+  const scanFrame = () => {
     const video = videoRef.current;
     if (!video || !streamRef.current) return;
     if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
@@ -166,7 +166,7 @@ export const DeviceSyncPanel: React.FC = () => {
         }
       }
     }
-    rafRef.current = window.requestAnimationFrame(useFrame);
+    rafRef.current = window.requestAnimationFrame(scanFrame);
   };
 
   const startScan = async () => {
@@ -186,7 +186,7 @@ export const DeviceSyncPanel: React.FC = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           void videoRef.current.play();
-          useFrame();
+          scanFrame();
         }
       }, 0);
     } catch (e: any) {
