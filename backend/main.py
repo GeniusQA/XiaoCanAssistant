@@ -75,8 +75,11 @@ async def health_check():
 
 
 @app.get("/m/bind")
-async def root_m_bind(ticket: str = ""):
-    return RedirectResponse(f"/api/m/bind?ticket={ticket}")
+async def root_m_bind(ticket: str = "", phone_base: str = ""):
+    from urllib.parse import quote
+    return RedirectResponse(
+        f"/api/m/bind?ticket={quote(ticket, safe='')}&phone_base={quote(phone_base, safe='')}"
+    )
 
 
 # 若前端已打包 (frontend/dist)，则支持前后端合并一键部署

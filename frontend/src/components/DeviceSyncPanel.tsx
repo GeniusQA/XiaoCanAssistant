@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
-import { Button, Card, Empty, Popconfirm, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Button, Card, Empty, Input, Popconfirm, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import {
   IconDelete,
   IconExternalOpen,
@@ -14,8 +14,18 @@ import type { DevicePairStartResult, PairedDevice } from '../types';
 
 const { Text } = Typography;
 
-const isMobileClient = typeof navigator !== 'undefined' &&
-  /iPhone|iPad|iPod|Android|Windows Phone|Mobile|mobile/i.test(navigator.userAgent);
+const inferDeviceName = (): string => {
+  if (typeof navigator === 'undefined') return '协同设备';
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'iPhone 设备';
+  if (/Android/i.test(ua)) return 'Android 设备';
+  return '桌面设备';
+};
+
+const isMobileClient = typeof navigator !== 'undefined' && (
+  /iPhone|iPad|iPod|Android|Windows Phone|Mobile|mobile/i.test(navigator.userAgent)
+  || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent))
+);
 
 const MAX_DECODE_SIZE = 1600;
 
@@ -50,21 +60,28 @@ const drawSourceToCanvas = (
   return { canvas, context };
 };
 
-const grayscaleContrast = (source: ImageData): ImageData => {
-  const { data, width, height } = source;
-  const total = width * height;
+const toGrayArray = (source: ImageData): Uint8ClampedArray => {
+  const { data } = source;
+  const total = source.width * source.height;
   const gray = new Uint8ClampedArray(total);
+  for (let i = 0, p = 0; p < total; i += 4, p += 1) {
+    gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+  }
+  return gray;
+};
+
+const grayscaleContrast = (source: ImageData): ImageData => {
+  const { width, height } = source;
+  const gray = toGrayArray(source);
   let min = 255;
   let max = 0;
-  for (let i = 0, p = 0; p < total; i += 4, p += 1) {
-    const value = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
-    gray[p] = value;
-    if (value < min) min = value;
-    if (value > max) max = value;
+  for (let p = 0; p < gray.length; p += 1) {
+    if (gray[p] < min) min = gray[p];
+    if (gray[p] > max) max = gray[p];
   }
   const range = Math.max(1, max - min);
-  const out = new Uint8ClampedArray(total * 4);
-  for (let p = 0, i = 0; p < total; p += 1, i += 4) {
+  const out = new Uint8ClampedArray(gray.length * 4);
+  for (let p = 0, i = 0; p < gray.length; p += 1, i += 4) {
     const value = ((gray[p] - min) * 255 / range) | 0;
     out[i] = value;
     out[i + 1] = value;
@@ -86,6 +103,122 @@ const invertImage = (source: ImageData): ImageData => {
   return new ImageData(out, width, height);
 };
 
+const boxBlurGray = (gray: Uint8ClampedArray, width: number, height: number): Uint8ClampedArray => {
+  const out = new Uint8ClampedArray(gray.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      let count = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          sum += gray[yy * width + xx];
+          count += 1;
+        }
+      }
+      out[y * width + x] = sum / count;
+    }
+  }
+  return out;
+};
+
+const otsuThreshold = (gray: Uint8ClampedArray): number => {
+  const histogram = new Array(256).fill(0);
+  for (let p = 0; p < gray.length; p += 1) histogram[gray[p]] += 1;
+  const total = gray.length;
+  let sum = 0;
+  for (let i = 0; i < 256; i += 1) sum += i * histogram[i];
+  let sumBackground = 0;
+  let weightBackground = 0;
+  let best = 0;
+  let threshold = 127;
+  for (let t = 0; t < 256; t += 1) {
+    weightBackground += histogram[t];
+    if (weightBackground === 0) continue;
+    const weightForeground = total - weightBackground;
+    if (weightForeground === 0) break;
+    sumBackground += t * histogram[t];
+    const meanBackground = sumBackground / weightBackground;
+    const meanForeground = (sum - sumBackground) / weightForeground;
+    const between = weightBackground * weightForeground * (meanBackground - meanForeground) ** 2;
+    if (between > best) {
+      best = between;
+      threshold = t;
+    }
+  }
+  return threshold;
+};
+
+const binarizeGray = (
+  gray: Uint8ClampedArray,
+  width: number,
+  height: number,
+  threshold: number,
+): ImageData => {
+  const out = new Uint8ClampedArray(gray.length * 4);
+  for (let p = 0, i = 0; p < gray.length; p += 1, i += 4) {
+    const value = gray[p] > threshold ? 255 : 0;
+    out[i] = value;
+    out[i + 1] = value;
+    out[i + 2] = value;
+    out[i + 3] = 255;
+  }
+  return new ImageData(out, width, height);
+};
+
+const rotateImageData = (source: ImageData, degrees: number): ImageData | null => {
+  const swap = degrees === 90 || degrees === 270;
+  const canvas = document.createElement('canvas');
+  canvas.width = swap ? source.height : source.width;
+  canvas.height = swap ? source.width : source.height;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.width = source.width;
+  sourceCanvas.height = source.height;
+  const sourceContext = sourceCanvas.getContext('2d');
+  if (!sourceContext) return null;
+  sourceContext.putImageData(source, 0, 0);
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate((degrees * Math.PI) / 180);
+  context.drawImage(sourceCanvas, -source.width / 2, -source.height / 2);
+  return context.getImageData(0, 0, canvas.width, canvas.height);
+};
+
+const decodeWithJsQr = (source: ImageData): string => {
+  try {
+    return jsQR(source.data, source.width, source.height, { inversionAttempts: 'attemptBoth' })?.data || '';
+  } catch {
+    return '';
+  }
+};
+
+const decodeWithZxing = (
+  zxing: typeof import('@zxing/library') | null,
+  source: ImageData,
+): string => {
+  if (!zxing) return '';
+  try {
+    const {
+      BinaryBitmap,
+      DecodeHintType,
+      HybridBinarizer,
+      QRCodeReader,
+      RGBLuminanceSource,
+    } = zxing;
+    const hints = new Map();
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    const luminance = new RGBLuminanceSource(toGrayArray(source), source.width, source.height);
+    const bitmap = new BinaryBitmap(new HybridBinarizer(luminance));
+    return new QRCodeReader().decode(bitmap, hints).getText() || '';
+  } catch {
+    return '';
+  }
+};
+
 const decodeQrFromFile = async (file: File): Promise<string> => {
   const BarcodeDetectorCtor = (window as any).BarcodeDetector;
   if (typeof BarcodeDetectorCtor !== 'undefined' && typeof createImageBitmap === 'function') {
@@ -95,7 +228,7 @@ const decodeQrFromFile = async (file: File): Promise<string> => {
       const codes = await detector.detect(bitmap);
       bitmap.close?.();
       if (codes.length && codes[0].rawValue) return codes[0].rawValue;
-    } catch { /* 回退到 jsQR */ }
+    } catch { /* 回退到本地解码 */ }
   }
 
   const image = await loadImageElement(file);
@@ -108,19 +241,50 @@ const decodeQrFromFile = async (file: File): Promise<string> => {
   const { canvas, context } = built;
   const original = context.getImageData(0, 0, canvas.width, canvas.height);
 
+  const gray = toGrayArray(original);
+  const blurred = boxBlurGray(gray, canvas.width, canvas.height);
   const enhanced = grayscaleContrast(original);
-  const attempts: ImageData[] = [original, enhanced, invertImage(enhanced)];
-  for (const data of attempts) {
-    const code = jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' });
-    if (code?.data) return code.data;
+  const binarized = binarizeGray(gray, canvas.width, canvas.height, otsuThreshold(gray));
+  const blurredBinarized = binarizeGray(blurred, canvas.width, canvas.height, otsuThreshold(blurred));
+
+  const primaryAttempts: ImageData[] = [original, enhanced, binarized, blurredBinarized];
+  const allAttempts: ImageData[] = [
+    ...primaryAttempts,
+    invertImage(binarized),
+    invertImage(blurredBinarized),
+  ];
+
+  const zxing = await import('@zxing/library').catch(() => null);
+
+  for (const data of primaryAttempts) {
+    const value = decodeWithZxing(zxing, data);
+    if (value) return value;
+  }
+  for (const data of allAttempts) {
+    const value = decodeWithJsQr(data);
+    if (value) return value;
+  }
+  for (const data of [binarized, blurredBinarized]) {
+    for (const degrees of [90, 180, 270]) {
+      const rotated = rotateImageData(data, degrees);
+      if (!rotated) continue;
+      const value = decodeWithZxing(zxing, rotated) || decodeWithJsQr(rotated);
+      if (value) return value;
+    }
   }
   return '';
 };
 
 const collectLocalStateSnapshot = (): Record<string, any> => {
   const snapshot: Record<string, any> = {};
+  const localOnlyKeys = new Set([
+    'xiaocan_device_token',
+    'xiaocan_device_id',
+    'xiaocan_device_name',
+    'xiaocan_phone_base_url',
+  ]);
   Object.keys(localStorage).forEach((key) => {
-    if (!key.startsWith('xiaocan_') || key === 'xiaocan_device_token') return;
+    if (!key.startsWith('xiaocan_') || localOnlyKeys.has(key)) return;
     const raw = localStorage.getItem(key);
     if (raw === null) return;
     try { snapshot[key] = JSON.parse(raw); } catch { snapshot[key] = raw; }
@@ -130,12 +294,27 @@ const collectLocalStateSnapshot = (): Record<string, any> => {
 
 export const DeviceSyncPanel: React.FC = () => {
   const [pairing, setPairing] = useState(false);
+  const [phoneBaseUrl, setPhoneBaseUrl] = useState(() => {
+    try {
+      return localStorage.getItem('xiaocan_phone_base_url') || 'http://127.0.0.1:39691';
+    } catch {
+      return 'http://127.0.0.1:39691';
+    }
+  });
+  const [localDeviceName, setLocalDeviceName] = useState(() => {
+    try {
+      return localStorage.getItem('xiaocan_device_name') || inferDeviceName();
+    } catch {
+      return inferDeviceName();
+    }
+  });
   const [pairInfo, setPairInfo] = useState<DevicePairStartResult | null>(null);
   const [pairStatus, setPairStatus] = useState('');
   const [pairedDevices, setPairedDevices] = useState<PairedDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState('');
+  const [decodingFile, setDecodingFile] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -157,7 +336,18 @@ export const DeviceSyncPanel: React.FC = () => {
     setPairing(true);
     setPairStatus('正在生成配对二维码...');
     try {
-      const res = await api.startDevicePair(collectLocalStateSnapshot());
+      const normalizedPhoneBase = (phoneBaseUrl || '').trim().replace(/\/+$/, '');
+      if (!/^https?:\/\//i.test(normalizedPhoneBase)) {
+        throw new Error('手机端服务地址需以 http:// 或 https:// 开头');
+      }
+      const normalizedDeviceName = (localDeviceName || '').trim().slice(0, 40) || inferDeviceName();
+      try {
+        localStorage.setItem('xiaocan_phone_base_url', normalizedPhoneBase);
+        localStorage.setItem('xiaocan_device_name', normalizedDeviceName);
+      } catch {
+        // ignore
+      }
+      const res = await api.startDevicePair(collectLocalStateSnapshot(), normalizedPhoneBase, normalizedDeviceName);
       if (!res.ok) throw new Error('生成配对二维码失败');
       setPairInfo(res);
       setPairStatus('等待移动端扫码确认');
@@ -192,10 +382,10 @@ export const DeviceSyncPanel: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [pairInfo]);
 
-  const handleRevokeDevice = async (deviceId: string) => {
+  const handleRevokeDevice = async (deviceId: string, deviceName: string) => {
     try {
       const res = await api.revokePairedDevice(deviceId);
-      Toast.success(res.message || '已注销设备');
+      Toast.error(res.message || `${deviceName}已取消设备协同授权`);
       void loadPairedDevices(true);
     } catch (e: any) {
       Toast.error(`注销失败: ${e?.response?.data?.detail || e.message || '未知错误'}`);
@@ -272,7 +462,7 @@ export const DeviceSyncPanel: React.FC = () => {
   const startScan = async () => {
     setScanError('');
     if (!navigator.mediaDevices?.getUserMedia) {
-      setScanError('当前浏览器不允许调用相机（移动端需 HTTPS 或 localhost），请改用下方“系统相机/相册选图”。');
+      setScanError('当前浏览器不允许调用相机（移动端需 HTTPS 或 localhost），请改用下方“相册选图”。');
       return;
     }
     try {
@@ -290,13 +480,14 @@ export const DeviceSyncPanel: React.FC = () => {
         }
       }, 0);
     } catch (e: any) {
-      setScanError(`无法打开相机: ${e?.message || '请检查相机权限'}。可改用下方“系统相机/相册选图”。`);
+      setScanError(`无法打开相机: ${e?.message || '请检查相机权限'}。可改用下方“相册选图”。`);
     }
   };
 
   const handleScanFile = async (file?: File) => {
     if (!file) return;
     setScanError('');
+    setDecodingFile(true);
     try {
       const decoded = await decodeQrFromFile(file);
       if (!decoded) throw new Error('未在图片中识别到二维码，请靠近二维码重拍或改用截图');
@@ -304,6 +495,7 @@ export const DeviceSyncPanel: React.FC = () => {
     } catch (e: any) {
       setScanError(`扫码失败: ${e?.message || '未知错误'}`);
     } finally {
+      setDecodingFile(false);
       if (scanFileRef.current) scanFileRef.current.value = '';
     }
   };
@@ -313,16 +505,62 @@ export const DeviceSyncPanel: React.FC = () => {
   return (
     <div className="space-y-4">
       <div className="text-xs text-semi-color-text-2 leading-relaxed space-y-1">
-        <div>PC 端配置完成后生成短时二维码，移动端在同一局域网扫码即可同步账号与配置，无需重新手动录入。</div>
+        <div>任一部署端生成短时二维码，另一端在同一局域网扫码即可一次性同步账号与配置；完成后两端独立运行，不再持续互相同步。</div>
         <div>二维码仅包含随机票据，不含账号 Token；默认 5 分钟有效且只能使用一次。</div>
       </div>
 
-      {isMobileClient ? (
+      <div className="flex flex-col sm:flex-row gap-4 items-center sm:items-center">
+        <div className="shrink-0 w-[220px] h-[220px] rounded-xl border border-semi-color-border bg-white flex items-center justify-center overflow-hidden">
+          {pairInfo ? (
+            <img src={pairInfo.qr_image} alt="设备协同二维码" className="w-full h-full object-contain" />
+          ) : (
+            <div className="text-center text-semi-color-text-2 text-xs px-4">
+              <IconQrCode size="extra-large" className="mb-2" />
+              <div>尚未生成二维码</div>
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0 space-y-2">
+          <div>
+            <div className="text-xs text-semi-color-text-2 mb-1">本机设备名称</div>
+            <Input value={localDeviceName} onChange={(v) => setLocalDeviceName(v)} placeholder="当前设备" />
+          </div>
+          <div>
+            <div className="text-xs text-semi-color-text-2 mb-1">扫码端服务地址（同步目标）</div>
+            <Input
+              value={phoneBaseUrl}
+              onChange={(v) => setPhoneBaseUrl(v)}
+              placeholder="http://127.0.0.1:39691"
+            />
+          </div>
+          <Button theme="solid" type="primary" icon={<IconQrCode />} loading={pairing} onClick={handleStartPair}>
+            生成配对二维码
+          </Button>
+          <div className="text-xs text-semi-color-text-2 break-all">
+            {pairStatus || '二维码生成后请在 5 分钟内由另一端扫码确认。'}
+          </div>
+          {pairInfo && (
+            <>
+              <div className="text-xs text-semi-color-text-2 break-all">协同地址：{pairInfo.url}</div>
+              <Button
+                size="small"
+                theme="light"
+                icon={<IconExternalOpen />}
+                onClick={() => navigator.clipboard?.writeText(pairInfo.url).then(() => Toast.success('协同地址已复制')).catch(() => Toast.warning('复制失败，请手动复制'))}
+              >
+                复制地址
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {isMobileClient && (
         <div className="p-4 rounded-xl bg-semi-color-fill-0 border border-semi-color-border text-center space-y-3">
           <IconSmartphoneStroked className="text-semi-color-primary" size="extra-large" />
           <div>
-            <Text strong>移动端扫码入口</Text>
-            <p className="text-xs text-semi-color-text-2 mt-1">直接调用手机相机扫描 PC 端二维码，识别后自动进入确认与同步页面。</p>
+            <Text strong>扫描对端二维码</Text>
+            <p className="text-xs text-semi-color-text-2 mt-1">移动端扫码加入；识别后进入一次性确认与同步页面。</p>
           </div>
 
           {!scanning ? (
@@ -346,9 +584,10 @@ export const DeviceSyncPanel: React.FC = () => {
             <Button
               size="small"
               theme="light"
+              loading={decodingFile}
               onClick={() => scanFileRef.current?.click()}
             >
-              系统相机 / 相册选图
+              {decodingFile ? '正在识别二维码...' : '相册选图'}
             </Button>
             <input
               ref={scanFileRef}
@@ -365,42 +604,8 @@ export const DeviceSyncPanel: React.FC = () => {
             </div>
           )}
           <p className="text-[11px] text-semi-color-text-3 leading-relaxed">
-            手机浏览器仅在 HTTPS 或 localhost 下允许网页直接调用相机；局域网 HTTP 可使用系统相机/相册选图。
+            浏览器仅在 HTTPS 或 localhost 下允许网页直接调用相机；局域网 HTTP 可使用相册选图。
           </p>
-        </div>
-      ) : (
-        <div className="flex flex-col sm:flex-row gap-4 items-center sm:items-center">
-          <div className="shrink-0 w-[220px] h-[220px] rounded-xl border border-semi-color-border bg-white flex items-center justify-center overflow-hidden">
-            {pairInfo ? (
-              <img src={pairInfo.qr_image} alt="设备协同二维码" className="w-full h-full object-contain" />
-            ) : (
-              <div className="text-center text-semi-color-text-2 text-xs px-4">
-                <IconQrCode size="extra-large" className="mb-2" />
-                <div>尚未生成二维码</div>
-              </div>
-            )}
-          </div>
-          <div className="flex-1 min-w-0 space-y-2">
-            <Button theme="solid" type="primary" icon={<IconQrCode />} loading={pairing} onClick={handleStartPair}>
-              生成配对二维码
-            </Button>
-            <div className="text-xs text-semi-color-text-2 break-all">
-              {pairStatus || '二维码生成后请在 5 分钟内用手机扫码确认。'}
-            </div>
-            {pairInfo && (
-              <>
-                <div className="text-xs text-semi-color-text-2 break-all">协同地址：{pairInfo.url}</div>
-                <Button
-                  size="small"
-                  theme="light"
-                  icon={<IconExternalOpen />}
-                  onClick={() => navigator.clipboard?.writeText(pairInfo.url).then(() => Toast.success('协同地址已复制')).catch(() => Toast.warning('复制失败，请手动复制'))}
-                >
-                  复制地址
-                </Button>
-              </>
-            )}
-          </div>
         </div>
       )}
 
@@ -434,8 +639,8 @@ export const DeviceSyncPanel: React.FC = () => {
                   {device.status === 'active' ? (
                     <Popconfirm
                       title="注销此设备？"
-                      content="注销后该设备下次校验会被踢下线并清除本地缓存；设备记录仍保留。"
-                      onConfirm={() => void handleRevokeDevice(device.id)}
+                      content="注销后将取消该设备协同授权；一次性同步完成的本地数据不会被删除。"
+                      onConfirm={() => void handleRevokeDevice(device.id, device.name)}
                     >
                       <Button size="small" theme="light" type="warning" icon={<IconUnlink />}>注销</Button>
                     </Popconfirm>

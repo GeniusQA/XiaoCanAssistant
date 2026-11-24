@@ -4,6 +4,7 @@ import hashlib
 import io
 import re
 import socket
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any, Dict, Optional
 
 import qrcode
@@ -40,13 +41,25 @@ def get_lan_ip() -> str:
 
 
 def build_lan_url(host_header: str = "", path: str = "/m/bind") -> str:
-    """优先使用访问时的 Host，本地访问则回退到探测到的局域网 IP。"""
+    """优先使用访问时的 Host；本地访问保留端口，仅把地址替换成局域网 IP。"""
     host = (host_header or "").strip()
-    if host and "localhost" not in host.lower() and not host.lower().startswith("127.0.0.1"):
-        scheme = "https" if host.lower().startswith("https") else "http"
-        clean = host.replace("https://", "").replace("http://", "")
-        return f"{scheme}://{clean}{path}"
-    return f"http://{get_lan_ip()}:8690{path}"
+    scheme = "http"
+    if host.lower().startswith("https://"):
+        scheme = "https"
+        host = host[8:]
+    elif host.lower().startswith("http://"):
+        host = host[7:]
+    host = host.split("/", 1)[0].strip()
+    if not host:
+        return f"http://{get_lan_ip()}:8690{path}"
+
+    hostname, port = host, ""
+    if ":" in host:
+        hostname, port = host.rsplit(":", 1)
+    if hostname.lower() in ("localhost", "127.0.0.1", "::1"):
+        hostname = get_lan_ip()
+    clean_host = hostname if not port else f"{hostname}:{port}"
+    return f"{scheme}://{clean_host}{path}"
 
 
 def qr_data_url(text: str) -> str:

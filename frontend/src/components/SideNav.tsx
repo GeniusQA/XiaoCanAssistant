@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Nav, Tooltip } from '@douyinfe/semi-ui';
+import { Button, Nav, Tooltip } from '@douyinfe/semi-ui';
 import {
   IconHome,
   IconUser,
@@ -8,6 +8,8 @@ import {
   IconOrderedList,
   IconFile,
   IconSetting,
+  IconSun,
+  IconMoon,
 } from '@douyinfe/semi-icons';
 import { useAppStore } from '../store/useAppStore';
 import { gsap, useGSAP } from '../utils/animations';
@@ -22,6 +24,8 @@ export const SideNav: React.FC<SideNavProps> = ({ forceExpanded = false, onNavig
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const isSidebarCollapsed = useAppStore((s) => s.isSidebarCollapsed);
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed);
+  const isDarkMode = useAppStore((s) => s.isDarkMode);
+  const setDarkMode = useAppStore((s) => s.setDarkMode);
   const collapsed = forceExpanded ? false : isSidebarCollapsed;
   const navRef = useRef<HTMLDivElement>(null);
 
@@ -76,7 +80,7 @@ export const SideNav: React.FC<SideNavProps> = ({ forceExpanded = false, onNavig
             onNavigate?.();
           }
         }}
-        style={{ height: '100%', borderRight: 'none' }}
+        style={{ flex: 1, minHeight: 0, height: 'auto', borderRight: 'none' }}
         header={{
           logo: collapsed ? (
             <Tooltip content="XiaoCan Assistant" position="right">
@@ -113,6 +117,17 @@ export const SideNav: React.FC<SideNavProps> = ({ forceExpanded = false, onNavig
         }}
         items={navItems}
       />
+      <div className={`side-theme-toggle shrink-0 flex items-center ${collapsed ? 'justify-center px-1' : 'justify-end px-3'} py-2`}>
+        <Tooltip content={isDarkMode ? '切换为亮色主题' : '切换为暗黑主题'} position={collapsed ? 'right' : 'top'}>
+          <Button
+            theme="borderless"
+            icon={isDarkMode ? <IconSun size="large" /> : <IconMoon size="large" />}
+            onClick={() => setDarkMode(!isDarkMode)}
+            className="text-semi-color-text-2 hover:bg-semi-color-fill-0 transition-colors"
+            aria-label={isDarkMode ? '切换为亮色主题' : '切换为暗黑主题'}
+          />
+        </Tooltip>
+      </div>
     </div>
   );
 };

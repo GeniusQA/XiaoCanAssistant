@@ -63,6 +63,17 @@ const cleanEmoji = (text?: string): string => {
   return text.replace(/[\u{1F000}-\u{1FFFF}]|[\u{2600}-\u{27BF}]|[\u{2300}-\u{23FF}]|[\u{2B50}-\u{2B55}]|[\u{FE00}-\u{FE0F}]|[\u{200D}]/gu, '').trim();
 };
 
+const isRebateCouponCard = (item: any): boolean => {
+  if (!item || !Number(item.id || item.user_card_id || 0)) return false;
+  const card = item.card || {};
+  const name = String(card.name || item.name || '');
+  const desc = String(card.desc || item.desc || '');
+  if (/超前|延时|单号修改|免审|饭票|探店/.test(name)) return false;
+  const expire = Number(item.expire_time || card.expire_time || 0);
+  if (expire > 0 && expire <= Date.now() / 1000) return false;
+  return /返利券|额外返/.test(name) || /返利券/.test(desc);
+};
+
 interface StoreNameCellProps {
   name?: string;
   maxWidth?: string | number;
@@ -600,6 +611,7 @@ export const StoreSniping: React.FC = () => {
   const [nameMonitorInitialIcon, setNameMonitorInitialIcon] = useState('');
   const [editingMonitorId, setEditingMonitorId] = useState<number | null>(null);
   const [nameMonitorInitialValues, setNameMonitorInitialValues] = useState<Record<string, any> | null>(null);
+  const [officialCategories, setOfficialCategories] = useState<string[]>([]);
 
   // 同店双返利状态
   const [dualStores, setDualStores] = useState<StoreItem[]>([]);
@@ -1567,12 +1579,20 @@ export const StoreSniping: React.FC = () => {
       const rpMode = values.redpack_mode ?? 0;
       let chosenRpId = '';
       let chosenRpName = '';
-      if (rpMode === 1 && values.redpack_id) {
-        chosenRpId = String(values.redpack_id);
-        const found = (assetDetail?.redpacks || []).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
-        if (found) {
-          chosenRpName = found.name || (found as any).title || '';
+      let chosenCardId = '';
+      let chosenCardName = '';
+      if (rpMode === 1) {
+        if (values.redpack_id) {
+          chosenRpId = String(values.redpack_id);
+          const found = (assetDetail?.redpacks || []).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
+          if (found) chosenRpName = found.name || (found as any).title || '';
         }
+        if (values.rebate_card_id) {
+          chosenCardId = String(values.rebate_card_id);
+          const foundCard = (assetDetail?.cards || []).find((c: any) => String(c.id || '') === chosenCardId && isRebateCouponCard(c));
+          if (foundCard) chosenCardName = foundCard.card?.name || (foundCard as any).name || `返利券#${chosenCardId}`;
+        }
+        if (!chosenRpId && !chosenCardId) throw new Error('请选择指定红包或返利券');
       }
 
       await api.createAppointment({
@@ -1594,7 +1614,9 @@ export const StoreSniping: React.FC = () => {
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
         redpack_name: chosenRpName,
-        auto_use_best_vip_card: true,
+        rebate_card_id: chosenCardId,
+        rebate_card_name: chosenCardName,
+        auto_use_best_vip_card: rpMode !== 2,
         use_advance_card: values.use_advance_card ? 1 : 0
       });
 
@@ -1622,6 +1644,9 @@ export const StoreSniping: React.FC = () => {
     setNameMonitorInitialValues(null);
     setNameMonitorInitialKeyword(kw || searchKeyword || '');
     setNameMonitorInitialIcon(icon || '');
+    void api.getStoreCategories(currentAccountKey).then((res) => {
+      if (res.ok) setOfficialCategories(res.categories || []);
+    }).catch(() => {});
     setNameMonitorVisible(true);
   }, [currentAccountKey, searchKeyword, activeLocation, openLocationModal]);
 
@@ -1652,12 +1677,18 @@ export const StoreSniping: React.FC = () => {
       min_rebate_price: Number(row.min_rebate_price || 0),
       min_rebate_gap: Number(row.min_rebate_gap || 0),
       min_rebate_rate: Number(row.min_rebate_rate || 0),
+      high_rebate_only: Boolean(row.high_rebate_only),
+      store_category: String(row.store_category || '')
+        .split(/[,，;；]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
       timeout_sec: timeoutSecFromUntilTime(row.until_time),
       until_time: row.until_time || '',
       check_interval: Number(row.check_interval || 10),
       auto_stop_on_success: row.auto_stop_on_success !== 0,
       redpack_mode: Number(row.redpack_mode ?? 0),
       redpack_id: row.redpack_id || '',
+      rebate_card_id: row.rebate_card_id || '',
       use_advance_card: Boolean(row.use_advance_card),
     });
     setNameMonitorInitialKeyword(row.keyword || row.store_name || '');
@@ -1692,12 +1723,20 @@ export const StoreSniping: React.FC = () => {
       const rpMode = values.redpack_mode ?? 0;
       let chosenRpId = '';
       let chosenRpName = '';
-      if (rpMode === 1 && values.redpack_id) {
-        chosenRpId = String(values.redpack_id);
-        const found = (assetDetail?.redpacks || []).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
-        if (found) {
-          chosenRpName = found.name || (found as any).title || '';
+      let chosenCardId = '';
+      let chosenCardName = '';
+      if (rpMode === 1) {
+        if (values.redpack_id) {
+          chosenRpId = String(values.redpack_id);
+          const found = (assetDetail?.redpacks || []).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
+          if (found) chosenRpName = found.name || (found as any).title || '';
         }
+        if (values.rebate_card_id) {
+          chosenCardId = String(values.rebate_card_id);
+          const foundCard = (assetDetail?.cards || []).find((c: any) => String(c.id || '') === chosenCardId && isRebateCouponCard(c));
+          if (foundCard) chosenCardName = foundCard.card?.name || (foundCard as any).name || `返利券#${chosenCardId}`;
+        }
+        if (!chosenRpId && !chosenCardId) throw new Error('请选择指定红包或返利券');
       }
 
       const timeoutSec = values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200;
@@ -1722,6 +1761,10 @@ export const StoreSniping: React.FC = () => {
         min_rebate_price: minPrice,
         min_rebate_gap: minGap,
         min_rebate_rate: minRate,
+        high_rebate_only: Boolean(values.high_rebate_only),
+        store_category: Array.isArray(values.store_category)
+          ? values.store_category.map((item: any) => String(item).trim()).filter(Boolean).join(',')
+          : String(values.store_category || '').trim(),
         max_order_money: 0,
         auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
         timeout_sec: timeoutSec,
@@ -1730,7 +1773,9 @@ export const StoreSniping: React.FC = () => {
         redpack_mode: rpMode,
         redpack_id: chosenRpId,
         redpack_name: chosenRpName,
-        auto_use_best_vip_card: true,
+        rebate_card_id: chosenCardId,
+        rebate_card_name: chosenCardName,
+        auto_use_best_vip_card: rpMode !== 2,
         use_advance_card: values.use_advance_card ? 1 : 0
       });
 
@@ -2620,6 +2665,8 @@ export const StoreSniping: React.FC = () => {
               </div>
               {isMonitorTask ? (
                 <div className="flex items-center gap-2 mt-1 text-xs text-semi-color-text-2 flex-wrap">
+                  {row?.high_rebate_only ? <span>高返利</span> : null}
+                  {row?.store_category ? <span>分类: {row.store_category}</span> : null}
                   {row?.min_rebate_price ? <span>最低返利: ¥{row.min_rebate_price}</span> : null}
                   {row?.min_rebate_gap ? <span>满返差额: ¥{row.min_rebate_gap}</span> : null}
                   {row?.min_rebate_rate ? <span>最低比例: {row.min_rebate_rate}%</span> : null}
@@ -2711,15 +2758,15 @@ export const StoreSniping: React.FC = () => {
             </div>
             <div>
               {rpMode === 1 ? (
-                <Tooltip content={row.redpack_name || `红包 #${row.redpack_id}`}>
-                  <Tag color="red" size="small" shape="square" className="truncate max-w-[170px]">
-                    指定: {row.redpack_name ? cleanEmoji(row.redpack_name) : `#${row.redpack_id}`}
+                <Tooltip content={`${row.redpack_name || (row.redpack_id ? `红包 #${row.redpack_id}` : '')} ${row.rebate_card_name || (row.rebate_card_id ? `返利券 #${row.rebate_card_id}` : '')}`.trim()}>
+                  <Tag color="red" size="small" shape="square" className="truncate max-w-[220px]">
+                    指定: {row.redpack_name ? cleanEmoji(row.redpack_name) : (row.redpack_id ? `#${row.redpack_id}` : '')}{row.rebate_card_name ? ` / ${cleanEmoji(row.rebate_card_name)}` : (row.rebate_card_id ? ` / 返利券#${row.rebate_card_id}` : '')}
                   </Tag>
                 </Tooltip>
               ) : rpMode === 2 ? (
-                <Tag color="grey" size="small" shape="square">不使用红包</Tag>
+                <Tag color="grey" size="small" shape="square">不使用红包/返利券</Tag>
               ) : (
-                <Tag color="cyan" size="small" shape="square">自动最优红包</Tag>
+                <Tag color="cyan" size="small" shape="square">自动最优红包/返利券</Tag>
               )}
             </div>
           </div>
@@ -3898,12 +3945,12 @@ export const StoreSniping: React.FC = () => {
                         field="redpack_mode"
                         label="红包策略"
                         initValue={0}
-                        helpText="抢单时自动勾选最优红包与返利券；指定红包失效时平滑自愈替换"
+                        helpText="抢单命中时自动勾选最优红包与返利券；指定红包/返利券失效时自动平滑替换"
                         style={{ width: '100%' }}
                       >
-                        <Select.Option value={0}>自动匹配最优红包</Select.Option>
-                        <Select.Option value={1}>指定具体可用红包</Select.Option>
-                        <Select.Option value={2}>不使用红包</Select.Option>
+                        <Select.Option value={0}>自动最优红包/返利券</Select.Option>
+                        <Select.Option value={1}>指定具体可用红包/返利券</Select.Option>
+                        <Select.Option value={2}>不使用红包/返利券</Select.Option>
                       </Form.Select>
                     </Col>
                   </Row>
@@ -3935,25 +3982,24 @@ export const StoreSniping: React.FC = () => {
                       field="redpack_mode"
                       label="红包策略"
                       initValue={0}
-                      helpText="捡漏抢单时使用的红包策略"
+                      helpText="抢单命中时自动勾选最优红包与返利券；指定红包/返利券失效时自动平滑替换"
                       style={{ width: '100%' }}
                     >
-                      <Select.Option value={0}>自动匹配最优红包</Select.Option>
-                      <Select.Option value={1}>指定具体可用红包</Select.Option>
-                      <Select.Option value={2}>不使用红包</Select.Option>
+                      <Select.Option value={0}>自动最优红包/返利券</Select.Option>
+                      <Select.Option value={1}>指定具体可用红包/返利券</Select.Option>
+                      <Select.Option value={2}>不使用红包/返利券</Select.Option>
                     </Form.Select>
                   </Col>
                 </Row>
               )}
 
               {values?.redpack_mode === 1 && (
-                <div className="mt-1">
+                <div className="mt-1 grid grid-cols-1 md:grid-cols-2 gap-3">
                   <Form.Select
                     field="redpack_id"
                     label="选择指定红包"
                     placeholder="请选择要绑定的红包"
-                    rules={[{ required: true, message: '请选择要使用的红包' }]}
-                    helpText="支持防失效自愈保护：开抢前若此红包已核销或过期，系统自动替换为最优红包"
+                    helpText="可为空；若选择，失效时自动替换为最优红包"
                     className="w-full"
                   >
                     {(assetDetail?.redpacks || []).map((rp: any) => {
@@ -3974,6 +4020,32 @@ export const StoreSniping: React.FC = () => {
                               <span className="font-bold text-semi-color-danger">{rReward}</span>
                               {rExpire && <span className="text-semi-color-text-2 text-[11px]">至 {rExpire}</span>}
                             </div>
+                          </div>
+                        </Select.Option>
+                      );
+                    })}
+                  </Form.Select>
+
+                  <Form.Select
+                    field="rebate_card_id"
+                    label="选择指定返利券"
+                    placeholder="请选择要绑定的返利券"
+                    helpText="可为空；若选择，失效时自动替换为最优返利券"
+                    className="w-full"
+                  >
+                    {(assetDetail?.cards || []).filter(isRebateCouponCard).map((card: any) => {
+                      const cId = String(card.id || card.user_card_id || '');
+                      const cName = cleanEmoji(card.card?.name || card.name || '返利券');
+                      const cDesc = cleanEmoji(card.card?.desc || card.desc || '');
+                      const cExpire = card.expire_time ? formatTimestamp(card.expire_time) : '';
+                      return (
+                        <Select.Option key={cId} value={cId}>
+                          <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium text-semi-color-text-0 truncate">{cName}</div>
+                              {cDesc && <div className="text-[11px] text-semi-color-text-2 truncate">{cDesc}</div>}
+                            </div>
+                            {cExpire && <span className="text-[11px] text-semi-color-text-2 shrink-0">至 {cExpire}</span>}
                           </div>
                         </Select.Option>
                       );
@@ -4288,11 +4360,14 @@ export const StoreSniping: React.FC = () => {
             min_rebate_price: 0,
             min_rebate_gap: 0,
             min_rebate_rate: 0,
+            high_rebate_only: false,
+            store_category: [],
             timeout_sec: 7200,
             check_interval: 10,
             auto_stop_on_success: true,
             redpack_mode: 0,
             redpack_id: '',
+            rebate_card_id: '',
             use_advance_card: assetStats.advanceCouponCount > 0,
             ...(nameMonitorInitialValues || {}),
           }}
@@ -4377,45 +4452,73 @@ export const StoreSniping: React.FC = () => {
               <Form.Select
                 field="redpack_mode"
                 label="红包策略"
-                helpText="抢单命中时自动勾选最优红包与返利券；指定红包失效时自动平滑替换"
+                helpText="抢单命中时自动勾选最优红包与返利券；指定红包/返利券失效时自动平滑替换"
                 style={{ width: '100%' }}
               >
-                <Select.Option value={0}>自动最优红包</Select.Option>
-                <Select.Option value={1}>指定具体可用红包</Select.Option>
-                <Select.Option value={2}>不使用红包</Select.Option>
+                <Select.Option value={0}>自动最优红包/返利券</Select.Option>
+                <Select.Option value={1}>指定具体可用红包/返利券</Select.Option>
+                <Select.Option value={2}>不使用红包/返利券</Select.Option>
               </Form.Select>
 
               {values?.redpack_mode === 1 && (
-                <Form.Select
-                  field="redpack_id"
-                  label="选择指定红包"
-                  placeholder="请选择要绑定的红包"
-                  rules={[{ required: true, message: '请选择要使用的红包' }]}
-                  className="w-full"
-                >
-                  {(assetDetail?.redpacks || []).map((rp: any) => {
-                    const rId = String(rp.user_red_pack_id || rp.id || '');
-                    const rName = rp.name || rp.title || '外卖满返红包';
-                    const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
-                    const rReward = `¥${((Number(rawVal) || 0) / 100).toFixed(2)}`;
-                    const thresholdStr = rp.threshold_num ? `满${(rp.threshold_num / 100).toFixed(0)}元可用` : '无门槛';
-                    const rExpire = rp.end_time ? formatTimestamp(rp.end_time) : (rp.expire_time ? formatTimestamp(rp.expire_time) : '');
-                    return (
-                      <Select.Option key={rId} value={rId}>
-                        <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="font-medium text-semi-color-text-0 truncate max-w-[220px]">{cleanEmoji(rName)}</span>
-                            <span className="text-[11px] text-semi-color-text-2 shrink-0">({thresholdStr})</span>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Form.Select
+                    field="redpack_id"
+                    label="选择指定红包"
+                    placeholder="请选择要绑定的红包"
+                    helpText="可为空；若选择，失效时自动替换为最优红包"
+                    className="w-full"
+                  >
+                    {(assetDetail?.redpacks || []).map((rp: any) => {
+                      const rId = String(rp.user_red_pack_id || rp.id || '');
+                      const rName = rp.name || rp.title || '外卖满返红包';
+                      const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
+                      const rReward = `¥${((Number(rawVal) || 0) / 100).toFixed(2)}`;
+                      const thresholdStr = rp.threshold_num ? `满${(rp.threshold_num / 100).toFixed(0)}元可用` : '无门槛';
+                      const rExpire = rp.end_time ? formatTimestamp(rp.end_time) : (rp.expire_time ? formatTimestamp(rp.expire_time) : '');
+                      return (
+                        <Select.Option key={rId} value={rId}>
+                          <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-medium text-semi-color-text-0 truncate max-w-[220px]">{cleanEmoji(rName)}</span>
+                              <span className="text-[11px] text-semi-color-text-2 shrink-0">({thresholdStr})</span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className="font-bold text-semi-color-danger">{rReward}</span>
+                              {rExpire && <span className="text-semi-color-text-2 text-[11px]">至 {rExpire}</span>}
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className="font-bold text-semi-color-danger">{rReward}</span>
-                            {rExpire && <span className="text-semi-color-text-2 text-[11px]">至 {rExpire}</span>}
+                        </Select.Option>
+                      );
+                    })}
+                  </Form.Select>
+
+                  <Form.Select
+                    field="rebate_card_id"
+                    label="选择指定返利券"
+                    placeholder="请选择要绑定的返利券"
+                    helpText="可为空；若选择，失效时自动替换为最优返利券"
+                    className="w-full"
+                  >
+                    {(assetDetail?.cards || []).filter(isRebateCouponCard).map((card: any) => {
+                      const cId = String(card.id || card.user_card_id || '');
+                      const cName = cleanEmoji(card.card?.name || card.name || '返利券');
+                      const cDesc = cleanEmoji(card.card?.desc || card.desc || '');
+                      const cExpire = card.expire_time ? formatTimestamp(card.expire_time) : '';
+                      return (
+                        <Select.Option key={cId} value={cId}>
+                          <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium text-semi-color-text-0 truncate">{cName}</div>
+                              {cDesc && <div className="text-[11px] text-semi-color-text-2 truncate">{cDesc}</div>}
+                            </div>
+                            {cExpire && <span className="text-[11px] text-semi-color-text-2 shrink-0">至 {cExpire}</span>}
                           </div>
-                        </div>
-                      </Select.Option>
-                    );
-                  })}
-                </Form.Select>
+                        </Select.Option>
+                      );
+                    })}
+                  </Form.Select>
+                </div>
               )}
 
               {/* 平台与匹配模式：常规监听不显示店名匹配模式 */}
@@ -4486,6 +4589,29 @@ export const StoreSniping: React.FC = () => {
                     </Form.RadioGroup>
                   </Col>
                 )}
+              </Row>
+
+              <Row gutter={[16, 0]}>
+                <Col xs={24} sm={12}>
+                  <Form.Switch
+                    field="high_rebate_only"
+                    label="高返利"
+                  />
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Select
+                    field="store_category"
+                    label="商家分类"
+                    placeholder="全部分类"
+                    multiple
+                    showClear
+                    style={{ width: '100%' }}
+                  >
+                    {officialCategories.map((category) => (
+                      <Select.Option key={category} value={category}>{category}</Select.Option>
+                    ))}
+                  </Form.Select>
+                </Col>
               </Row>
 
               {/* 返利门槛：按活动方案偏好联动展示 */}

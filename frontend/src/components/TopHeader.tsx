@@ -213,19 +213,20 @@ export const TopHeader: React.FC = () => {
         </Tooltip>
 
         <div className="header-user-actions">
-        <Divider layout="vertical" margin="2px" />
+        <Divider layout="vertical" margin="2px" className="header-theme-divider" />
 
-        {/* 3. 主题模式切换 */}
+        {/* 3. PC端主题模式切换：保持顶栏原位置；移动端由侧边抽屉承载 */}
         <Tooltip content={isDarkMode ? "切换为亮色主题" : "切换为暗黑主题"} position="bottom">
           <Button
             theme="borderless"
             icon={isDarkMode ? <IconSun size="large" /> : <IconMoon size="large" />}
             onClick={() => setDarkMode(!isDarkMode)}
-            className="text-semi-color-text-2 hover:bg-semi-color-fill-0 transition-colors"
+            className="header-theme-toggle text-semi-color-text-2 hover:bg-semi-color-fill-0 transition-colors"
+            aria-label={isDarkMode ? '切换为亮色主题' : '切换为暗黑主题'}
           />
         </Tooltip>
 
-        <Divider layout="vertical" margin="2px" />
+        <Divider layout="vertical" margin="2px" className="header-theme-divider" />
 
         {/* 4. 最右侧账号头像区域：只显示头像，鼠标移入出现切换账号与退出账号 */}
         <Dropdown

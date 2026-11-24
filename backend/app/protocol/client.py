@@ -1093,7 +1093,9 @@ class XiaoCanClient:
         sort: int = 0,
         store_platform: int = 0,
         scene: int = 2,
-        meal_period: int = 3
+        meal_period: int = 3,
+        quick_filters: Optional[List[int]] = None,
+        promotion_category: int = 0
     ) -> Dict[str, Any]:
         """获取外卖霸王餐附近店铺清单 (优先调用官方核心推荐 SilkwormFusion.FusionService.GetFeedPromotions，回落 RecService.GetStorePromotionList)"""
         # 1. 优先调用官方主页核心推荐 (GetFeedPromotions)
@@ -1107,7 +1109,11 @@ class XiaoCanClient:
             "scene": 1,
             "is_show_mt": True,
             "page_pv_id": str(uuid.uuid4()),
-            "app_id": 10
+            "app_id": 10,
+            "promotion_category": int(promotion_category or 0),
+            "meal_period": int(meal_period or 0),
+            "rebate_type": 0,
+            "quick_filters": list(quick_filters or []),
         }
         try:
             res = await self.invoke_rpc(

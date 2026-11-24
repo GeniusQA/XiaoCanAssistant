@@ -131,6 +131,42 @@ def invalidate_worker_cache():
     _last_fetch_active_ts = 0.0
 
 
+def _is_waf_failure(exc: Any, waf_key: str) -> bool:
+    """按当前账号的熔断状态识别风控拦截，避免误用全局聚合状态。"""
+    return (
+        is_waf_blocked(waf_key)
+        or getattr(exc, "code", None) in (403, 429)
+        or "WAF" in str(exc)
+        or "STGW" in str(exc)
+        or "TCaptcha" in str(exc)
+    )
+
+
+def _stop_appointment_on_waf(
+    aid: int,
+    apt: Dict[str, Any],
+    linked_log_id: int,
+    waf_key: str,
+    detail: Optional[Dict[str, Any]] = None,
+    phase: str = "监听",
+) -> None:
+    """风控命中后立即终止任务：继续自旋只会刷新账号级冷却，连累同账号其他任务。"""
+    cooldown = get_waf_cooldown_seconds(waf_key) or 60
+    reason = f"[{time_service.format_now_ms()}] [风控熔断] {format_waf_block_message(cooldown=cooldown, detail=detail)}"
+    outcome = f"官方风控拦截，{phase}任务已自动停止（冷却 {cooldown}s），冷却结束后请手动重启该任务"
+    db.update_appointment(aid, {"status": "failed", "outcome": outcome})
+    invalidate_worker_cache()
+    if linked_log_id > 0:
+        _append_apt_log(
+            aid,
+            linked_log_id,
+            f"{reason}，已自动停止本任务，避免持续请求刷新风控冷却并影响同账号其他任务",
+            sync_db=True,
+            status="error",
+        )
+    logger.warning(f"{phase}任务 #{aid} 命中风控，已自动停止: {outcome}")
+
+
 def _parse_time_today(time_str: str) -> Optional[float]:
     """解析 HH:MM 为今日的标准北京时间时间戳，若格式为 YYYY-MM-DD HH:MM:SS 或纯数字时间戳则直接解析"""
     if not time_str or not str(time_str).strip():
@@ -209,10 +245,12 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
         t_step1 = time_service.format_now_ms()
         log_steps.append(f"[{t_step1}] 步骤 1/4: 账号鉴权及定位核验 - 账号【{nickname}】，定位经纬度 ({lat:.5f}, {lon:.5f})，城市代码 {city_code}")
         # 红包使用策略解析与防失效自愈降级 (优先使用提前 25 秒预加载并锁定的红包，消除开抢时的网络延时)
-        redpack_id = apt.get("cached_redpack_id")
-        redpack_mode = apt.get("redpack_mode", 0)
+        redpack_mode = int(apt.get("redpack_mode") or 0)
+        redpack_id = None if redpack_mode == 2 else apt.get("cached_redpack_id")
         rp_desc = "未使用"
-        if redpack_id is not None:
+        if redpack_mode == 2:
+            rp_desc = "用户设置不使用红包/返利券"
+        elif redpack_id is not None:
             rp_desc = f"预锁定红包 #{redpack_id}"
         elif redpack_mode == 0:
             # 自动使用最高额度红包 (对齐微信小程序/省心版)
@@ -275,25 +313,47 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                         rp_desc = f"预设红包 #{specified_rp_id} 已在移动端使用，当前无其他可用红包，自愈降级为无红包模式"
             else:
                 rp_desc = "未指定有效红包ID，以无红包模式发起"
-        else:
-            rp_desc = "用户设置不使用红包"
+        elif redpack_mode == 2:
+            rp_desc = "用户设置不使用红包/返利券"
 
         # 官方APP默认会同时勾选最优活动返利红包与会员返利券；返利券/额外返券来自用户自有卡券。
-        vip_promotion_card_id = _as_int(apt.get("vip_promotion_card_id"), 0) or None
-        vip_extra_silk_card_id = _as_int(apt.get("vip_extra_silk_card_id"), 0) or None
-        if apt.get("auto_use_best_vip_card", True) and not (vip_promotion_card_id and vip_extra_silk_card_id):
+        vip_promotion_card_id = None
+        vip_extra_silk_card_id = None
+        card_desc = ""
+        specified_card_id = _as_int(apt.get("rebate_card_id") or apt.get("vip_promotion_card_id"), 0) or None
+        auto_use_vip_card = bool(apt.get("auto_use_best_vip_card", True))
+        if redpack_mode == 2:
+            card_desc = "用户设置不使用返利券"
+        elif auto_use_vip_card or specified_card_id:
             try:
                 card_res = await client.get_user_card_list(
                     token=token, silk_id=silk_id, user_id=user_id,
                     city_code=city_code, status=0, offset=0, number=100
                 )
-                best_promo, best_extra, best_desc = _pick_vip_cards(list(card_res.get("list") or []))
-                vip_promotion_card_id = vip_promotion_card_id or best_promo
-                vip_extra_silk_card_id = vip_extra_silk_card_id or best_extra
-                if best_desc:
-                    log_steps.append(f"[{time_service.format_now_ms()}] 资产策略: 官方APP默认最优组合 - {best_desc}")
+                cards = list(card_res.get("list") or [])
+                best_promo, best_extra, best_desc = _pick_vip_cards(cards)
+                if specified_card_id:
+                    spec_card = next((item for item in cards if _as_int(item.get("id") or item.get("user_card_id"), 0) == specified_card_id and _is_card_valid(item)), None)
+                    if spec_card:
+                        vip_promotion_card_id = specified_card_id
+                        card_desc = f"指定返利券 #{specified_card_id}"
+                        vip_extra_silk_card_id = best_extra
+                    else:
+                        logger.warning(f"预约任务 #{aid} 指定返利券 #{specified_card_id} 已失效，自动平滑替换为最优返利券")
+                        vip_promotion_card_id = best_promo
+                        vip_extra_silk_card_id = best_extra
+                        card_desc = f"指定返利券 #{specified_card_id} 失效，已平滑替换 - {best_desc}"
+                else:
+                    vip_promotion_card_id = best_promo
+                    vip_extra_silk_card_id = best_extra
+                    card_desc = best_desc
+                if card_desc:
+                    log_steps.append(f"[{time_service.format_now_ms()}] 资产策略: {card_desc}")
             except Exception as card_err:
-                logger.info(f"自动选择抢单返利券跳过: {card_err}")
+                logger.info(f"选择抢单返利券跳过: {card_err}")
+                if specified_card_id:
+                    vip_promotion_card_id = specified_card_id
+                    card_desc = f"指定返利券 #{specified_card_id}（有效性核验跳过）"
 
         t_step2 = time_service.format_now_ms()
         log_steps.append(f"[{t_step2}] 步骤 2/4: 资产策略决策 - {rp_desc}；返利券#{vip_promotion_card_id or '无'}；额外返券#{vip_extra_silk_card_id or '无'}")
@@ -598,12 +658,9 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             elif last_checked and (now_ts - last_checked) < interval:
                 continue
 
-            # 如果当前处于 WAF 熔断冷却期，主动跳过嗅探，避免延长封锁
+            # 风控冷却期内直接终止监听任务：继续自旋会持续占用任务槽并连累同账号后续任务
             if is_waf_blocked(_waf_key):
-                remain = get_waf_cooldown_seconds(_waf_key)
-                if (int(now_ts) % 30) < 2 and linked_log_id > 0:
-                    t_now = time_service.format_now_ms()
-                    _append_apt_log(aid, linked_log_id, f"[{t_now}] [风控熔断守护] {format_waf_block_message(cooldown=remain)}，已自动暂停嗅探以避免触发升级冷却", sync_db=True, status="running")
+                _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="店名监听")
                 continue
 
             apt["last_checked_at"] = now_str
@@ -632,6 +689,8 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             min_rebate_gap = float(apt.get("min_rebate_gap") or 0.0) if rebate_mode_filter != "percent" else 0.0
             min_rebate_rate = float(apt.get("min_rebate_rate") or 0.0)
             max_order_money = float(apt.get("max_order_money") or 0.0)
+            high_rebate_only = bool(apt.get("high_rebate_only"))
+            store_category = str(apt.get("store_category") or "").strip()
             auto_stop = int(apt.get("auto_stop_on_success") if apt.get("auto_stop_on_success") is not None else 1)
 
             token = account.get("token")
@@ -673,6 +732,23 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         )
                     )
 
+                feed_res = {}
+                if high_rebate_only or store_category:
+                    try:
+                        feed_res = await client.get_store_list(
+                            city_code=city_code,
+                            longitude=lon,
+                            latitude=lat,
+                            offset=0,
+                            limit=100,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                            quick_filters=[4] if high_rebate_only else [],
+                        )
+                    except Exception as feed_err:
+                        logger.debug(f"官方Feed筛选调用跳过: {feed_err}")
+
                 results = await asyncio.gather(*search_tasks, return_exceptions=True)
                 search_res = results[0] if len(results) > 0 and not isinstance(results[0], Exception) else {}
                 sj_res = results[1] if has_sj and len(results) > 1 and not isinstance(results[1], Exception) else {}
@@ -683,6 +759,10 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 for p in raw_proms:
                     extracted = _extract_all_promos_from_raw(p, is_search=True, user_lat=float(lat), user_lon=float(lon))
                     candidates.extend(extracted)
+                if feed_res:
+                    for p in feed_res.get("feed_items") or []:
+                        extracted = _extract_all_promos_from_raw(p, is_search=False, user_lat=float(lat), user_lon=float(lon))
+                        candidates.extend(extracted)
 
                 # 解析美团赏金按比例活动
                 if isinstance(sj_res, dict):
@@ -745,6 +825,28 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     c_rebate_rate = float(c.get("rebate_rate") or 0.0)
                     if min_rebate_rate > 0 and c_rebate_rate < min_rebate_rate:
                         continue
+
+                    # 官方Feed分类：支持多选，任一分类命中即可
+                    if store_category:
+                        selected_categories = [
+                            item.strip()
+                            for item in re.split(r'[,，;；]', str(store_category))
+                            if item.strip()
+                        ]
+                        c_store_category = str(c.get("store_category") or "")
+                        if not any(item in c_store_category for item in selected_categories):
+                            continue
+
+                    # 官方Feed高返利本地兜底：返利比例≥75% 或满返差额≤5
+                    if high_rebate_only:
+                        c_rate = float(c.get("rebate_rate") or 0.0)
+                        c_gap = float(c.get("rebate_gap") or 0.0)
+                        c_rebate_value = float(c.get("rebate_price") or 0.0)
+                        c_threshold = float(c.get("order_money") or 0.0)
+                        ratio_hit = c_rate >= 75 or (c_threshold > 0 and c_rebate_value / c_threshold >= 0.75)
+                        gap_hit = c_rtype == "fixed" and c_gap <= 5
+                        if not (ratio_hit or gap_hit):
+                            continue
 
                     # 6. 最高起送/门槛金额
                     c_order_money = float(c.get("order_money") or 0.0)
@@ -856,6 +958,9 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     else:
                         fail_msg = res.get("message") or "名额被抢占或网络响应延迟"
                         logger.warning(f"{monitor_label} #{aid} 抢单尝试未成功: {fail_msg}")
+                        if res.get("code") in (403, 429) or "STGW" in str(fail_msg) or "WAF" in str(fail_msg):
+                            _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="店名监听抢单")
+                            continue
                         if res.get("code") == 401 or "401" in str(fail_msg):
                             db.update_appointment(aid, {"status": "error", "outcome": fail_msg})
                             invalidate_worker_cache()
@@ -905,15 +1010,10 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     )
                     continue
 
-                is_waf = is_waf_blocked() or (getattr(se, "code", None) in (403, 429)) or ("WAF" in str(se)) or ("STGW" in str(se))
-                if is_waf:
-                    cooldown = get_waf_cooldown_seconds() or 60
-                    future_time = datetime.fromtimestamp(now_ts + cooldown).strftime("%Y-%m-%d %H:%M:%S")
-                    db.update_appointment(aid, {"last_checked_at": future_time})
-                    if linked_log_id > 0:
-                        t_err = time_service.format_now_ms()
-                        detail_raw = (getattr(se, "raw", None) or {}).get("detail") if hasattr(se, "raw") else None
-                        _append_apt_log(aid, linked_log_id, f"[{t_err}] [风控熔断] {format_waf_block_message(cooldown=cooldown, detail=detail_raw)}", sync_db=True, status="running")
+                if _is_waf_failure(se, _waf_key):
+                    detail_raw = (getattr(se, "raw", None) or {}).get("detail") if hasattr(se, "raw") else None
+                    _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, detail=detail_raw, phase="店名监听")
+                    continue
                 else:
                     if linked_log_id > 0:
                         t_err = time_service.format_now_ms()
@@ -948,17 +1048,42 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             elif last_checked and (now_ts - last_checked) < interval:
                 continue
 
-            # 如果当前处于 WAF 熔断冷却期，主动跳过库存查询，避免延长封锁
+            # 风控冷却期内直接终止名额监听任务，避免任务悬挂并连累同账号后续任务
             if is_waf_blocked(_waf_key):
-                remain = get_waf_cooldown_seconds(_waf_key)
-                if (int(now_ts) % 30) < 2 and linked_log_id > 0:
-                    t_now = time_service.format_now_ms()
-                    _append_apt_log(aid, linked_log_id, f"[{t_now}] [风控熔断守护] {format_waf_block_message(cooldown=remain)}，已自动暂停库存轮询以避免触发升级冷却", sync_db=True, status="running")
+                _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="名额监听")
                 continue
 
             # 更新最后检查时间戳
             apt["last_checked_at"] = now_str
             db.update_appointment(aid, {"last_checked_at": now_str})
+
+            high_rebate_only = bool(apt.get("high_rebate_only"))
+            store_category = str(apt.get("store_category") or "").strip()
+            if high_rebate_only or store_category:
+                detail = await client.get_store_promotion_detail(
+                    promotion_id=apt["promotion_id"],
+                    token=account["token"],
+                    silk_id=account.get("silk_id"),
+                    user_id=account.get("user_id"),
+                    city_code=int(account["city_code"]),
+                    store_name=str(apt.get("store_name") or ""),
+                    latitude=float(account["latitude"]),
+                    longitude=float(account["longitude"])
+                )
+                pdetail = detail.get("promotion_detail") or {}
+                category_text = str(pdetail.get("xc_category") or "")
+                selected_categories = [
+                    item.strip()
+                    for item in re.split(r'[,，;；]', store_category)
+                    if item.strip()
+                ]
+                if selected_categories and not any(item in category_text for item in selected_categories):
+                    continue
+                if high_rebate_only:
+                    order_money = float(pdetail.get("order_money") or 0) / 100
+                    rebate = float(pdetail.get("user_rebate") or pdetail.get("discount_amount") or 0) / 100
+                    if order_money <= 0 or rebate / order_money < 0.75:
+                        continue
 
             # 3. 查验最新实时库存
             _apt_poll_counters[aid] = _apt_poll_counters.get(aid, 0) + 1
@@ -1024,7 +1149,11 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                             _append_apt_log(aid, linked_log_id, fire_str, sync_db=True, status="running")
                         res = await execute_grab_for_appointment(apt, account, advance=is_adv, action_source="store_monitor")
                         if not res["ok"]:
-                            logger.warning(f"监听捕获后抢单失败: {res['message']}，继续保持监听")
+                            fail_msg = res.get("message") or "抢单失败"
+                            logger.warning(f"监听捕获后抢单失败: {fail_msg}")
+                            if res.get("code") in (403, 429) or "STGW" in str(fail_msg) or "WAF" in str(fail_msg):
+                                _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="名额监听抢单")
+                                continue
                     else:
                         wait_str = f"[{t_now}] 第 {poll_cnt} 次名额检测: 发现剩余库存 {target_left} 份，但{wait_reason}，静默蹲守中..."
                         logger.info(f"监听任务 #{aid} {wait_str}")
@@ -1032,15 +1161,9 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                             _append_apt_log(aid, linked_log_id, wait_str, sync_db=(poll_cnt == 1 or poll_cnt % 3 == 0 or is_on_minute_probe), status="running")
             except Exception as e:
                 logger.debug(f"轮询活动实时库存异常 (非致命): {e}")
-                is_waf = is_waf_blocked() or (getattr(e, "code", None) in (403, 429)) or ("WAF" in str(e)) or ("STGW" in str(e))
-                if is_waf:
-                    cooldown = get_waf_cooldown_seconds() or 60
-                    future_time = datetime.fromtimestamp(now_ts + cooldown).strftime("%Y-%m-%d %H:%M:%S")
-                    db.update_appointment(aid, {"last_checked_at": future_time})
-                    if linked_log_id > 0:
-                        t_err = time_service.format_now_ms()
-                        detail_raw = (getattr(e, "raw", None) or {}).get("detail") if hasattr(e, "raw") else None
-                        _append_apt_log(aid, linked_log_id, f"[{t_err}] [风控熔断] {format_waf_block_message(cooldown=cooldown, detail=detail_raw)}", sync_db=True, status="running")
+                if _is_waf_failure(e, _waf_key):
+                    detail_raw = (getattr(e, "raw", None) or {}).get("detail") if hasattr(e, "raw") else None
+                    _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, detail=detail_raw, phase="名额监听")
 
         # ---------------- 分支三：倒计时预约任务 (status in 'scheduled', 'primed', 'pending') ---------------- #
         elif status in ("scheduled", "primed", "pending"):
@@ -1124,6 +1247,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 if linked_log_id > 0:
                     _append_apt_log(aid, linked_log_id, f"[{t_now}] 预定开抢时刻到达 (提前量 {early_sec*1000:.0f}ms, {adv_log})，全速发射抢单报文！", sync_db=True, status="running")
                 grab_ok = False
+                waf_aborted = False
                 last_msg = "抢单未生效"
                 for try_idx in range(1, 4):
                     ts_fmt = time_service.format_now_ms()
@@ -1135,10 +1259,16 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     else:
                         last_msg = res.get("message") or "名额已满或尚未开仓"
                         logger.warning(f"[{ts_fmt}] 任务 #{aid} 第{try_idx}次抢单提示: {last_msg}")
+                        if res.get("code") in (403, 429) or "STGW" in str(last_msg) or "WAF" in str(last_msg):
+                            _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="预约抢单")
+                            waf_aborted = True
+                            break
                         if res.get("code") in (40003, 40004, 40037, 40038, 40039, 40040):
                             break
                     await asyncio.sleep(0.06)
 
+                if waf_aborted:
+                    continue
                 if not grab_ok:
                     until_str = apt.get("until_time")
                     if until_str:

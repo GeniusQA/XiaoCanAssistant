@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, Suspense, lazy } from 'react';
-import { Layout, SideSheet, Tooltip } from '@douyinfe/semi-ui';
+import { Layout, SideSheet, Toast, Tooltip } from '@douyinfe/semi-ui';
 import {
   IconChevronLeft,
   IconChevronRight,
@@ -62,21 +62,42 @@ export const App: React.FC = () => {
   useEffect(() => {
     sessionStorage.removeItem('chunk_retry_reloaded');
 
-    // 移动端设备凭证校验：PC 端注销后即时踢下线；启动与每 30 秒各校验一次
+    // 手机本地 origin 一次性接管 PC 快照：必须先于设备凭证校验和账户加载。
+    const handoffCode = new URLSearchParams(window.location.search).get('device_sync_code');
+    if (handoffCode) {
+      void api.consumeDeviceSyncHandoff(handoffCode).then((res) => {
+        if (res.ok) {
+          const local = res.local_state || {};
+          Object.keys(local).forEach((key) => {
+            if (!key.startsWith('xiaocan_')) return;
+            localStorage.setItem(key, typeof local[key] === 'string' ? local[key] : JSON.stringify(local[key]));
+          });
+          if (res.device_token) localStorage.setItem('xiaocan_device_token', res.device_token);
+          if (res.device_id) localStorage.setItem('xiaocan_device_id', res.device_id);
+          const cleanUrl = window.location.pathname + window.location.hash;
+          window.location.replace(cleanUrl);
+        }
+      }).catch(() => { /* 交接失败时保留现有本地状态 */ });
+      return;
+    }
+
+    // 设备授权状态校验：注销仅提示，不删除已完成的一次性同步数据
+    let authWarningShown = false;
+    let sessionTimer = 0;
     const verifyDeviceSession = () => {
       const deviceToken = localStorage.getItem('xiaocan_device_token');
-      if (!deviceToken) return;
+      if (!deviceToken || authWarningShown) return;
       void api.checkDeviceSession(deviceToken).then((res) => {
-        if (!res.ok) {
-          Object.keys(localStorage)
-            .filter((k) => k.startsWith('xiaocan_'))
-            .forEach((k) => localStorage.removeItem(k));
-          window.location.reload();
+        if (!res.ok && res.status === 'revoked') {
+          authWarningShown = true;
+          window.clearInterval(sessionTimer);
+          const name = res.device_name || '对端设备';
+          Toast.error(`${name}已取消设备协同授权`);
         }
       }).catch(() => { /* 网络异常时允许使用已缓存数据，下次校验再处理 */ });
     };
     verifyDeviceSession();
-    const sessionTimer = window.setInterval(verifyDeviceSession, 30000);
+    sessionTimer = window.setInterval(verifyDeviceSession, 30000);
 
     loadAccounts();
     loadUserInfo();
@@ -279,12 +300,13 @@ export const App: React.FC = () => {
         <img src="/logo.png" alt="XiaoCan Assistant" className="w-6 h-6 object-contain rounded-md" />
       </button>
       <SideSheet
-        title="功能导航"
         visible={mobileNavOpen}
         placement="left"
         width="78vw"
         className="mobile-nav-drawer"
         footer={null}
+        closable={false}
+        maskClosable
         onCancel={() => setMobileNavOpen(false)}
       >
         <SideNav forceExpanded onNavigate={() => setMobileNavOpen(false)} />

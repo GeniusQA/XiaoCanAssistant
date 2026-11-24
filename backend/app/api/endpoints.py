@@ -10,6 +10,7 @@ import re
 import math
 import json
 import urllib.request
+from urllib.parse import quote
 import logging
 import asyncio
 import random
@@ -2268,6 +2269,13 @@ def _parse_store_promotion_item(
 
     same_group_id = int(p.get("same_group_id") or 0)
     if_use_red_pack = bool(p.get("if_use_red_pack", True))
+    store_category = str(
+        p.get("xc_category")
+        or store_obj.get("xc_category")
+        or p.get("store_category")
+        or store_obj.get("store_category")
+        or ""
+    ).strip()
     raw_addr_val = (
         store_obj.get("address") or 
         store_obj.get("address_detail") or 
@@ -2318,6 +2326,7 @@ def _parse_store_promotion_item(
         "days_order_limit": days_order_limit,
         "same_group_id": same_group_id,
         "if_use_red_pack": if_use_red_pack,
+        "store_category": store_category,
         "address": address
     }
 
@@ -2490,6 +2499,55 @@ def _get_store_branch_key(splat: str, name: str) -> str:
     return f"{splat or 'meituan'}_{core}"
 
 
+ACTIVITY_QUICK_FILTERS = {
+    "specified_dish": 6,
+    "repurchase": 8,
+}
+
+
+def _activity_quick_filter(activity_requirement: Optional[str]) -> List[int]:
+    return [ACTIVITY_QUICK_FILTERS[activity_requirement]] if activity_requirement in ACTIVITY_QUICK_FILTERS else []
+
+
+@router.get("/store/categories")
+async def get_store_categories(account_key: Optional[str] = Query(None)):
+    """读取官方 GetHomeQuickFilters 中的完整商家分类配置。"""
+    account_key = _safe_val(account_key, None)
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {"ok": True, "categories": [], "message": "当前未登录或未托管小蚕账号"}
+    target_acc = db.get_account_by_key(account_key) if account_key else None
+    if not target_acc:
+        target_acc = accounts[0] if accounts else None
+    if not target_acc or not target_acc.get("token"):
+        return {"ok": True, "categories": [], "message": "当前账号凭据已失效或已退出"}
+
+    try:
+        res = await client.invoke_rpc(
+            server_name="SilkwormFusion",
+            method_name="FusionService.GetHomeQuickFilters",
+            body={"silk_id": int(target_acc.get("silk_id") or 0)},
+            city_code=int(target_acc["city_code"]),
+            token=target_acc["token"],
+            user_id=target_acc.get("user_id"),
+            silk_id=target_acc.get("silk_id"),
+        )
+        sub_types = res.get("store_category_sub_types") if isinstance(res, dict) else []
+        rows = []
+        for item in sub_types or []:
+            if not isinstance(item, dict) or item.get("visible") is False:
+                continue
+            value = str(item.get("value") or "").strip()
+            if not value or value == "全部":
+                continue
+            rows.append((int(item.get("sort") or 9999), value))
+        rows.sort(key=lambda item: item[0])
+        return {"ok": True, "categories": [value for _, value in rows]}
+    except Exception as e:
+        logger.warning(f"获取官方商家分类失败: {e}")
+        return {"ok": False, "categories": [], "message": "获取官方商家分类失败"}
+
+
 @router.get("/store/list")
 async def get_stores(
     city_code: Optional[int] = Query(None),
@@ -2520,6 +2578,7 @@ async def get_stores(
     platform = _safe_val(platform, "all")
     condition = _safe_val(condition, "all")
     activity_requirement = _safe_val(activity_requirement, "all")
+    activity_quick_filters = _activity_quick_filter(activity_requirement)
     rebate_type = _safe_val(rebate_type, "all")
     sort_by = _safe_val(sort_by, "default")
     offset = int(_safe_val(offset, 0))
@@ -2647,7 +2706,8 @@ async def get_stores(
                     limit=35,
                     token=token,
                     silk_id=silk_id,
-                    user_id=user_id
+                    user_id=user_id,
+                    quick_filters=activity_quick_filters,
                 )
                 for foff in feed_offsets
             ]
@@ -2781,8 +2841,59 @@ async def get_stores(
         total_raw_count = 0
         step = 35
 
+        # 子分支 0：活动要求走官方快捷筛选专用通道，不混入未筛选的赏金数据
+        if activity_quick_filters:
+            source = "official_quick_filter"
+            try:
+                # 对齐官方 App 请求：meal_period=0、number=20、quick_filters=[6]/[8]
+                offsets = [offset, offset + 20]
+                feed_tasks = [
+                    client.get_store_list(
+                        city_code=city_code,
+                        longitude=str(lon),
+                        latitude=str(lat),
+                        offset=off,
+                        limit=20,
+                        token=token,
+                        silk_id=silk_id,
+                        user_id=user_id,
+                        sort=official_sort,
+                        meal_period=0,
+                        quick_filters=activity_quick_filters,
+                    )
+                    for off in offsets
+                ]
+                batch_results = await asyncio.gather(*feed_tasks, return_exceptions=True)
+                batch_errors = []
+                for br in batch_results:
+                    if isinstance(br, dict):
+                        feed_items = br.get("feed_items") or br.get("items") or br.get("promotion_list") or []
+                        total_raw_count += len(feed_items)
+                        for p in feed_items:
+                            promos = _extract_all_promos_from_raw(p, is_search=False, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
+                            for item in promos:
+                                item["official_quick_filtered"] = True
+                                dedup_key = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
+                                if dedup_key not in seen_promotions:
+                                    seen_promotions.add(dedup_key)
+                                    stores.append(item)
+                    elif isinstance(br, Exception):
+                        logger.warning(f"官方活动快捷筛选批次异常: {br}")
+                        batch_errors.append(str(br))
+
+                if not stores and batch_errors and len(batch_errors) >= len(feed_tasks):
+                    logger.error(f"官方活动快捷筛选全部失败: {batch_errors[0]}")
+                    return {"ok": False, "stores": [], "total": 0, "source": source, "quick_filters": activity_quick_filters, "has_more": False, "error": f"小蚕官方接口调用异常: {batch_errors[0]}"}
+
+                has_more = total_raw_count >= (20 * len(offsets))
+                next_offset = offset + (20 * len(offsets))
+                logger.info(f"官方活动快捷筛选返回: filters={activity_quick_filters}, offset={offset}, raw={total_raw_count}, stores={len(stores)}")
+            except Exception as e:
+                logger.error(f"官方活动快捷筛选失败: {e}")
+                return {"ok": False, "stores": [], "total": 0, "source": source, "quick_filters": activity_quick_filters, "has_more": False, "error": f"小蚕官方接口调用异常: {e}"}
+
         # 子分支 A：用户明确选择「按比例返」(rebate_type == 'percent' 或 'ratio')，且平台为全部或美团
-        if rebate_type in ("percent", "ratio") and (platform in ("all", "meituan")):
+        elif rebate_type in ("percent", "ratio") and (platform in ("all", "meituan")):
             source = "shangjin_stream"
             try:
                 # 官方美团赏金接口每次返回 5 个商户，连续流式拉取 4 批维持单次 20 个商户的体验
@@ -2800,7 +2911,8 @@ async def get_stores(
                     token=token,
                     silk_id=silk_id,
                     user_id=user_id,
-                    sort=official_sort
+                    sort=official_sort,
+                    quick_filters=activity_quick_filters,
                 ) if offset == 0 else None
 
                 for b_idx in range(shangjin_batches):
@@ -2877,7 +2989,8 @@ async def get_stores(
                         token=token,
                         silk_id=silk_id,
                         user_id=user_id,
-                        sort=official_sort
+                        sort=official_sort,
+                        quick_filters=activity_quick_filters,
                     )
                     for off in offsets
                 ]
@@ -2987,7 +3100,8 @@ async def get_stores(
                         token=token,
                         silk_id=silk_id,
                         user_id=user_id,
-                        sort=official_sort
+                        sort=official_sort,
+                        quick_filters=activity_quick_filters,
                     )
                     for off in offsets
                 ]
@@ -3267,8 +3381,11 @@ async def get_stores(
                     s["start_time"] = best_p["start_time"]
                     s["end_time"] = best_p["end_time"]
 
-    # 活动要求过滤：指定餐品 / 复购专享（全部不过滤）
-    if activity_requirement in ("specified_dish", "repurchase"):
+    # 活动要求过滤：官方 quick_filters 已在数据源完成筛选，这里仅作非官方数据源的兜底
+    if (
+        activity_requirement in ("specified_dish", "repurchase")
+        and source != "official_quick_filter"
+    ):
         def _store_activity_tags(store: Dict[str, Any]) -> List[str]:
             tags = list(store.get("activity_tags") or [])
             if not tags:
@@ -3300,6 +3417,7 @@ async def get_stores(
         "total": len(merged_stores),
         "raw_total": len(stores),
         "source": source,
+        "quick_filters": activity_quick_filters,
         "has_more": has_more,
         "next_offset": next_offset,
         "page_pv_id": current_pv_id,
@@ -4344,7 +4462,7 @@ async def create_appointment(data: Dict[str, Any] = Body(...)):
     use_adv = bool(data.get("use_advance_card"))
     adv_note = "【使用超前券·提前30分钟开抢】" if use_adv else ""
     rp_mode = _normalize_redpack_mode(data.get("redpack_mode", 0))
-    rp_note = f"指定红包 #{data.get('redpack_id')} ({data.get('redpack_name', '')})" if rp_mode == 1 else ("不使用红包" if rp_mode == 2 else "自动最优红包")
+    rp_note = f"指定红包/返利券 (红包: {data.get('redpack_name') or data.get('redpack_id') or '无'}, 返利券: {data.get('rebate_card_name') or data.get('rebate_card_id') or '无'})" if rp_mode == 1 else ("不使用红包/返利券" if rp_mode == 2 else "自动最优红包/返利券")
     s_log = (
         f"[{time_service.format_now_ms()}] 初始化{task_name}成功 - 任务装载就绪\n"
         f"[{time_service.format_now_ms()}] 目标店铺: 【{data.get('store_name', '商户活动')}】 (平台: {plat_str}, 活动ID: {data.get('promotion_id')})\n"
@@ -4526,6 +4644,18 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     min_rebate_price = float(data.get("min_rebate_price") or 0.0)
     min_rebate_gap = float(data.get("min_rebate_gap") or 0.0) if rebate_mode_filter != "percent" else 0.0
     min_rebate_rate = float(data.get("min_rebate_rate") or 0.0)
+    high_rebate_only = bool(data.get("high_rebate_only"))
+    raw_store_categories = data.get("store_category") or []
+    if isinstance(raw_store_categories, str):
+        raw_store_categories = re.split(r"[,，;；]", raw_store_categories)
+    elif not isinstance(raw_store_categories, (list, tuple)):
+        raw_store_categories = [raw_store_categories]
+    store_categories = list(dict.fromkeys(
+        str(item).strip()
+        for item in raw_store_categories
+        if str(item).strip()
+    ))
+    store_category = ",".join(store_categories)
     max_order_money = float(data.get("max_order_money") or 0.0)
     auto_stop_on_success = int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1)
     use_advance_card = int(data.get("use_advance_card") or 0)
@@ -4570,6 +4700,10 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         req_parts.append(f"满返差额≤¥{min_rebate_gap:.2f} (与最低返利满足其一)")
     if min_rebate_rate > 0:
         req_parts.append(f"最低比例 {min_rebate_rate:.0f}%")
+    if high_rebate_only:
+        req_parts.append("高返利")
+    if store_category:
+        req_parts.append(f"商家分类 {store_category}")
     if max_order_money > 0:
         req_parts.append(f"门槛≤¥{max_order_money:.1f}")
     req_str = "、".join(req_parts) if req_parts else "不设额外门槛"
@@ -4609,12 +4743,16 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "min_rebate_price": min_rebate_price,
         "min_rebate_gap": min_rebate_gap,
         "min_rebate_rate": min_rebate_rate,
+        "high_rebate_only": high_rebate_only,
+        "store_category": store_category,
         "max_order_money": max_order_money,
         "auto_stop_on_success": auto_stop_on_success,
         "use_advance_card": use_advance_card,
         "redpack_mode": _normalize_redpack_mode(data.get("redpack_mode", 0)),
         "redpack_id": str(data.get("redpack_id") or ""),
         "redpack_name": str(data.get("redpack_name") or ""),
+        "rebate_card_id": str(data.get("rebate_card_id") or ""),
+        "rebate_card_name": str(data.get("rebate_card_name") or ""),
         "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
         "rebate_desc": f"{listen_desc} ({plat_desc})",
         "log_id": log_id
@@ -5961,6 +6099,15 @@ async def wxpusher_users_endpoint(data: Dict[str, Any] = Body(...)):
     return await fetch_users(token, page=page, page_size=page_size)
 
 
+def _normalize_phone_base_url(raw: Any) -> str:
+    value = str(raw or "").strip().rstrip("/")
+    if not value:
+        return "http://127.0.0.1:39691"
+    if not re.match(r"^https?://[^\s/]+", value, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="手机端服务地址格式不正确")
+    return value
+
+
 def _build_device_sync_snapshot(local_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """构建移动端协同快照；后端业务数据来自本地 SQLite，前端本地状态由 PC 端随票据提交。"""
     with db.get_conn() as conn:
@@ -5987,10 +6134,20 @@ async def device_pair_start(request: Request, data: Dict[str, Any] = Body(defaul
     ttl = min(max(ttl, 60), 900)
     local_snapshot = data.get("local_state") if isinstance(data.get("local_state"), dict) else {}
     ticket = secrets.token_urlsafe(24)
+    phone_base_url = _normalize_phone_base_url(data.get("phone_base_url"))
+    local_device_name = str(data.get("local_device_name") or "当前设备").strip()[:40]
+    provider_base_url = device_sync.build_lan_url(request.headers.get("host", ""), path="").rstrip("/")
+    local_snapshot = dict(local_snapshot)
+    local_snapshot["_device_sync_meta"] = {
+        "provider_name": local_device_name,
+        "provider_base_url": provider_base_url,
+        "target_base_url": phone_base_url,
+    }
     db.delete_expired_pair_tickets()
     db.create_pair_ticket(ticket, ttl_seconds=ttl, snapshot=local_snapshot)
-    pair_url = device_sync.build_lan_url(request.headers.get("host", ""))
-    pair_url = f"{pair_url}?ticket={ticket}"
+    logger.info(f"设备协同：生成配对票据 {ticket[:8]}…，有效期 {ttl}s")
+    pair_url = device_sync.build_lan_url(request.headers.get("host", ""), path="/m/bind")
+    pair_url = f"{pair_url}?ticket={ticket}&phone_base={quote(phone_base_url, safe='')}"
     return {
         "ok": True,
         "ticket": ticket,
@@ -5998,6 +6155,7 @@ async def device_pair_start(request: Request, data: Dict[str, Any] = Body(defaul
         "qr_image": device_sync.qr_data_url(pair_url),
         "expires_in": ttl,
         "lan_ip": device_sync.get_lan_ip(),
+        "phone_base_url": phone_base_url,
     }
 
 
@@ -6025,9 +6183,24 @@ async def device_pair_confirm(request: Request, data: Dict[str, Any] = Body(...)
     device_name = str(data.get("device_name") or "移动端设备").strip()[:40]
     row = db.get_pair_ticket(ticket)
     if not row:
+        logger.warning(f"设备协同：确认失败，票据不存在 ticket={ticket[:8]}…")
         raise HTTPException(status_code=400, detail="配对票据不存在或已失效")
-    if float(row["expires_at"] or 0) <= time.time():
+    now = time.time()
+    created_at = float(row["created_at"] or 0)
+    expires_at = float(row["expires_at"] or 0)
+    if expires_at <= now:
+        logger.warning(
+            f"设备协同：确认失败，票据已过期 ticket={ticket[:8]}… "
+            f"status={row['status']} 生成于 {created_at:.0f} 过期于 {expires_at:.0f} "
+            f"当前 {now:.0f}（已生成 {now - created_at:.0f}s，超出有效期 {now - expires_at:.0f}s）"
+        )
         raise HTTPException(status_code=400, detail="二维码已过期，请在 PC 端重新生成")
+    if str(row["status"]) != "pending":
+        logger.warning(
+            f"设备协同：确认失败，票据状态不可用 ticket={ticket[:8]}… status={row['status']} "
+            f"consumed_at={row.get('consumed_at')}"
+        )
+        raise HTTPException(status_code=409, detail="该二维码已被使用，请重新生成")
     client_ip = device_sync.client_ip_from_headers(
         request.headers.get("x-forwarded-for"), request.headers.get("x-real-ip")
     ) or (request.client.host if request.client else "")
@@ -6036,32 +6209,107 @@ async def device_pair_confirm(request: Request, data: Dict[str, Any] = Body(...)
         raise HTTPException(status_code=409, detail="该二维码已被使用，请重新生成")
 
     device_token = secrets.token_urlsafe(32)
-    db.save_paired_device(device_id, device_name, device_sync.token_hash(device_token), client_ip, ua)
-    db.mark_pair_ticket_used(ticket)
     try:
         local_snapshot = json.loads(row.get("snapshot") or "{}")
     except Exception:
         local_snapshot = {}
+    sync_meta = local_snapshot.pop("_device_sync_meta", {}) if isinstance(local_snapshot, dict) else {}
+    provider_name = str(sync_meta.get("provider_name") or "当前设备")[:40]
+    provider_base_url = str(sync_meta.get("provider_base_url") or device_sync.build_lan_url(request.headers.get("host", ""), path="").rstrip("/"))
+    target_base_url = str(
+        sync_meta.get("target_base_url")
+        or data.get("target_base_url")
+        or ""
+    ).strip()
+    db.save_paired_device(
+        device_id,
+        device_name,
+        device_sync.token_hash(device_token),
+        client_ip,
+        ua,
+        peer_base_url=target_base_url,
+        peer_name=provider_name,
+    )
+    db.mark_pair_ticket_used(ticket)
     snapshot = _build_device_sync_snapshot(local_snapshot)
     return {
         "ok": True,
         "device_id": device_id,
         "device_token": device_token,
         "device_name": device_name,
+        "provider_name": provider_name,
+        "provider_base_url": provider_base_url,
         "snapshot": snapshot,
     }
 
 
+@router.post("/device/sync/import")
+async def device_sync_import(request: Request, data: Dict[str, Any] = Body(...)):
+    """把 PC 端同步快照导入当前后端，并发放一次性前端交接码。"""
+    snapshot = data.get("snapshot")
+    if not isinstance(snapshot, dict) or not snapshot.get("ok"):
+        raise HTTPException(status_code=400, detail="同步快照无效")
+    device_id = str(data.get("device_id") or "").strip()
+    device_token = str(data.get("device_token") or "").strip()
+    scanner_name = str(data.get("device_name") or "当前设备").strip()[:40]
+    provider_name = str(data.get("provider_name") or "对端设备").strip()[:40]
+    provider_base_url = str(data.get("provider_base_url") or "").strip().rstrip("/")
+    if not device_id or not device_token:
+        raise HTTPException(status_code=400, detail="缺少设备凭证")
+
+    counts = db.apply_device_sync_snapshot(snapshot)
+    db.save_paired_device(
+        device_id,
+        provider_name,
+        device_sync.token_hash(device_token),
+        device_sync.client_ip_from_headers(
+            (request.headers.get("x-forwarded-for") or "").split(",")[0],
+            request.headers.get("x-real-ip"),
+        ) or (request.client.host if request.client else ""),
+        request.headers.get("user-agent", ""),
+        peer_base_url=provider_base_url,
+        peer_name=scanner_name,
+    )
+    payload = {
+        "local_state": snapshot.get("local_state") or {},
+        "device_token": device_token,
+        "device_id": device_id,
+        "generated_at": snapshot.get("generated_at") or time.time(),
+    }
+    handoff_code = db.create_device_sync_handoff(payload)
+    return {
+        "ok": True,
+        "handoff_code": handoff_code,
+        "redirect_url": f"/?device_sync_code={handoff_code}",
+        "counts": counts,
+    }
+
+
+@router.get("/device/sync/handoff")
+async def device_sync_handoff(code: str = Query(...)):
+    payload = db.consume_device_sync_handoff(code)
+    if not payload:
+        raise HTTPException(status_code=400, detail="同步交接码无效、已使用或已过期")
+    return {"ok": True, **payload}
+
+
 @router.get("/m/bind", response_class=HTMLResponse)
 async def mobile_bind_page(request: Request, ticket: str = Query(...)):
-    """扫码落地页：移动端显示确认/同步，PC 端访问则显示同一二维码便于跨设备打开。"""
+    """扫码落地页：任意已部署端均可确认并一次性同步对端数据。"""
     row = db.get_pair_ticket(ticket)
     if not row:
+        logger.warning(f"设备协同：移动端打开绑定页失败，票据不存在 ticket={ticket[:8]}…")
         return HTMLResponse("<h2>配对票据不存在或已失效</h2>", status_code=404)
-    pair_url = device_sync.build_lan_url(request.headers.get("host", ""))
-    pair_url = f"{pair_url}?ticket={ticket}"
+    now_ts = time.time()
+    if float(row["expires_at"] or 0) <= now_ts:
+        logger.warning(
+            f"设备协同：移动端打开绑定页时票据已过期 ticket={ticket[:8]}… "
+            f"status={row['status']} 生成于 {float(row['created_at'] or 0):.0f} "
+            f"过期于 {float(row['expires_at'] or 0):.0f} 当前 {now_ts:.0f}"
+        )
+    phone_base_url = _normalize_phone_base_url(request.query_params.get("phone_base"))
     ticket_json = json.dumps(ticket)
-    status = device_sync.is_mobile_user_agent("")
+    phone_base_json = json.dumps(phone_base_url)
     # 通过前端 JS 再做一次 UA 判断，避免代理/缓存导致服务端判断失真
     html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -6074,37 +6322,80 @@ body{{margin:0;background:#f5f6f8;color:#1f2329;font-family:-apple-system,BlinkM
 h1{{font-size:20px;margin:0 0 8px}} p{{font-size:13px;color:#646a73;line-height:1.65}}
 button{{width:100%;border:0;border-radius:10px;background:#3370ff;color:#fff;font-size:15px;padding:13px;margin-top:14px}}
 button:disabled{{background:#a7b8e6}}
-img.qr{{display:block;margin:18px auto;width:220px;height:220px;image-rendering:pixelated}}
 .status{{margin-top:12px;font-size:13px;color:#646a73;word-break:break-all}}
+input{{width:100%;box-sizing:border-box;border:1px solid #d9d9d9;border-radius:8px;padding:10px 12px;font-size:14px;margin-top:8px}}
 </style></head><body><div class="wrap"><div class="card">
-<h1>设备协同</h1><p id="desc">正在识别当前设备...</p>
-<img class="qr" id="qr" style="display:none" src="{device_sync.qr_data_url(pair_url)}" alt="配对二维码">
+<h1>设备协同</h1><p>已扫描设备协同二维码。点击下方按钮后，将一次性同步对端数据与配置；完成后两端独立运行，不再持续互相同步。</p>
 <div class="status" id="status"></div>
-<button id="confirm" style="display:none">确认并同步 PC 端数据</button>
+<input id="deviceName" maxlength="40" placeholder="请输入当前设备名称">
+<button id="confirm">确认并一次性同步数据</button>
 </div></div>
 <script>
 const ticket={ticket_json};
-const mobile=/iPhone|iPad|iPod|Android|Windows Phone|Mobile|mobile/i.test(navigator.userAgent);
-const desc=document.getElementById('desc'), qr=document.getElementById('qr'), btn=document.getElementById('confirm'), status=document.getElementById('status');
-if(!mobile){{
-  desc.textContent='当前为电脑端，请扫描下方二维码在手机端完成确认。'; qr.style.display='block';
-}} else {{
-  desc.textContent='已扫描 PC 端二维码。点击下方按钮后，将一次性同步 PC 端数据、配置与本地界面状态。';
+const phoneBase={phone_base_json}.replace(/[\\/]+$/, '');
+const btn=document.getElementById('confirm'), status=document.getElementById('status'), nameInput=document.getElementById('deviceName');
+nameInput.value=localStorage.getItem('xiaocan_device_name')||(navigator.userAgent.includes('iPhone')?'iPhone 设备':navigator.userAgent.includes('Android')?'Android 设备':'当前设备');
+{{
+  let countdownTimer=null, ticketReady=false;
+  const stopCountdown=()=>{{ if(countdownTimer){{clearInterval(countdownTimer);countdownTimer=null;}} }};
+  const markInvalid=(msg)=>{{ stopCountdown(); ticketReady=false; btn.disabled=true; btn.style.display='none'; status.textContent=msg; }};
+  const startCountdown=(seconds)=>{{
+    let remain=Number(seconds)||0;
+    stopCountdown();
+    const tick=()=>{{
+      if(remain<=0){{ markInvalid('二维码已过期，请重新生成'); return; }}
+      status.textContent='二维码有效，剩余 '+remain+' 秒';
+      remain-=1;
+    }};
+    tick();
+    countdownTimer=setInterval(tick,1000);
+  }};
   btn.style.display='block';
+  btn.disabled=true;
+  fetch('/api/device/pair/status?ticket='+encodeURIComponent(ticket)).then(r=>r.json()).then(data=>{{
+    if(!data.ok){{ markInvalid(data.message||'二维码已失效，请重新生成'); return; }}
+    if(data.status!=='pending'){{ markInvalid(data.status==='used'?'该二维码已被使用，请重新生成':'二维码已失效，请重新生成'); return; }}
+    ticketReady=true; btn.disabled=false; startCountdown(data.expires_in);
+  }}).catch(e=>{{ status.textContent='状态检查失败: '+e.message; ticketReady=true; btn.disabled=false; }});
   btn.onclick=async()=>{{
+    if(!ticketReady) return;
+    stopCountdown();
     btn.disabled=true; status.textContent='正在绑定并同步...';
     try {{
       let deviceId=localStorage.getItem('xiaocan_device_id');
       if(!deviceId){{deviceId=crypto.randomUUID ? crypto.randomUUID() : String(Date.now())+Math.random().toString(36).slice(2);localStorage.setItem('xiaocan_device_id',deviceId);}}
-      const r=await fetch('/api/device/pair/confirm',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ticket,device_id:deviceId,device_name:navigator.userAgent.includes('iPhone')?'iPhone 设备':navigator.userAgent.includes('Android')?'Android 设备':'移动设备'}})}});
+      const scannerName=(nameInput.value||'').trim()||'当前设备';
+      localStorage.setItem('xiaocan_device_name',scannerName);
+      const r=await fetch('/api/device/pair/confirm',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ticket,device_id:deviceId,device_name:scannerName,target_base_url:phoneBase}})}});
       const data=await r.json();
-      if(!r.ok || !data.ok){{status.textContent=data.detail||'配对失败';btn.disabled=false;return;}}
+      if(!r.ok || !data.ok){{
+        const detail=data.detail||'配对失败';
+        status.textContent=detail;
+        if(detail.includes('过期')||detail.includes('使用')||detail.includes('失效')){{ markInvalid(detail); }}
+        else {{ btn.disabled=false; }}
+        return;
+      }}
       localStorage.setItem('xiaocan_device_token',data.device_token);
       localStorage.setItem('xiaocan_device_id',data.device_id);
       const local=data.snapshot?.local_state||{{}};
       Object.keys(local).forEach(k=>{{ if(k.startsWith('xiaocan_')) localStorage.setItem(k, typeof local[k]==='string'?local[k]:JSON.stringify(local[k])); }});
-      status.textContent='同步成功，正在进入应用...';
-      location.replace('/');
+      status.textContent='快照已获取，正在写入扫码端本地服务...';
+      try {{
+        const importRes=await fetch(phoneBase+'/api/device/sync/import',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{snapshot:data.snapshot,device_id:data.device_id,device_token:data.device_token,device_name:scannerName,provider_name:data.provider_name||'对端设备',provider_base_url:data.provider_base_url||location.origin}})}});
+        const importData=await importRes.json();
+        if(!importRes.ok||!importData.ok){{ throw new Error(importData.detail||'扫码端本地服务导入失败'); }}
+        localStorage.setItem('xiaocan_device_token',data.device_token);
+        localStorage.setItem('xiaocan_device_id',data.device_id);
+        const local=data.snapshot?.local_state||{{}};
+        Object.keys(local).forEach(k=>{{ if(k.startsWith('xiaocan_')) localStorage.setItem(k, typeof local[k]==='string'?local[k]:JSON.stringify(local[k])); }});
+        status.textContent='已一次性同步到扫码端本地服务，正在进入应用...';
+        location.replace(phoneBase+(importData.redirect_url||('/?device_sync_code='+importData.handoff_code)));
+        return;
+      }} catch(importErr) {{
+        status.textContent='对端快照已获取，但扫码端本地服务导入失败: '+importErr.message+'。请确认扫码端服务已启动，或重新生成二维码再试。';
+        btn.disabled=false;
+        return;
+      }}
     }} catch(e){{status.textContent='同步异常: '+e.message;btn.disabled=false;}}
   }};
 }}
@@ -6126,6 +6417,8 @@ async def device_list():
             "revoked_at": r.get("revoked_at"),
             "client_ip": r.get("client_ip") or "",
             "user_agent": r.get("user_agent") or "",
+            "peer_name": r.get("peer_name") or "",
+            "revoked_by_name": r.get("revoked_by_name") or "",
             "status": "revoked" if r.get("revoked_at") else "active",
         })
     return {"ok": True, "devices": items}
@@ -6140,9 +6433,48 @@ async def device_session_check(data: Dict[str, Any] = Body(...)):
     if not row:
         return {"ok": False, "status": "unknown", "message": "设备凭证不存在"}
     if row.get("revoked_at"):
-        return {"ok": False, "status": "revoked", "message": "该设备已被注销"}
+        device_name = str(row.get("revoked_by_name") or row.get("name") or "对端设备")
+        return {
+            "ok": False,
+            "status": "revoked",
+            "device_name": device_name,
+            "message": f"{device_name}已取消设备协同授权",
+        }
     db.touch_paired_device(row["id"])
-    return {"ok": True, "status": "active", "device": {"id": row["id"], "name": row.get("name") or "移动端设备"}}
+    return {
+        "ok": True,
+        "status": "active",
+        "device": {"id": row["id"], "name": row.get("name") or "当前设备"},
+    }
+
+
+def _notify_peer_revoke(peer_base_url: str, device_id: str, device_name: str) -> None:
+    """通知对端本地服务同步授权注销状态；对端不可达时不影响本机注销。"""
+    base = str(peer_base_url or "").strip().rstrip("/")
+    if not base or not re.match(r"^https?://[^\s]+", base, re.IGNORECASE):
+        return
+    body = json.dumps({"device_id": device_id, "device_name": device_name}, ensure_ascii=False).encode("utf-8")
+    request_obj = urllib.request.Request(
+        f"{base}/api/device/revoke/notify",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=3) as response:
+            response.read()
+    except Exception as e:
+        logger.info(f"设备协同：通知对端注销失败（不影响本机）: {e}")
+
+
+@router.post("/device/revoke/notify")
+async def device_revoke_notify(data: Dict[str, Any] = Body(...)):
+    device_id = str(data.get("device_id") or "").strip()
+    device_name = str(data.get("device_name") or "对端设备").strip()[:40]
+    if not device_id:
+        raise HTTPException(status_code=400, detail="设备 ID 不能为空")
+    ok = db.revoke_paired_device(device_id, device_name)
+    return {"ok": ok, "device_name": device_name}
 
 
 @router.post("/device/revoke")
@@ -6150,8 +6482,18 @@ async def device_revoke(data: Dict[str, Any] = Body(...)):
     device_id = str(data.get("device_id") or "").strip()
     if not device_id:
         raise HTTPException(status_code=400, detail="设备 ID 不能为空")
-    ok = db.revoke_paired_device(device_id)
-    return {"ok": ok, "message": "已注销设备凭证并踢下线" if ok else "设备不存在或已注销"}
+    row = db.get_paired_device(device_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="设备记录不存在")
+    initiator_name = str(row.get("peer_name") or row.get("name") or "对端设备")[:40]
+    ok = db.revoke_paired_device(device_id, initiator_name)
+    if ok:
+        _notify_peer_revoke(str(row.get("peer_base_url") or ""), device_id, initiator_name)
+    return {
+        "ok": ok,
+        "device_name": initiator_name,
+        "message": f"{initiator_name}已取消设备协同授权" if ok else "设备已注销",
+    }
 
 
 @router.post("/device/delete")

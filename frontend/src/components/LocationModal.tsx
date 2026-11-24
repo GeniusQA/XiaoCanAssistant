@@ -325,6 +325,15 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose, 
       return;
     }
 
+    // 浏览器要求定位接口运行在安全上下文（HTTPS 或 localhost）中；
+    // 局域网 HTTP 访问时即使站点权限设为“允许”，定位仍会被拒绝。
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      clearResolved();
+      setLocating(false);
+      Toast.warning('当前通过局域网 HTTP 访问，浏览器会禁止网页定位。请改用 HTTPS 访问，或直接使用搜索框选择地址。');
+      return;
+    }
+
     // 与改动前一致：拿到浏览器首个定位回调后立刻请求接口，不再设置坐标收敛窗口。
     // 仅保留「权限拒绝/超时分类提示、失败清空脏数据、定位成功后写短/全地址」等修复。
     let settled = false;
@@ -373,8 +382,11 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose, 
           clearResolved();
           setLocating(false);
           const code = err?.code;
+          const insecure = typeof window !== 'undefined' && !window.isSecureContext;
           const msg = code === 1
-            ? '位置权限被拒绝，请在浏览器地址栏允许位置访问，或使用搜索框选择地址'
+            ? (insecure
+              ? '当前为局域网 HTTP 访问，浏览器禁止网页定位；请改用 HTTPS，或使用搜索框选择地址'
+              : '位置权限被拒绝，请在浏览器地址栏允许位置访问，或使用搜索框选择地址')
             : code === 3
             ? '等待定位超时，请确认已点击浏览器弹窗「允许」后重试，或使用搜索框'
             : code === 2

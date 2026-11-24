@@ -9,6 +9,7 @@ import json
 import os
 import time
 import uuid
+import secrets
 from typing import List, Dict, Any, Optional, Tuple
 from ..core import time_service
 
@@ -162,6 +163,7 @@ def init_db():
         status TEXT DEFAULT 'pending',
         early_ms INTEGER DEFAULT 500,
         rebate_card_id TEXT,
+        rebate_card_name TEXT DEFAULT '',
         redpack_mode INTEGER DEFAULT 0,
         outcome TEXT,
         created_at TEXT
@@ -295,12 +297,31 @@ def init_db():
         last_seen_at REAL,
         revoked_at REAL,
         client_ip TEXT,
-        user_agent TEXT
+        user_agent TEXT,
+        peer_base_url TEXT DEFAULT '',
+        peer_name TEXT DEFAULT '',
+        revoked_by_name TEXT DEFAULT ''
     )
     """)
     pair_cols = {row[1] for row in c.execute("PRAGMA table_info(device_pair_tickets)")}
     if "snapshot" not in pair_cols:
         c.execute("ALTER TABLE device_pair_tickets ADD COLUMN snapshot TEXT DEFAULT ''")
+    device_cols = {row[1] for row in c.execute("PRAGMA table_info(paired_devices)")}
+    if "peer_base_url" not in device_cols:
+        c.execute("ALTER TABLE paired_devices ADD COLUMN peer_base_url TEXT DEFAULT ''")
+    if "peer_name" not in device_cols:
+        c.execute("ALTER TABLE paired_devices ADD COLUMN peer_name TEXT DEFAULT ''")
+    if "revoked_by_name" not in device_cols:
+        c.execute("ALTER TABLE paired_devices ADD COLUMN revoked_by_name TEXT DEFAULT ''")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS device_sync_handoffs (
+        code TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        expires_at REAL NOT NULL,
+        consumed_at REAL
+    )
+    """)
 
     # 6. 霸王餐订单表
     c.execute("""
@@ -400,6 +421,12 @@ def init_db():
         c.execute("ALTER TABLE store_appointments ADD COLUMN auto_use_best_vip_card INTEGER DEFAULT 1")
     if "min_rebate_gap" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN min_rebate_gap REAL DEFAULT 0")
+    if "high_rebate_only" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN high_rebate_only INTEGER DEFAULT 0")
+    if "store_category" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN store_category TEXT DEFAULT ''")
+    if "rebate_card_name" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN rebate_card_name TEXT DEFAULT ''")
 
     # 自动自愈 orders 中缺失 store_icon 的记录 (从已有历史同名/同 store_id 记录回填)
     try:
@@ -1379,13 +1406,14 @@ def add_appointment(data: Dict[str, Any]) -> int:
         cur = conn.execute("""
         INSERT INTO store_appointments (
             account_key, store_id, store_name, store_icon, promotion_id, status, 
-            early_ms, rebate_card_id, redpack_mode, outcome, created_at,
+            early_ms, rebate_card_id, rebate_card_name, redpack_mode, outcome, created_at,
             task_type, start_time, until_time, notified_31m, notified_1m,
             check_interval, platform, order_money, rebate_price, rebate_desc, rebate_type, log_id,
             use_advance_card, redpack_id, redpack_name, auto_use_best_vip_card, min_rebate_gap,
+            high_rebate_only, store_category,
             keyword, match_mode, listen_mode, activity_requirement, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["account_key"],
             str(data.get("store_id", "")),
@@ -1394,7 +1422,8 @@ def add_appointment(data: Dict[str, Any]) -> int:
             str(data["promotion_id"]),
             status,
             int(data.get("early_ms", 500)),
-            data.get("rebate_card_id", ""),
+            str(data.get("rebate_card_id") or ""),
+            str(data.get("rebate_card_name") or ""),
             int(data.get("redpack_mode", 0)),
             data.get("outcome", ""),
             now,
@@ -1415,6 +1444,8 @@ def add_appointment(data: Dict[str, Any]) -> int:
             str(data.get("redpack_name") or ""),
             int(bool(data.get("auto_use_best_vip_card", True))),
             float(data.get("min_rebate_gap") or 0),
+            int(bool(data.get("high_rebate_only"))),
+            str(data.get("store_category") or ""),
             str(data.get("keyword") or ""),
             str(data.get("match_mode") or "contains"),
             str(data.get("listen_mode") or "store"),
@@ -1499,21 +1530,32 @@ def mark_pair_ticket_used(ticket: str) -> None:
         conn.commit()
 
 
-def save_paired_device(device_id: str, name: str, token_hash: str, client_ip: str = "", user_agent: str = "") -> None:
+def save_paired_device(
+    device_id: str,
+    name: str,
+    token_hash: str,
+    client_ip: str = "",
+    user_agent: str = "",
+    peer_base_url: str = "",
+    peer_name: str = "",
+) -> None:
     now = time.time()
     with get_conn() as conn:
         conn.execute("""
-        INSERT INTO paired_devices (id, name, token_hash, device_id, created_at, last_seen_at, revoked_at, client_ip, user_agent)
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+        INSERT INTO paired_devices (id, name, token_hash, device_id, created_at, last_seen_at, revoked_at, client_ip, user_agent, peer_base_url, peer_name)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             token_hash = excluded.token_hash,
             device_id = excluded.device_id,
             last_seen_at = excluded.last_seen_at,
             revoked_at = 0,
+            revoked_by_name = '',
             client_ip = excluded.client_ip,
-            user_agent = excluded.user_agent
-        """, (device_id, name, token_hash, device_id, now, now, client_ip, user_agent))
+            user_agent = excluded.user_agent,
+            peer_base_url = excluded.peer_base_url,
+            peer_name = excluded.peer_name
+        """, (device_id, name, token_hash, device_id, now, now, client_ip, user_agent, str(peer_base_url or ""), str(peer_name or "")))
         conn.commit()
 
 
@@ -1529,15 +1571,24 @@ def get_paired_device_by_token_hash(token_hash: str) -> Optional[Dict[str, Any]]
         return dict(row) if row else None
 
 
+def get_paired_device(device_id: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM paired_devices WHERE id = ?", (device_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def touch_paired_device(device_id: str) -> None:
     with get_conn() as conn:
         conn.execute("UPDATE paired_devices SET last_seen_at = ? WHERE id = ?", (time.time(), device_id))
         conn.commit()
 
 
-def revoke_paired_device(device_id: str) -> bool:
+def revoke_paired_device(device_id: str, revoked_by_name: str = "") -> bool:
     with get_conn() as conn:
-        cur = conn.execute("UPDATE paired_devices SET revoked_at = ? WHERE id = ? AND revoked_at = 0", (time.time(), device_id))
+        cur = conn.execute(
+            "UPDATE paired_devices SET revoked_at = ?, revoked_by_name = ? WHERE id = ? AND revoked_at = 0",
+            (time.time(), str(revoked_by_name or ""), device_id),
+        )
         conn.commit()
         return cur.rowcount > 0
 
@@ -1553,6 +1604,82 @@ def delete_expired_pair_tickets() -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM device_pair_tickets WHERE expires_at < ?", (time.time() - 86400,))
         conn.commit()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set:
+    allowed = {"settings", "accounts", "task_configs", "orders", "job_logs", "store_appointments"}
+    if table not in allowed:
+        raise ValueError(f"Unsupported sync table: {table}")
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _insert_snapshot_rows(conn: sqlite3.Connection, table: str, rows: List[Dict[str, Any]]) -> int:
+    columns = _table_columns(conn, table)
+    inserted = 0
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        values = {key: value for key, value in raw.items() if key in columns}
+        if not values:
+            continue
+        keys = list(values.keys())
+        placeholders = ", ".join("?" for _ in keys)
+        conn.execute(
+            f"INSERT OR REPLACE INTO {table} ({', '.join(keys)}) VALUES ({placeholders})",
+            [values[key] for key in keys],
+        )
+        inserted += 1
+    return inserted
+
+
+def apply_device_sync_snapshot(snapshot: Dict[str, Any]) -> Dict[str, int]:
+    """将 PC 端完整快照导入当前（手机本地）数据库，返回各表写入数量。"""
+    counts: Dict[str, int] = {}
+    with get_conn() as conn:
+        conn.execute("BEGIN")
+        try:
+            conn.execute("DELETE FROM settings")
+            counts["settings"] = _insert_snapshot_rows(
+                conn, "settings",
+                [{"key": key, "value": json.dumps(value, ensure_ascii=False)} for key, value in (snapshot.get("settings") or {}).items()],
+            )
+            for table in ("store_appointments", "job_logs", "orders", "task_configs", "accounts"):
+                conn.execute(f"DELETE FROM {table}")
+                counts[table] = _insert_snapshot_rows(conn, table, snapshot.get(table) or [])
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return counts
+
+
+def create_device_sync_handoff(payload: Dict[str, Any], ttl_seconds: int = 600) -> str:
+    code = uuid.uuid4().hex + secrets.token_hex(8)
+    now = time.time()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO device_sync_handoffs (code, payload, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, NULL)",
+            (code, json.dumps(payload, ensure_ascii=False), now, now + ttl_seconds),
+        )
+        conn.commit()
+    return code
+
+
+def consume_device_sync_handoff(code: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT payload FROM device_sync_handoffs WHERE code = ? AND consumed_at IS NULL AND expires_at > ?",
+            (code, now),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE device_sync_handoffs SET consumed_at = ? WHERE code = ?", (now, code))
+        conn.commit()
+        try:
+            return json.loads(row["payload"])
+        except Exception:
+            return None
 
 
 # ---------------- 霸王餐订单操作接口 ---------------- #

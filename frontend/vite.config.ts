@@ -37,6 +37,9 @@ export default defineConfig({
             if (id.includes('gsap') || id.includes('@gsap')) {
               return 'vendor-animation';
             }
+            if (id.includes('@zxing')) {
+              return 'vendor-qr';
+            }
             if (id.includes('react') || id.includes('zustand') || id.includes('scheduler')) {
               return 'vendor-core';
             }

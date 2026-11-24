@@ -526,6 +526,11 @@ html, body, #root {
    ========================================================================== */
 .mobile-sider-trigger { display: none; }
 
+/* 主题切换入口：PC固定顶栏原位置；移动端复用侧边导航底部 */
+.side-theme-toggle {
+  display: none !important;
+}
+
 @media (max-width: 767px) {
   html, body, #root {
     height: 100%;
@@ -563,6 +568,14 @@ html, body, #root {
     gap: 4px !important;
     flex-wrap: nowrap !important;
     justify-content: flex-start !important;
+  }
+
+  /* 移动端主题切换改由侧边抽屉承载，顶栏仅保留业务信息 */
+  .header-theme-toggle {
+    display: none !important;
+  }
+  .side-theme-toggle {
+    display: flex !important;
   }
 
   /* 主题切换与头像固定右对齐 */
@@ -669,6 +682,9 @@ html, body, #root {
   .mobile-nav-drawer {
     width: 78vw !important;
     max-width: 320px !important;
+  }
+  .mobile-nav-drawer .semi-drawer-header {
+    display: none !important;
   }
   .mobile-nav-drawer .semi-drawer-body {
     padding: 0 !important;

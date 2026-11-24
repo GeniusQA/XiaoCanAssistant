@@ -343,6 +343,7 @@ export interface StoreAppointment {
   condition?: string;
   rebate_type?: string;
   rebate_card_id?: string;
+  rebate_card_name?: string;
   redpack_mode?: number;
   redpack_id?: string;
   redpack_name?: string;
@@ -355,6 +356,8 @@ export interface StoreAppointment {
   min_rebate_price?: number;
   min_rebate_gap?: number;
   min_rebate_rate?: number;
+  high_rebate_only?: boolean | number;
+  store_category?: string;
   rebate_mode_filter?: 'all' | 'fixed' | 'percent' | string;
   auto_stop_on_success?: number | boolean;
   max_order_money?: number;
@@ -374,6 +377,8 @@ export interface NameMonitorPayload {
   min_rebate_price?: number;
   min_rebate_gap?: number;
   min_rebate_rate?: number;
+  high_rebate_only?: boolean;
+  store_category?: string;
   max_order_money?: number;
   auto_stop_on_success?: number;
   timeout_sec?: number;
@@ -383,6 +388,8 @@ export interface NameMonitorPayload {
   redpack_mode?: number;
   redpack_id?: string;
   redpack_name?: string;
+  rebate_card_id?: string;
+  rebate_card_name?: string;
   auto_use_best_vip_card?: boolean;
   use_advance_card?: number | boolean;
   store_icon?: string;
@@ -735,6 +742,24 @@ export interface DevicePairStartResult {
   qr_image: string;
   expires_in: number;
   lan_ip: string;
+  phone_base_url?: string;
+}
+
+export interface DeviceSyncImportResult {
+  ok: boolean;
+  handoff_code?: string;
+  redirect_url?: string;
+  message?: string;
+  counts?: Record<string, number>;
+}
+
+export interface DeviceSyncHandoffResult {
+  ok: boolean;
+  local_state?: Record<string, any>;
+  device_token?: string;
+  device_id?: string;
+  generated_at?: number;
+  message?: string;
 }
 
 export interface DevicePairStatusResult {
@@ -747,6 +772,8 @@ export interface DevicePairStatusResult {
 
 export interface PairedDevice {
   id: string;
+  peer_name?: string;
+  revoked_by_name?: string;
   name: string;
   device_id: string;
   created_at: number;

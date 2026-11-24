@@ -1170,12 +1170,12 @@ export const Accounts: React.FC = () => {
 
                   <div className="flex gap-3 items-center mb-3">
                     <Avatar size="medium" src={acc.avatar || undefined} color="orange" className="shadow-xs shrink-0">
-                      {acc.nickname?.[0] || '蚕'}
+                      {(acc.nick_name || acc.nickname)?.[0] || '蚕'}
                     </Avatar>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <Text strong className="text-base truncate text-semi-color-text-0 max-w-[160px]" title={acc.nickname}>
-                          {acc.nickname}
+                        <Text strong className="text-base truncate text-semi-color-text-0 max-w-[160px]" title={acc.nick_name || acc.nickname}>
+                          {acc.nick_name || acc.nickname}
                         </Text>
                         {acc.phone && (
                           <Text type="tertiary" size="small" className="shrink-0">
@@ -1915,7 +1915,7 @@ export const Accounts: React.FC = () => {
               <span className="truncate">账号详情与资产中心</span>
               {detailAccount && (
                 <Tag color="blue" size="small" type="light">
-                  {detailAccount.nickname}
+                  {detailData?.user_info?.nick_name || detailAccount.nick_name || detailAccount.nickname}
                 </Tag>
               )}
             </div>
@@ -1970,12 +1970,12 @@ export const Accounts: React.FC = () => {
                   color="orange"
                   className="shadow-sm shrink-0"
                 >
-                  {(detailData?.account?.nickname || detailAccount.nickname)?.[0] || '蚕'}
+                  {(detailData?.user_info?.nick_name || detailAccount.nick_name || detailAccount.nickname)?.[0] || '蚕'}
                 </Avatar>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <Text strong className="text-lg text-semi-color-text-0">
-                      {detailData?.account?.nickname || detailAccount.nickname}
+                      {detailData?.user_info?.nick_name || detailAccount.nick_name || detailAccount.nickname}
                     </Text>
                     {(() => {
                       const vipInfo = detailData?.user_info?.vip_level_info;
@@ -1996,9 +1996,6 @@ export const Accounts: React.FC = () => {
                     <div>用户 ID: {detailAccount.user_id || detailData?.user_info?.silk_id || '—'}</div>
                     <div>绑定手机: {detailData?.user_info?.phone || detailAccount.phone || '未设置'}</div>
                     <div>实名认证: {detailData?.user_info?.real_name || detailAccount.real_name || '未设置'}</div>
-                    {(detailData?.user_info?.nick_name || detailAccount.nick_name) && (
-                      <div className="col-span-2">邀请昵称: {detailData?.user_info?.nick_name || detailAccount.nick_name}</div>
-                    )}
                   </div>
                 </div>
               </div>
