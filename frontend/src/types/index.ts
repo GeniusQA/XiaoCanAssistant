@@ -862,6 +862,7 @@ export interface AccountDetailData {
     num: number;
   };
   redpacks: UserRedPackItem[];
+  order_redpacks?: UserRedPackItem[];
 }
 
 export interface LocationCandidate {

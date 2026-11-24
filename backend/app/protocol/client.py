@@ -3279,6 +3279,39 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    async def get_order_user_redpack_list(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """查询当前订单可用的已持有红包/返利券 (RedPackService.GetOrderUserRedPackList)"""
+        body: Dict[str, Any] = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "bwc_platform": int(kwargs.get("bwc_platform", 0)),
+            "bwc_type": int(kwargs.get("bwc_type", 0)),
+            "is_super_brand": bool(kwargs.get("is_super_brand", False)),
+            "store_kind": int(kwargs.get("store_kind", 0)),
+        }
+        for key in (
+            "promotion_id", "promotion_silk_amount", "store_category_sub_type",
+            "store_id", "store_platform_order_money", "store_type",
+        ):
+            if key in kwargs:
+                body[key] = kwargs[key]
+        return await self.invoke_rpc(
+            server_name="RedPackService",
+            method_name="RedPackService.GetOrderUserRedPackList",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="Android"
+        )
+
     async def get_app_redpack_list(
         self,
         token: str,

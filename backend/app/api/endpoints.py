@@ -515,6 +515,16 @@ async def get_account_detail_endpoint(key: str):
         except Exception as e:
             logger.warning(f"获取账号元宝数据失败: {e}")
 
+        # 5. 官方订单页当前可用的已持有红包/返利券 (GetOrderUserRedPackList)
+        order_redpacks: list = []
+        try:
+            our_res = await client.get_order_user_redpack_list(
+                token=token, silk_id=silk_id, user_id=user_id, city_code=city_code
+            )
+            order_redpacks = list(our_res.get("available_items") or [])
+        except Exception as e:
+            logger.warning(f"获取订单可用红包券失败: {e}")
+
     return {
         "ok": True,
         "account": acc,
@@ -523,7 +533,8 @@ async def get_account_detail_endpoint(key: str):
         "card_stats": card_stats,
         "cards": cards,
         "redpack_stats": redpack_stats,
-        "redpacks": redpacks
+        "redpacks": redpacks,
+        "order_redpacks": order_redpacks
     }
 
 
@@ -4623,7 +4634,7 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         listen_mode = "store"
     keyword = (data.get("keyword") or data.get("store_name") or "").strip()
     if listen_mode == "store" and not keyword:
-        raise HTTPException(status_code=400, detail="店名监听必须填写商户名称或关键词")
+        raise HTTPException(status_code=400, detail="抢单监听必须填写商户名称或关键词")
     if listen_mode == "general":
         keyword = ""
 
@@ -4685,7 +4696,7 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "eleme": "饿了么",
         "jingdong": "京东外卖",
     }.get(platform, "饿了么")
-    listen_desc = "常规监听 (不区分店名)" if listen_mode == "general" else f"店名监听「{keyword}」"
+    listen_desc = "常规监听 (不区分店名)" if listen_mode == "general" else f"抢单监听「{keyword}」"
     match_desc = "不区分店名" if listen_mode == "general" else ("包含匹配" if match_mode == "contains" else "精确完全匹配")
     filter_desc = "全部方案" if rebate_mode_filter == "all" else ("实付满返" if rebate_mode_filter == "fixed" else "比例返")
     activity_desc = {
@@ -4822,7 +4833,7 @@ async def _resolve_store_icon_by_keyword(keyword: str, account: Dict[str, Any]) 
 
 @router.get("/store/appointments")
 async def list_appointments(account_key: Optional[str] = Query(None)):
-    """获取预约队列列表；店名监听缺少头像时按官方搜索结果按需回填。"""
+    """获取预约队列列表；抢单监听缺少头像时按官方搜索结果按需回填。"""
     items = db.get_appointments(account_key)
     accounts = {a.get("key"): a for a in db.get_all_accounts() if a.get("key")}
     for item in items:
@@ -6177,7 +6188,7 @@ async def device_pair_status(ticket: str = Query(...)):
 
 @router.post("/device/pair/confirm")
 async def device_pair_confirm(request: Request, data: Dict[str, Any] = Body(...)):
-    """移动端扫码确认：一次性消费票据，签发可撤销的设备凭证并返回同步快照。"""
+    """移动端扫码确认：认领票据并返回同步快照；凭证在扫码端导入成功后最终生效。"""
     ticket = str(data.get("ticket") or "").strip()
     device_id = str(data.get("device_id") or uuid.uuid4().hex).strip()
     device_name = str(data.get("device_name") or "移动端设备").strip()[:40]
@@ -6221,16 +6232,6 @@ async def device_pair_confirm(request: Request, data: Dict[str, Any] = Body(...)
         or data.get("target_base_url")
         or ""
     ).strip()
-    db.save_paired_device(
-        device_id,
-        device_name,
-        device_sync.token_hash(device_token),
-        client_ip,
-        ua,
-        peer_base_url=target_base_url,
-        peer_name=provider_name,
-    )
-    db.mark_pair_ticket_used(ticket)
     snapshot = _build_device_sync_snapshot(local_snapshot)
     return {
         "ok": True,
@@ -6239,8 +6240,47 @@ async def device_pair_confirm(request: Request, data: Dict[str, Any] = Body(...)
         "device_name": device_name,
         "provider_name": provider_name,
         "provider_base_url": provider_base_url,
+        "target_base_url": target_base_url,
         "snapshot": snapshot,
     }
+
+
+@router.post("/device/pair/finalize")
+async def device_pair_finalize(request: Request, data: Dict[str, Any] = Body(...)):
+    """扫码端导入成功后最终确认：此时才在二维码提供方登记设备凭证。"""
+    ticket = str(data.get("ticket") or "").strip()
+    device_id = str(data.get("device_id") or "").strip()
+    device_token = str(data.get("device_token") or "").strip()
+    row = db.get_pair_ticket(ticket)
+    if not row:
+        raise HTTPException(status_code=400, detail="配对票据不存在或已失效")
+    if str(row.get("status")) == "used" and str(row.get("device_id") or "") == device_id:
+        return {"ok": True, "message": "设备协同已确认"}
+    if str(row.get("status")) != "claimed" or str(row.get("device_id") or "") != device_id:
+        raise HTTPException(status_code=409, detail="该二维码状态不可用，请重新生成")
+    if not device_token:
+        raise HTTPException(status_code=400, detail="缺少设备凭证")
+    try:
+        local_snapshot = json.loads(row.get("snapshot") or "{}")
+    except Exception:
+        local_snapshot = {}
+    sync_meta = local_snapshot.pop("_device_sync_meta", {}) if isinstance(local_snapshot, dict) else {}
+    provider_name = str(sync_meta.get("provider_name") or "当前设备")[:40]
+    target_base_url = str(sync_meta.get("target_base_url") or "")
+    client_ip = device_sync.client_ip_from_headers(
+        request.headers.get("x-forwarded-for"), request.headers.get("x-real-ip")
+    ) or (request.client.host if request.client else "")
+    db.save_paired_device(
+        device_id,
+        str(row.get("device_name") or "移动端设备"),
+        device_sync.token_hash(device_token),
+        client_ip,
+        request.headers.get("user-agent", ""),
+        peer_base_url=target_base_url,
+        peer_name=provider_name,
+    )
+    db.mark_pair_ticket_used(ticket)
+    return {"ok": True, "message": "设备协同已确认"}
 
 
 @router.post("/device/sync/import")
@@ -6375,15 +6415,14 @@ nameInput.value=localStorage.getItem('xiaocan_device_name')||(navigator.userAgen
         else {{ btn.disabled=false; }}
         return;
       }}
-      localStorage.setItem('xiaocan_device_token',data.device_token);
-      localStorage.setItem('xiaocan_device_id',data.device_id);
-      const local=data.snapshot?.local_state||{{}};
-      Object.keys(local).forEach(k=>{{ if(k.startsWith('xiaocan_')) localStorage.setItem(k, typeof local[k]==='string'?local[k]:JSON.stringify(local[k])); }});
       status.textContent='快照已获取，正在写入扫码端本地服务...';
       try {{
         const importRes=await fetch(phoneBase+'/api/device/sync/import',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{snapshot:data.snapshot,device_id:data.device_id,device_token:data.device_token,device_name:scannerName,provider_name:data.provider_name||'对端设备',provider_base_url:data.provider_base_url||location.origin}})}});
         const importData=await importRes.json();
         if(!importRes.ok||!importData.ok){{ throw new Error(importData.detail||'扫码端本地服务导入失败'); }}
+        const finalizeRes=await fetch('/api/device/pair/finalize',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ticket,device_id:data.device_id,device_token:data.device_token}})}});
+        const finalizeData=await finalizeRes.json();
+        if(!finalizeRes.ok||!finalizeData.ok){{ throw new Error(finalizeData.detail||'提供方确认设备协同失败'); }}
         localStorage.setItem('xiaocan_device_token',data.device_token);
         localStorage.setItem('xiaocan_device_id',data.device_id);
         const local=data.snapshot?.local_state||{{}};

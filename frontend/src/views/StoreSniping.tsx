@@ -74,6 +74,46 @@ const isRebateCouponCard = (item: any): boolean => {
   return /返利券|额外返/.test(name) || /返利券/.test(desc);
 };
 
+interface RebateCouponOption {
+  id: string;
+  name: string;
+  desc: string;
+  source: 'order' | 'owned';
+}
+
+const getRebateCouponOptions = (detail: AccountDetailData | null): RebateCouponOption[] => {
+  const options: RebateCouponOption[] = [];
+  for (const item of detail?.order_redpacks || []) {
+    const name = String(item.name || '');
+    const info = String(item.info || '');
+    if (!/返利券|额外返/.test(`${name}${info}`)) continue;
+    const cId = String(item.user_red_pack_id || '');
+    if (!cId || options.some(o => o.id === cId)) continue;
+    options.push({
+      id: cId,
+      name: cleanEmoji(name || '会员返利券'),
+      desc: cleanEmoji(info || '当前活动可用返利券'),
+      source: 'order'
+    });
+  }
+  for (const item of detail?.cards || []) {
+    if (!isRebateCouponCard(item)) continue;
+    const cardItem = item as any;
+    const cId = String(cardItem.id || cardItem.user_card_id || '');
+    if (options.some(o => o.id === cId)) continue;
+    options.push({
+      id: cId,
+      name: cleanEmoji(cardItem.card?.name || cardItem.name || '返利券'),
+      desc: cleanEmoji(cardItem.card?.desc || cardItem.desc || ''),
+      source: 'owned'
+    });
+  }
+  return options;
+};
+
+const getSelectableRedpacks = (detail: AccountDetailData | null) =>
+  (detail?.order_redpacks?.length ? detail.order_redpacks : (detail?.redpacks || []));
+
 interface StoreNameCellProps {
   name?: string;
   maxWidth?: string | number;
@@ -604,7 +644,7 @@ export const StoreSniping: React.FC = () => {
   const nameMonitorFormApiRef = useRef<any>(null);
   const [selectedStore, setSelectedStore] = useState<StoreItem | null>(null);
 
-  // 店名抢单监听弹窗状态
+  // 抢单监听弹窗状态
   const [nameMonitorVisible, setNameMonitorVisible] = useState(false);
   const [nameMonitorSubmitting, setNameMonitorSubmitting] = useState(false);
   const [nameMonitorInitialKeyword, setNameMonitorInitialKeyword] = useState('');
@@ -1584,13 +1624,13 @@ export const StoreSniping: React.FC = () => {
       if (rpMode === 1) {
         if (values.redpack_id) {
           chosenRpId = String(values.redpack_id);
-          const found = (assetDetail?.redpacks || []).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
+          const found = getSelectableRedpacks(assetDetail).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
           if (found) chosenRpName = found.name || (found as any).title || '';
         }
         if (values.rebate_card_id) {
           chosenCardId = String(values.rebate_card_id);
-          const foundCard = (assetDetail?.cards || []).find((c: any) => String(c.id || '') === chosenCardId && isRebateCouponCard(c));
-          if (foundCard) chosenCardName = foundCard.card?.name || (foundCard as any).name || `返利券#${chosenCardId}`;
+          const foundOption = getRebateCouponOptions(assetDetail).find(o => o.id === chosenCardId);
+          if (foundOption) chosenCardName = foundOption.name;
         }
         if (!chosenRpId && !chosenCardId) throw new Error('请选择指定红包或返利券');
       }
@@ -1636,7 +1676,7 @@ export const StoreSniping: React.FC = () => {
       return;
     }
     if (!activeLocation) {
-      Toast.warning('当前账号未绑定抢单地址，请先绑定地址后再使用按店名监听');
+      Toast.warning('当前账号未绑定抢单地址，请先绑定地址后再使用抢单监听');
       openLocationModal(currentAccountKey);
       return;
     }
@@ -1706,10 +1746,10 @@ export const StoreSniping: React.FC = () => {
     const listenMode = values.listen_mode === 'general' ? 'general' : 'store';
     const kw = listenMode === 'store' ? (values.keyword || '').trim() : '';
     if (listenMode === 'store' && !kw) {
-      Toast.warning('店名监听需要输入商户名称或搜索关键词');
+      Toast.warning('抢单监听需要输入商户名称或搜索关键词');
       return;
     }
-    const modeLabel = listenMode === 'general' ? '常规监听' : `店名监听「${kw}」`;
+    const modeLabel = listenMode === 'general' ? '常规监听' : `抢单监听「${kw}」`;
     const rebateFilter = values.rebate_mode_filter || 'all';
     const minPrice = rebateFilter === 'percent' ? 0 : Number(values.min_rebate_price || 0);
     const minGap = rebateFilter === 'percent' ? 0 : Number(values.min_rebate_gap || 0);
@@ -1728,13 +1768,13 @@ export const StoreSniping: React.FC = () => {
       if (rpMode === 1) {
         if (values.redpack_id) {
           chosenRpId = String(values.redpack_id);
-          const found = (assetDetail?.redpacks || []).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
+          const found = getSelectableRedpacks(assetDetail).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
           if (found) chosenRpName = found.name || (found as any).title || '';
         }
         if (values.rebate_card_id) {
           chosenCardId = String(values.rebate_card_id);
-          const foundCard = (assetDetail?.cards || []).find((c: any) => String(c.id || '') === chosenCardId && isRebateCouponCard(c));
-          if (foundCard) chosenCardName = foundCard.card?.name || (foundCard as any).name || `返利券#${chosenCardId}`;
+          const foundOption = getRebateCouponOptions(assetDetail).find(o => o.id === chosenCardId);
+          if (foundOption) chosenCardName = foundOption.name;
         }
         if (!chosenRpId && !chosenCardId) throw new Error('请选择指定红包或返利券');
       }
@@ -1796,7 +1836,7 @@ export const StoreSniping: React.FC = () => {
         Toast.warning(res.message || '创建监听任务失败');
       }
     } catch (err: any) {
-      Toast.error('创建店名监听任务失败: ' + (err?.message || '网络异常'));
+      Toast.error('创建抢单监听任务失败: ' + (err?.message || '网络异常'));
     } finally {
       setNameMonitorSubmitting(false);
     }
@@ -2614,7 +2654,7 @@ export const StoreSniping: React.FC = () => {
           const isGeneral = row?.listen_mode === 'general';
           return (
             <Tag color={isGeneral ? 'green' : 'cyan'} shape="square">
-              {isGeneral ? '常规监听' : '店名监听'}
+              {isGeneral ? '常规监听' : '抢单监听'}
             </Tag>
           );
         }
@@ -3150,7 +3190,7 @@ export const StoreSniping: React.FC = () => {
               <TabPane tab={`预约监听 (${appointments.length})`} itemKey="appointments" />
             </Tabs>
 
-            {/* 店铺主 Tab / 大牌券 Tab 搜索框与店名抢单监听按钮 */}
+            {/* 店铺主 Tab / 大牌券 Tab 搜索框与抢单监听按钮 */}
             {(activeTabKey === 'stores' || activeTabKey === 'brand_coupon') && (
               <div className="flex items-center gap-2.5 w-full sm:w-auto flex-wrap">
                 <StoreSearchBar
@@ -3165,7 +3205,7 @@ export const StoreSniping: React.FC = () => {
                   icon={<IconSearch />}
                   onClick={() => handleOpenNameMonitor(searchKeyword)}
                 >
-                  店名抢单监听
+                  抢单监听
                 </Button>
               </div>
             )}
@@ -3383,7 +3423,7 @@ export const StoreSniping: React.FC = () => {
                             未找到与「{activeSearchKeyword}」相关的附近店铺
                           </div>
                           <div className="text-xs mb-4 text-semi-color-text-2">
-                            该店铺可能目前无在售库存或被秒抢光，可直接开启店名抢单监听，放单时自动秒抢
+                            该店铺可能目前无在售库存或被秒抢光，可直接开启抢单监听，放单时自动秒抢
                           </div>
                           <Space spacing={8}>
                             <Button
@@ -3393,7 +3433,7 @@ export const StoreSniping: React.FC = () => {
                               icon={<IconSearch />}
                               onClick={() => handleOpenNameMonitor(activeSearchKeyword)}
                             >
-                              开启「{activeSearchKeyword}」店名监听
+                              开启「{activeSearchKeyword}」抢单监听
                             </Button>
                             <Button theme="light" type="tertiary" size="small" onClick={handleClearSearch}>
                               清空搜索词
@@ -3713,7 +3753,7 @@ export const StoreSniping: React.FC = () => {
                     icon={<IconPlus />}
                     onClick={() => handleOpenNameMonitor()}
                   >
-                    新建店名监听
+                    新建抢单监听
                   </Button>
                   <Button
                     theme="light"
@@ -4002,7 +4042,7 @@ export const StoreSniping: React.FC = () => {
                     helpText="可为空；若选择，失效时自动替换为最优红包"
                     className="w-full"
                   >
-                    {(assetDetail?.redpacks || []).map((rp: any) => {
+                    {getSelectableRedpacks(assetDetail).map((rp: any) => {
                       const rId = String(rp.user_red_pack_id || rp.id || '');
                       const rName = rp.name || rp.title || '外卖满返红包';
                       const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
@@ -4033,23 +4073,19 @@ export const StoreSniping: React.FC = () => {
                     helpText="可为空；若选择，失效时自动替换为最优返利券"
                     className="w-full"
                   >
-                    {(assetDetail?.cards || []).filter(isRebateCouponCard).map((card: any) => {
-                      const cId = String(card.id || card.user_card_id || '');
-                      const cName = cleanEmoji(card.card?.name || card.name || '返利券');
-                      const cDesc = cleanEmoji(card.card?.desc || card.desc || '');
-                      const cExpire = card.expire_time ? formatTimestamp(card.expire_time) : '';
-                      return (
-                        <Select.Option key={cId} value={cId}>
-                          <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
-                            <div className="min-w-0">
-                              <div className="font-medium text-semi-color-text-0 truncate">{cName}</div>
-                              {cDesc && <div className="text-[11px] text-semi-color-text-2 truncate">{cDesc}</div>}
-                            </div>
-                            {cExpire && <span className="text-[11px] text-semi-color-text-2 shrink-0">至 {cExpire}</span>}
+                    {getRebateCouponOptions(assetDetail).map((option) => (
+                      <Select.Option key={option.id} value={option.id}>
+                        <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
+                          <div className="min-w-0">
+                            <div className="font-medium text-semi-color-text-0 truncate">{option.name}</div>
+                            {option.desc && <div className="text-[11px] text-semi-color-text-2 truncate">{option.desc}</div>}
                           </div>
-                        </Select.Option>
-                      );
-                    })}
+                          <span className="text-[11px] text-semi-color-text-2 shrink-0">
+                            {option.source === 'order' ? '订单可用' : '已持有'}
+                          </span>
+                        </div>
+                      </Select.Option>
+                    ))}
                   </Form.Select>
                 </div>
               )}
@@ -4301,7 +4337,7 @@ export const StoreSniping: React.FC = () => {
 
       
 
-      {/* 店名抢单监听配置弹窗 */}
+      {/* 抢单监听配置弹窗 */}
       <Modal
         title={editingMonitorId ? '编辑抢单监听' : '抢单监听'}
         visible={nameMonitorVisible}
@@ -4383,7 +4419,7 @@ export const StoreSniping: React.FC = () => {
                 buttonSize="middle"
                 className="w-full"
               >
-                <Radio value="store">店名监听</Radio>
+                <Radio value="store">抢单监听</Radio>
                 <Radio value="general">常规监听</Radio>
               </Form.RadioGroup>
 
@@ -4469,7 +4505,7 @@ export const StoreSniping: React.FC = () => {
                     helpText="可为空；若选择，失效时自动替换为最优红包"
                     className="w-full"
                   >
-                    {(assetDetail?.redpacks || []).map((rp: any) => {
+                    {getSelectableRedpacks(assetDetail).map((rp: any) => {
                       const rId = String(rp.user_red_pack_id || rp.id || '');
                       const rName = rp.name || rp.title || '外卖满返红包';
                       const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
@@ -4500,23 +4536,19 @@ export const StoreSniping: React.FC = () => {
                     helpText="可为空；若选择，失效时自动替换为最优返利券"
                     className="w-full"
                   >
-                    {(assetDetail?.cards || []).filter(isRebateCouponCard).map((card: any) => {
-                      const cId = String(card.id || card.user_card_id || '');
-                      const cName = cleanEmoji(card.card?.name || card.name || '返利券');
-                      const cDesc = cleanEmoji(card.card?.desc || card.desc || '');
-                      const cExpire = card.expire_time ? formatTimestamp(card.expire_time) : '';
-                      return (
-                        <Select.Option key={cId} value={cId}>
-                          <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
-                            <div className="min-w-0">
-                              <div className="font-medium text-semi-color-text-0 truncate">{cName}</div>
-                              {cDesc && <div className="text-[11px] text-semi-color-text-2 truncate">{cDesc}</div>}
-                            </div>
-                            {cExpire && <span className="text-[11px] text-semi-color-text-2 shrink-0">至 {cExpire}</span>}
+                    {getRebateCouponOptions(assetDetail).map((option) => (
+                      <Select.Option key={option.id} value={option.id}>
+                        <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
+                          <div className="min-w-0">
+                            <div className="font-medium text-semi-color-text-0 truncate">{option.name}</div>
+                            {option.desc && <div className="text-[11px] text-semi-color-text-2 truncate">{option.desc}</div>}
                           </div>
-                        </Select.Option>
-                      );
-                    })}
+                          <span className="text-[11px] text-semi-color-text-2 shrink-0">
+                            {option.source === 'order' ? '订单可用' : '已持有'}
+                          </span>
+                        </div>
+                      </Select.Option>
+                    ))}
                   </Form.Select>
                 </div>
               )}

@@ -336,8 +336,8 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                     spec_card = next((item for item in cards if _as_int(item.get("id") or item.get("user_card_id"), 0) == specified_card_id and _is_card_valid(item)), None)
                     if spec_card:
                         vip_promotion_card_id = specified_card_id
-                        card_desc = f"指定返利券 #{specified_card_id}"
                         vip_extra_silk_card_id = best_extra
+                        card_desc = f"指定返利券 #{specified_card_id}"
                     else:
                         logger.warning(f"预约任务 #{aid} 指定返利券 #{specified_card_id} 已失效，自动平滑替换为最优返利券")
                         vip_promotion_card_id = best_promo
@@ -631,7 +631,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             # 2. 检查是否超过截止时间
             until_ts = _parse_time_today(apt.get("until_time"))
             if until_ts and now_ts >= until_ts:
-                outcome_msg = f"已达到设定的店名监听截止时间 {apt.get('until_time')}，自动结束"
+                outcome_msg = f"已达到设定的抢单监听截止时间 {apt.get('until_time')}，自动结束"
                 db.update_appointment(aid, {
                     "status": "expired",
                     "outcome": outcome_msg
@@ -639,7 +639,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 invalidate_worker_cache()
                 if linked_log_id > 0:
                     t_now = time_service.format_now_ms()
-                    _append_apt_log(aid, linked_log_id, f"[{t_now}] 店名监听截止时间到达 ({apt.get('until_time')})，监听任务自动结束", sync_db=True, status="error")
+                    _append_apt_log(aid, linked_log_id, f"[{t_now}] 抢单监听截止时间到达 ({apt.get('until_time')})，监听任务自动结束", sync_db=True, status="error")
                 continue
 
             # 3. 检查频率与每分钟 00 秒准点放单对齐机制
@@ -660,7 +660,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
 
             # 风控冷却期内直接终止监听任务：继续自旋会持续占用任务槽并连累同账号后续任务
             if is_waf_blocked(_waf_key):
-                _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="店名监听")
+                _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="抢单监听")
                 continue
 
             apt["last_checked_at"] = now_str
@@ -675,7 +675,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 await asyncio.sleep(random.uniform(0.05, 0.15))
 
             listen_mode = apt.get("listen_mode") or "store"
-            monitor_label = "常规监听" if listen_mode == "general" else "店名监听"
+            monitor_label = "常规监听" if listen_mode == "general" else "抢单监听"
             kw = (apt.get("keyword") or "").strip() if listen_mode == "store" else ""
             match_mode = apt.get("match_mode") or "contains"
             activity_requirement = apt.get("activity_requirement") or "all"
@@ -959,7 +959,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         fail_msg = res.get("message") or "名额被抢占或网络响应延迟"
                         logger.warning(f"{monitor_label} #{aid} 抢单尝试未成功: {fail_msg}")
                         if res.get("code") in (403, 429) or "STGW" in str(fail_msg) or "WAF" in str(fail_msg):
-                            _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="店名监听抢单")
+                            _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="抢单监听抢单")
                             continue
                         if res.get("code") == 401 or "401" in str(fail_msg):
                             db.update_appointment(aid, {"status": "error", "outcome": fail_msg})
@@ -992,7 +992,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         _append_apt_log(aid, linked_log_id, step_str, sync_db=(poll_cnt == 1 or poll_cnt % 3 == 0 or is_on_minute_probe), status="running")
 
             except Exception as se:
-                logger.warning(f"店名监听 #{aid} 执行异常: {se}")
+                logger.warning(f"抢单监听 #{aid} 执行异常: {se}")
                 is_401 = (getattr(se, "code", None) == 401) or ("401" in str(se) and "Unauthorized" in str(se))
                 if is_401:
                     err_msg = getattr(se, "msg", None) or "登录凭据已过期或鉴权失效 (HTTP 401 Unauthorized)"
@@ -1012,7 +1012,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
 
                 if _is_waf_failure(se, _waf_key):
                     detail_raw = (getattr(se, "raw", None) or {}).get("detail") if hasattr(se, "raw") else None
-                    _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, detail=detail_raw, phase="店名监听")
+                    _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, detail=detail_raw, phase="抢单监听")
                     continue
                 else:
                     if linked_log_id > 0:

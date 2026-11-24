@@ -3,6 +3,7 @@ import jsQR from 'jsqr';
 import { Button, Card, Empty, Input, Popconfirm, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import {
   IconDelete,
+  IconDownload,
   IconExternalOpen,
   IconQrCode,
   IconRefresh,
@@ -310,6 +311,9 @@ export const DeviceSyncPanel: React.FC = () => {
   });
   const [pairInfo, setPairInfo] = useState<DevicePairStartResult | null>(null);
   const [pairStatus, setPairStatus] = useState('');
+  const [pairExpiresAt, setPairExpiresAt] = useState<number>(0);
+  const [pairExpired, setPairExpired] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [pairedDevices, setPairedDevices] = useState<PairedDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -334,6 +338,9 @@ export const DeviceSyncPanel: React.FC = () => {
 
   const handleStartPair = async () => {
     setPairing(true);
+    setPairInfo(null);
+    setPairExpiresAt(0);
+    setPairExpired(false);
     setPairStatus('正在生成配对二维码...');
     try {
       const normalizedPhoneBase = (phoneBaseUrl || '').trim().replace(/\/+$/, '');
@@ -350,7 +357,10 @@ export const DeviceSyncPanel: React.FC = () => {
       const res = await api.startDevicePair(collectLocalStateSnapshot(), normalizedPhoneBase, normalizedDeviceName);
       if (!res.ok) throw new Error('生成配对二维码失败');
       setPairInfo(res);
-      setPairStatus('等待移动端扫码确认');
+      setPairExpiresAt(Date.now() + Number(res.expires_in || 300) * 1000);
+      setPairExpired(false);
+      setNowTick(Date.now());
+      setPairStatus('状态: 等待中');
       Toast.success(`二维码已生成，${res.expires_in} 秒内有效`);
     } catch (e: any) {
       setPairStatus('');
@@ -361,14 +371,21 @@ export const DeviceSyncPanel: React.FC = () => {
   };
 
   const pollPairStatus = async () => {
-    if (!pairInfo) return;
+    if (!pairInfo || pairExpired) return;
     try {
       const res = await api.getDevicePairStatus(pairInfo.ticket);
-      setPairStatus(res.status === 'used' ? '已授权并同步' : (res.message || `状态: ${res.status}`));
-      if (res.status === 'used' || res.status === 'expired' || res.status === 'not_found') {
+      if (res.status === 'used') {
+        setPairStatus('状态: 已授权并同步');
         setPairInfo(null);
         void loadPairedDevices(true);
+        return;
       }
+      if (res.status === 'expired' || res.status === 'not_found') {
+        setPairStatus('状态: 已过期');
+        setPairExpired(true);
+        return;
+      }
+      setPairStatus(res.status === 'claimed' ? '状态: 等待扫码端导入' : '状态: 等待中');
     } catch { /* 轮询失败不打扰用户 */ }
   };
 
@@ -378,9 +395,20 @@ export const DeviceSyncPanel: React.FC = () => {
 
   useEffect(() => {
     if (!pairInfo) return;
-    const timer = window.setInterval(pollPairStatus, 2000);
-    return () => window.clearInterval(timer);
-  }, [pairInfo]);
+    const statusTimer = window.setInterval(pollPairStatus, 2000);
+    const tickTimer = window.setInterval(() => {
+      const now = Date.now();
+      setNowTick(now);
+      if (pairExpiresAt > 0 && now >= pairExpiresAt) {
+        setPairExpired(true);
+        setPairStatus('状态: 已过期');
+      }
+    }, 1000);
+    return () => {
+      window.clearInterval(statusTimer);
+      window.clearInterval(tickTimer);
+    };
+  }, [pairInfo, pairExpiresAt, pairExpired]);
 
   const handleRevokeDevice = async (deviceId: string, deviceName: string) => {
     try {
@@ -500,7 +528,23 @@ export const DeviceSyncPanel: React.FC = () => {
     }
   };
 
+  const handleSaveQr = () => {
+    if (!pairInfo || pairExpired) return;
+    const link = document.createElement('a');
+    link.href = pairInfo.qr_image;
+    link.download = `设备协同二维码-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    Toast.success('二维码已保存');
+  };
+
   useEffect(() => stopScan, [stopScan]);
+
+  const remainingSeconds = pairInfo && pairExpiresAt > 0
+    ? Math.max(0, Math.ceil((pairExpiresAt - nowTick) / 1000))
+    : 0;
+  const remainingText = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
 
   return (
     <div className="space-y-4">
@@ -510,13 +554,44 @@ export const DeviceSyncPanel: React.FC = () => {
       </div>
 
       <div className="flex flex-col sm:flex-row gap-4 items-center sm:items-center">
-        <div className="shrink-0 w-[220px] h-[220px] rounded-xl border border-semi-color-border bg-white flex items-center justify-center overflow-hidden">
-          {pairInfo ? (
-            <img src={pairInfo.qr_image} alt="设备协同二维码" className="w-full h-full object-contain" />
-          ) : (
-            <div className="text-center text-semi-color-text-2 text-xs px-4">
-              <IconQrCode size="extra-large" className="mb-2" />
-              <div>尚未生成二维码</div>
+        <div className="shrink-0 flex flex-col items-center gap-2">
+          <div className="relative w-[220px] h-[220px] rounded-xl border border-semi-color-border bg-white flex items-center justify-center overflow-hidden">
+            {pairInfo ? (
+              <>
+                <img
+                  src={pairInfo.qr_image}
+                  alt="设备协同二维码"
+                  className={`w-full h-full object-contain ${pairExpired ? 'blur-[6px] opacity-25' : ''}`}
+                />
+                {pairExpired && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 text-center px-4">
+                    <IconQrCode size="extra-large" className="text-semi-color-text-3 mb-2" />
+                    <div className="text-sm font-semibold text-semi-color-text-1">二维码已过期</div>
+                    <div className="text-[11px] text-semi-color-text-2 mt-1">请点击「生成配对二维码」重新生成</div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-center text-semi-color-text-2 text-xs px-4">
+                <IconQrCode size="extra-large" className="mb-2" />
+                <div>尚未生成二维码</div>
+              </div>
+            )}
+          </div>
+          {pairInfo && (
+            <div className="flex items-center gap-2">
+              <Tag color={pairExpired ? 'red' : 'blue'} size="small">
+                {pairExpired ? '已过期' : `剩余 ${remainingText}`}
+              </Tag>
+              <Button
+                size="small"
+                theme="light"
+                icon={<IconDownload />}
+                disabled={pairExpired}
+                onClick={handleSaveQr}
+              >
+                保存二维码
+              </Button>
             </div>
           )}
         </div>
@@ -536,7 +611,7 @@ export const DeviceSyncPanel: React.FC = () => {
           <Button theme="solid" type="primary" icon={<IconQrCode />} loading={pairing} onClick={handleStartPair}>
             生成配对二维码
           </Button>
-          <div className="text-xs text-semi-color-text-2 break-all">
+          <div className={`text-xs break-all ${pairExpired ? 'text-semi-color-danger' : 'text-semi-color-text-2'}`}>
             {pairStatus || '二维码生成后请在 5 分钟内由另一端扫码确认。'}
           </div>
           {pairInfo && (
