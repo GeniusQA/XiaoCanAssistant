@@ -72,6 +72,7 @@ import { useAppStore, hasValidAccountLocation } from '../store/useAppStore';
 import { api } from '../api';
 import { getNtpNowMs } from '../utils/ntpTime';
 import { useOnActivated } from '../utils/useOnActivated';
+import { formatGrowthScore } from '../utils/formatGrowthScore';
 import { DeviceSyncPanel } from '../components/DeviceSyncPanel';
 import type { Account, AccountDetailData, AccountNotifyConfig, AccountNotifyMode, ClawBotStatus } from '../types';
 
@@ -211,7 +212,7 @@ export const Accounts: React.FC = () => {
     setTargetUpdateAccount(acc);
     setModalVisible(true);
     setActiveTab('wechat');
-    setCustomNickname(acc.nickname || '');
+    setCustomNickname(acc.nick_name || '');
     setCustomSilkId(acc.silk_id || '');
     setRawText('');
     setParsedInfo(null);
@@ -672,7 +673,7 @@ export const Accounts: React.FC = () => {
       if (res.ok && res.account) {
         Notification.success({
           title: '小蚕账号直连成功',
-          content: res.message || `已成功从电脑微信提取到小蚕账号【${res.account.nickname}】！`,
+          content: res.message || `已成功从电脑微信提取到小蚕账号【${res.account.nick_name}】！`,
           duration: 5,
         });
         handleCloseModal(false);
@@ -680,7 +681,7 @@ export const Accounts: React.FC = () => {
         if (res.account.key) {
           setCurrentAccountKey(res.account.key);
           if (!hasValidAccountLocation(res.account)) {
-            Toast.warning(`请先为账号【${res.account.nickname || '小蚕用户'}】绑定所在城市与坐标位置`);
+            Toast.warning(`请先为账号【${res.account.nick_name}】绑定所在城市与坐标位置`);
             openLocationModal(res.account.key);
           }
         }
@@ -725,7 +726,7 @@ export const Accounts: React.FC = () => {
 
                 if (!hasNotifiedCaptureRef.current) {
                   hasNotifiedCaptureRef.current = true;
-                  const nick = statusRes.status.account.nickname || '小蚕用户';
+                  const nick = statusRes.status.account.nick_name || '';
                   const silk = statusRes.status.account.silk_id ? ` (Silk ID: ${statusRes.status.account.silk_id})` : '';
                   Notification.success({
                     title: '小蚕账号自动感知捕获成功',
@@ -857,7 +858,7 @@ export const Accounts: React.FC = () => {
               stopMeituanPolling();
 
               setMeituanAuthStatus('success');
-              const targetName = acc?.nickname || '指定账号';
+              const targetName = acc?.nick_name || '';
               setMeituanAuthMessage('美团官方账号绑定成功！');
               Toast.success(pollRes.message || `账号【${targetName}】绑定美团官方账号成功！`);
               await loadAccounts();
@@ -1058,7 +1059,7 @@ export const Accounts: React.FC = () => {
                   检测到 {expiredAccounts.length} 个账号的登录凭据已过期失效
                 </div>
                 <div className="text-xs text-semi-color-text-2 mt-0.5">
-                  受影响账号：{expiredAccounts.map((a) => `【${a.nickname}】`).join('、')}。凭据过期会导致抢单与资产查询报 401 鉴权失效，请尽快重新直连提取或更新凭据。
+                  受影响账号：{expiredAccounts.map((a) => `【${a.nick_name}】`).join('、')}。凭据过期会导致抢单与资产查询报 401 鉴权失效，请尽快重新直连提取或更新凭据。
                 </div>
               </div>
               <Button
@@ -1170,12 +1171,12 @@ export const Accounts: React.FC = () => {
 
                   <div className="flex gap-3 items-center mb-3">
                     <Avatar size="medium" src={acc.avatar || undefined} color="orange" className="shadow-xs shrink-0">
-                      {(acc.nick_name || acc.nickname)?.[0] || '蚕'}
+                      {acc.nick_name?.[0] || ''}
                     </Avatar>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <Text strong className="text-base truncate text-semi-color-text-0 max-w-[160px]" title={acc.nick_name || acc.nickname}>
-                          {acc.nick_name || acc.nickname}
+                        <Text strong className="text-base truncate text-semi-color-text-0 max-w-[160px]" title={acc.nick_name}>
+                          {acc.nick_name}
                         </Text>
                         {acc.phone && (
                           <Text type="tertiary" size="small" className="shrink-0">
@@ -1259,7 +1260,7 @@ export const Accounts: React.FC = () => {
                     </div>
                     {Boolean(acc.vip_score) && (
                       <Text size="small" type="tertiary">
-                        成长值: <Text size="small" strong>{(acc.vip_score || 0).toLocaleString()}</Text>
+                        成长值: <Text size="small" strong>{formatGrowthScore(acc.vip_score).toLocaleString()}</Text>
                       </Text>
                     )}
                   </div>
@@ -1378,7 +1379,7 @@ export const Accounts: React.FC = () => {
                           className="shrink-0"
                           onClick={() => {
                             setCurrentAccountKey(acc.key);
-                            Toast.success(`已成功切换主控账号为【${acc.nickname}】`);
+                            Toast.success(`已成功切换主控账号为【${acc.nick_name}】`);
                           }}
                         >
                           设为主控
@@ -1460,7 +1461,7 @@ export const Accounts: React.FC = () => {
                                   onClick={() => {
                                     Modal.confirm({
                                       title: '确认解除美团绑定？',
-                                      content: `解除后小蚕账号【${acc.nickname}】将不再自动领取美团神券，可随时重新扫码绑定。`,
+                                      content: `解除后小蚕账号【${acc.nick_name}】将不再自动领取美团神券，可随时重新扫码绑定。`,
                                       okText: '确认解除',
                                       cancelText: '取消',
                                       okType: 'danger',
@@ -1550,7 +1551,7 @@ export const Accounts: React.FC = () => {
       {/* 账号接入模态对话框 */}
 
       <Modal
-        title={targetUpdateAccount ? `重新登录 / 覆盖凭据 - 【${targetUpdateAccount.nickname}】` : "添加小蚕账号"}
+        title={targetUpdateAccount ? `重新登录 / 覆盖凭据 - 【${targetUpdateAccount.nick_name}】` : "添加小蚕账号"}
         visible={modalVisible}
         onCancel={() => handleCloseModal(true)}
         footer={null}
@@ -1570,7 +1571,7 @@ export const Accounts: React.FC = () => {
             description={
               <div>
                 <div className="font-semibold text-semi-color-text-0">
-                  正在为已有账号【{targetUpdateAccount.nickname}】(Silk ID: {targetUpdateAccount.silk_id || '未配置'}) 重新登录并覆盖凭据
+                  正在为已有账号【{targetUpdateAccount.nick_name}】(Silk ID: {targetUpdateAccount.silk_id || '未配置'}) 重新登录并覆盖凭据
                 </div>
                 <div className="text-xs text-semi-color-text-2 mt-0.5">
                   获取后将<b>直接覆盖更新该账号</b>的登录状态与有效期，历史定时任务配置与数据保持不变。
@@ -1609,7 +1610,7 @@ export const Accounts: React.FC = () => {
                 {targetUpdateAccount ? (
                   <>
                     步骤 1：在电脑微信小蚕小程序「我的」中<b>退出并重新微信登录</b>（获取全新 180 天凭据）<br />
-                    步骤 2：点击下方按钮，系统将自动读取最新凭据并<b>覆盖更新至【{targetUpdateAccount.nickname}】</b>
+                    步骤 2：点击下方按钮，系统将自动读取最新凭据并<b>覆盖更新至【{targetUpdateAccount.nick_name}】</b>
                   </>
                 ) : (
                   <>
@@ -1915,7 +1916,7 @@ export const Accounts: React.FC = () => {
               <span className="truncate">账号详情与资产中心</span>
               {detailAccount && (
                 <Tag color="blue" size="small" type="light">
-                  {detailData?.user_info?.nick_name || detailAccount.nick_name || detailAccount.nickname}
+                  {detailData?.user_info?.nick_name}
                 </Tag>
               )}
             </div>
@@ -1970,12 +1971,12 @@ export const Accounts: React.FC = () => {
                   color="orange"
                   className="shadow-sm shrink-0"
                 >
-                  {(detailData?.user_info?.nick_name || detailAccount.nick_name || detailAccount.nickname)?.[0] || '蚕'}
+                  {detailData?.user_info?.nick_name?.[0] || ''}
                 </Avatar>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <Text strong className="text-lg text-semi-color-text-0">
-                      {detailData?.user_info?.nick_name || detailAccount.nick_name || detailAccount.nickname}
+                      {detailData?.user_info?.nick_name}
                     </Text>
                     {(() => {
                       const vipInfo = detailData?.user_info?.vip_level_info;
@@ -2005,8 +2006,8 @@ export const Accounts: React.FC = () => {
                 const vipInfo = detailData.user_info.vip_level_info;
                 const isPlus = Boolean(vipInfo.is_plus);
                 const currentVipLevel = vipInfo.new_level || 1;
-                const maxScore = vipInfo.next_level_score || 150000;
-                const curScore = vipInfo.score || 0;
+                const maxScore = formatGrowthScore(vipInfo.next_level_score) || 1500;
+                const curScore = formatGrowthScore(vipInfo.score);
                 const pct = Math.min(100, Math.round((curScore / (maxScore || 1)) * 100));
 
                 return (
@@ -2017,7 +2018,7 @@ export const Accounts: React.FC = () => {
                         <Tag size="small" color={isPlus ? "orange" : "blue"}>等级 {currentVipLevel}</Tag>
                       </div>
                       <Text type="secondary">
-                        {curScore.toLocaleString()} / {maxScore.toLocaleString()} 分
+                        {curScore.toLocaleString()}/{maxScore.toLocaleString()}
                       </Text>
                     </div>
                     <Progress
@@ -2050,13 +2051,13 @@ export const Accounts: React.FC = () => {
                 </Text>
               </div>
               <div className="bg-semi-color-bg-0 p-3 rounded-lg border border-semi-color-border text-center shadow-xs">
-                <Text size="small" type="tertiary" className="block mb-0.5">霸王餐成单</Text>
+                <Text size="small" type="tertiary" className="block mb-0.5">成交订单</Text>
                 <Text strong className="text-semi-color-success text-base">
                   {(detailData?.user_info?.completed_number ?? detailAccount.completed_number) || 0} 单
                 </Text>
               </div>
               <div className="bg-semi-color-bg-0 p-3 rounded-lg border border-semi-color-border text-center shadow-xs">
-                <Text size="small" type="tertiary" className="block mb-0.5">元宝总储备</Text>
+                <Text size="small" type="tertiary" className="block mb-0.5">元宝余额</Text>
                 <Text strong className="text-semi-color-warning text-base">
                   {((detailData?.task_info?.yb_point ?? detailAccount.yb_point) || 0).toLocaleString()}
                 </Text>
@@ -2312,7 +2313,7 @@ export const Accounts: React.FC = () => {
                             key: '账号昵称备注',
                             value: (
                               <Space spacing="tight">
-                                <Text strong>{detailAccount.nickname || '小蚕用户'}</Text>
+                                <Text strong>{detailAccount.nick_name}</Text>
                                 {detailAccount.key === currentAccountKey && (
                                   <Tag color="blue" size="small">当前主控</Tag>
                                 )}
@@ -2501,7 +2502,7 @@ export const Accounts: React.FC = () => {
 
       {/* 账号专属消息推送配置模态对话框 */}
       <Modal
-        title={`账号专属推送配置 - 【${notifyAccount?.nickname || '未命名账号'}】`}
+        title={`账号专属推送配置 - 【${notifyAccount?.nick_name}】`}
         visible={notifyModalVisible}
         onCancel={() => setNotifyModalVisible(false)}
         width={640}
@@ -3053,7 +3054,7 @@ export const Accounts: React.FC = () => {
 
       {/* 美团官方扫码登录 Modal */}
       <Modal
-        title={targetBindAccount ? `绑定美团账号 - ${targetBindAccount.nickname}` : '扫码绑定美团账号'}
+        title={targetBindAccount ? `绑定美团账号 - ${targetBindAccount.nick_name}` : '扫码绑定美团账号'}
         visible={meituanLoginModalVisible}
         onCancel={handleCancelMeituanLogin}
         footer={null}
@@ -3066,7 +3067,7 @@ export const Accounts: React.FC = () => {
               <div className="flex items-center gap-2">
                 <Avatar size="extra-extra-small" style={{ backgroundColor: '#ffc300', color: '#222', fontSize: '10px', fontWeight: 600 }}>美</Avatar>
                 <Text size="small">
-                  正在为账号【<Text strong>{targetBindAccount.nickname}</Text>】绑定美团
+                  正在为账号【<Text strong>{targetBindAccount.nick_name}</Text>】绑定美团
                 </Text>
               </div>
             </div>
@@ -3141,7 +3142,7 @@ export const Accounts: React.FC = () => {
               <IconCheckCircleStroked style={{ fontSize: 48, color: 'var(--semi-color-success)' }} />
               <Text strong style={{ fontSize: 16 }}>授权成功！</Text>
               <Text type="secondary" className="text-xs">
-                {targetBindAccount ? `账号【${targetBindAccount.nickname}】美团已成功关联并激活，窗口即将自动关闭...` : '美团账号已成功关联并激活，窗口即将自动关闭...'}
+                {targetBindAccount ? `账号【${targetBindAccount.nick_name}】美团已成功关联并激活，窗口即将自动关闭...` : '美团账号已成功关联并激活，窗口即将自动关闭...'}
               </Text>
             </div>
           )}
@@ -3150,7 +3151,7 @@ export const Accounts: React.FC = () => {
 
       {/* 美团优惠券明细 Modal */}
       <Modal
-        title={`今日美团卡券明细 - ${selectedCouponAccount?.nickname || ''}`}
+        title={`今日美团卡券明细 - ${selectedCouponAccount?.nick_name}`}
         visible={couponModalVisible}
         onCancel={() => setCouponModalVisible(false)}
         footer={

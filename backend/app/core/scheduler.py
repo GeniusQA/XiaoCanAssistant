@@ -24,6 +24,44 @@ from .notification import NotificationEvent, NotificationLevel
 
 logger = logging.getLogger("xiaocan.scheduler")
 
+_TASK_LABELS = {
+    "yb_task": "轻松赚元宝",
+    "svip_rebate": "SVIP高额返利券",
+    "brand_flash": "SVIP大牌券秒杀",
+    "media_vip": "影音会员周卡",
+    "free_order": "订单全额免单券",
+    "collect_points": "收取未收元宝",
+    "redpack_rain": "整点红包雨",
+    "flash_sale": "元宝秒杀抢券",
+    "daily": "元宝乐园综合打卡",
+    "group_lottery": "免费开红包与抽奖",
+    "vip_expand": "会员成长膨胀礼包",
+    "expire_remind": "登录凭据到期巡检",
+    "coupon_remind": "卡券到期提醒",
+    "auto_withdraw": "钱包余额自动提现",
+    "dual_rebate_monitor": "同店双返监控",
+    "meituan_coupon": "美团神券每日一键领",
+    "store_grab": "霸王餐即时抢单",
+    "store_appoint": "倒计时预约抢单",
+    "store_monitor": "实时抢单名额监听",
+    "store_keyword": "店名定时搜索",
+    "store_search": "商户定向嗅探",
+    "store_cancel": "霸王餐名额取消",
+}
+
+
+def task_display_name(task_id: str) -> str:
+    return _TASK_LABELS.get(task_id, task_id)
+
+
+def trigger_display_name(trigger_type: str) -> str:
+    if trigger_type == "cron":
+        return "定时调度"
+    if trigger_type == "manual":
+        return "手动执行"
+    return trigger_type
+
+
 class NtpCronTrigger(CronTrigger):
     """基于阿里云 NTP 标准北京时间的 CronTrigger
     自动补偿宿主机本地时钟与标准北京时间 (UTC+8) 的偏差，确保所有定时与秒杀任务
@@ -67,11 +105,14 @@ async def notify_task_result(
     """统一推送自动化任务执行结果（成功/失败），复用现有「执行监控」事件订阅。"""
     success = status == "success"
     level = NotificationLevel.SUCCESS if success else NotificationLevel.ERROR
-    title = f"【{task_label}】执行{'成功' if success else '失败'}"
+    display_task_label = task_display_name(task_id) if task_label == task_id else task_label
+    account = db.get_account_by_key(account_key.strip()) if account_key else None
+    account_name = (account or {}).get("nick_name") or ""
+    title = f"{display_task_label}执行{'成功' if success else '失败'}"
     content = (
-        f"任务: {task_label} ({task_id})\n"
-        f"账号: {account_key}\n"
-        f"触发: {'定时调度' if trigger_type == 'cron' else trigger_type}\n"
+        f"任务: {display_task_label}\n"
+        f"账号: {account_name}\n"
+        f"触发: {trigger_display_name(trigger_type)}\n"
         f"结果: {result_text}"
     )
     try:
@@ -393,52 +434,28 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
 
     token = account.get("token")
     if not token:
-        msg = f"账号 [{account.get('nickname')}] 未配置有效 Token，请先登录绑定"
+        msg = f"账号 [{account.get('nick_name')}] 未配置有效 Token，请先登录绑定"
         db.add_job_log(job_id, account_key, task_id, "error", msg, result=msg)
         await _finish_scheduled_execution(account_key, task_id, job_id, "error", msg)
         await notify_task_result(account_key, task_id, task_label, "error", trigger_type, msg)
         return {"ok": False, "msg": msg}
 
     if not db.has_valid_location(account):
-        msg = f"账号 [{account.get('nickname') or account_key}] 尚未绑定有效定位地址，请先绑定地址后再执行自动化任务"
+        msg = f"账号 [{account.get('nick_name')}] 尚未绑定有效定位地址，请先绑定地址后再执行自动化任务"
         db.add_job_log(job_id, account_key, task_id, "error", msg, result=msg)
         await _finish_scheduled_execution(account_key, task_id, job_id, "error", msg)
         await notify_task_result(account_key, task_id, task_label, "error", trigger_type, msg)
         return {"ok": False, "code": "LOCATION_REQUIRED", "msg": msg, "output": msg}
 
     city_code = int(account["city_code"])
-    nickname = account.get("nickname") or account_key
+    nickname = account.get("nick_name") or ""
     silk_id = account.get("silk_id")
     user_id = account.get("user_id")
     # WAF 冷却按账号隔离：任务内所有风控判断只针对当前账号
     _waf_key = waf_account_key(token=token, silk_id=silk_id, user_id=user_id)
 
-    task_names = {
-        "yb_task": "轻松赚元宝",
-        "svip_rebate": "SVIP高额返利券",
-        "brand_flash": "SVIP大牌券秒杀",
-        "media_vip": "影音会员周卡",
-        "free_order": "订单全额免单券",
-        "collect_points": "收取未收元宝",
-        "redpack_rain": "整点红包雨",
-        "flash_sale": "元宝秒杀抢券",
-        "daily": "元宝乐园综合打卡",
-        "group_lottery": "免费开红包与抽奖",
-        "vip_expand": "会员成长膨胀礼包",
-        "expire_remind": "登录凭据到期巡检",
-        "coupon_remind": "卡券到期提醒",
-        "auto_withdraw": "钱包余额自动提现",
-        "dual_rebate_monitor": "同店双返监控",
-        "meituan_coupon": "美团神券每日一键领",
-        "store_grab": "霸王餐即时抢单",
-        "store_appoint": "倒计时预约抢单",
-        "store_monitor": "实时抢单名额监听",
-        "store_keyword": "店名定时搜索",
-        "store_search": "商户定向嗅探",
-        "store_cancel": "霸王餐名额取消",
-    }
-    task_label = task_names.get(task_id, task_id)
-    trig_label = "定时调度" if trigger_type == "cron" else ("手动执行" if trigger_type == "manual" else trigger_type)
+    task_label = task_display_name(task_id)
+    trig_label = trigger_display_name(trigger_type)
     log_output = f"[{time_service.format_now()}] 开始执行【{task_label}】(账号: {nickname}, 方式: {trig_label})\n"
     status = "running"
     log_id = 0
@@ -2042,16 +2059,40 @@ async def _periodic_clawbot_session_check():
         if not db.get_setting("clawbot_renewal_reminder_enabled", True):
             return
         session = clawbot_client.get_session_status(auth)
+        status_name = str(session.get("session_status") or "")
+        ctx_key = str(session.get("context_token_at") or session.get("last_verified_at") or 0)
+        remaining = int(session.get("remaining_seconds") or 0)
+        notified_ctx = str(db.get_setting("clawbot_renewal_notified_ctx", "") or "")
+
+        # 会话过期后 ClawBot 自身无法主动推送，必须专门提醒用户手动发信激活。
+        # 该提醒走全局通知中枢，可经其他已启用通道送达；并允许使用预留的最后一条额度。
+        if status_name in ("expired", "credential_expired"):
+            expired_key = str(
+                session.get("expires_at")
+                or session.get("last_failure_at")
+                or session.get("context_token_at")
+                or "unknown"
+            )
+            notified_expired = str(db.get_setting("clawbot_session_expired_notified_ctx", "") or "")
+            if expired_key != notified_expired:
+                await send_system_notification(
+                    title="微信 ClawBot 会话已过期，请手动激活",
+                    content=(
+                        "检测到微信 ClawBot 推送会话已超过有效时间，当前无法主动推送抢单、秒杀与任务异常通知。"
+                        "请在手机微信向你的 ClawBot 机器人发送任意消息建立新会话，然后在设置中点击“检测会话激活”。"
+                        "系统已为会话过期提醒预留推送额度；其他已启用的通知通道可正常收到本提醒。"
+                    ),
+                    level="error",
+                    event=NotificationEvent.CLAW_SESSION_EXPIRED,
+                )
+                db.set_setting("clawbot_session_expired_notified_ctx", expired_key)
+            return
+
         if not session.get("session_active") or not session.get("has_context_token"):
             return
 
         warn_hours = int(db.get_setting("clawbot_renewal_warn_hours", 2) or 2)
         warn_hours = min(max(warn_hours, 1), 72)
-        ctx_key = str(session.get("context_token_at") or session.get("last_verified_at") or 0)
-        remaining = int(session.get("remaining_seconds") or 0)
-        notified_ctx = str(db.get_setting("clawbot_renewal_notified_ctx", "") or "")
-
-        status_name = str(session.get("session_status") or "")
         if status_name == "unverified":
             legacy_key = f"legacy:{(auth or {}).get('savedAt') or 'unknown'}"
             if legacy_key != notified_ctx:
@@ -2179,13 +2220,13 @@ def reload_schedules():
                     trigger=trigger,
                     args=[key, task_id, "cron"],
                     id=f"{key}_{task_id}",
-                    name=f"{acc.get('nickname')}_{task_id}",
+                    name=f"{acc.get('nick_name')}_{task_id}",
                     max_instances=1,
                     coalesce=True,
                     misfire_grace_time=60,
                     replace_existing=True
                 )
-                logger.info(f"已装载同店双返监控: {acc.get('nickname')} - 固定时段={interval}分钟 (时段={hours_desc})")
+                logger.info(f"已装载同店双返监控: {acc.get('nick_name')} - 固定时段={interval}分钟 (时段={hours_desc})")
                 continue
 
             fixed_trig = create_fixed_trigger(task_id)
@@ -2195,13 +2236,13 @@ def reload_schedules():
                     trigger=fixed_trig,
                     args=[key, task_id, "cron"],
                     id=f"{key}_{task_id}",
-                    name=f"{acc.get('nickname')}_{task_id}",
+                    name=f"{acc.get('nick_name')}_{task_id}",
                     max_instances=1,
                     coalesce=True,
                     misfire_grace_time=60,
                     replace_existing=True
                 )
-                logger.info(f"已装载官方固定时点任务: {acc.get('nickname')} - {task_id}")
+                logger.info(f"已装载官方固定时点任务: {acc.get('nick_name')} - {task_id}")
                 continue
 
             cron_time = cfg.get("cron_time") or TASK_DEFAULT_TIME.get(task_id, "09:00")
@@ -2212,13 +2253,13 @@ def reload_schedules():
                     trigger=NtpCronTrigger(hour=int(hour), minute=int(minute)),
                     args=[key, task_id, "cron"],
                     id=f"{key}_{task_id}",
-                    name=f"{acc.get('nickname')}_{task_id}",
+                    name=f"{acc.get('nick_name')}_{task_id}",
                     max_instances=1,
                     coalesce=True,
                     misfire_grace_time=60,
                     replace_existing=True
                 )
-                logger.info(f"已装载定时任务: {acc.get('nickname')} - {task_id} 于 {cron_time}")
+                logger.info(f"已装载定时任务: {acc.get('nick_name')} - {task_id} 于 {cron_time}")
             except Exception as e:
                 logger.error(f"解析任务定时时间失败 {task_id}: {cron_time} - {e}")
 

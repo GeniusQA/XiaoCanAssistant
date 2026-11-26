@@ -49,7 +49,29 @@ import { useGSAP, animateStaggerEnter, animateSmoothSwitch, gsap } from '../util
 import { useOnActivated } from '../utils/useOnActivated';
 import { getTaskLabel } from '../constants/taskLabels';
 import { getLogAccountDisplay } from '../utils/logAccount';
+import { formatGrowthScore } from '../utils/formatGrowthScore';
+import { getMessageNextPage, mergeUniquePage } from '../utils/secondaryPagination';
 import type { JobLog, StoreAppointment, OrderStats, DashboardChartData, XiaoCanMessage, XiaoCanMessageChannel, Order, TaskItem } from '../types';
+
+interface MessagePageState {
+  items: XiaoCanMessage[];
+  nextPage: number | null;
+  loaded: boolean;
+  loading: boolean;
+  error: string;
+  failedPage: number | null;
+}
+
+interface MessageCenterState {
+  accountKey: string;
+  pages: Record<number, MessagePageState>;
+  channels: XiaoCanMessageChannel[];
+  unreadTotal: number;
+}
+
+const createMessagePage = (): MessagePageState => ({
+  items: [], nextPage: 1, loaded: false, loading: false, error: '', failedPage: null,
+});
 
 const { Text } = Typography;
 
@@ -144,14 +166,32 @@ export const Dashboard: React.FC = () => {
   const tasksListRef = useRef<HTMLDivElement>(null);
   const rightPanelContentRef = useRef<HTMLDivElement>(null);
 
-  // 核心业务数据状态
-  const [messages, setMessages] = useState<XiaoCanMessage[]>([]);
-  const [messageChannels, setMessageChannels] = useState<XiaoCanMessageChannel[]>([]);
-  const [messagesUnreadTotal, setMessagesUnreadTotal] = useState<number>(0);
+  // 消息按频道保留独立游标；账号切换时整组失效。
+  const effectiveMessageAccountKey = currentAccountKey || (accounts[0]?.key ?? '');
+  const dashboardActive = useAppStore((s) => s.activeTab === 'dashboard');
+  const [messageCenter, setMessageCenter] = useState<MessageCenterState>({
+    accountKey: '', pages: {}, channels: [], unreadTotal: 0,
+  });
+  const messageCenterRef = useRef(messageCenter);
+  const messageSelectionRef = useRef({ channelId: 0, generation: 0 });
+  const messageReadRequestRef = useRef(0);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const messageLoadMoreRef = useRef<HTMLDivElement>(null);
   const [selectedChannelId, setSelectedChannelId] = useState<number>(0);
-  const [messagesLoading, setMessagesLoading] = useState<boolean>(false);
+  const selectedMessagePage = messageCenter.accountKey === effectiveMessageAccountKey
+    ? messageCenter.pages[selectedChannelId] ?? createMessagePage()
+    : createMessagePage();
+  const messages = selectedMessagePage.items;
+  const messagesLoading = selectedMessagePage.loading;
+  const messageChannels = messageCenter.accountKey === effectiveMessageAccountKey ? messageCenter.channels : [];
+  const messagesUnreadTotal = messageCenter.accountKey === effectiveMessageAccountKey ? messageCenter.unreadTotal : 0;
   const [markingRead, setMarkingRead] = useState<boolean>(false);
   const [activeMessageModal, setActiveMessageModal] = useState<XiaoCanMessage | null>(null);
+  const updateMessageCenter = useCallback((update: (previous: MessageCenterState) => MessageCenterState) => {
+    const next = update(messageCenterRef.current);
+    messageCenterRef.current = next;
+    setMessageCenter(next);
+  }, []);
 
   // 待上传外卖订单 (官方限额 3 笔) 状态
   const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
@@ -294,7 +334,7 @@ export const Dashboard: React.FC = () => {
     }
     const targetAcc = accounts.find((a) => a.key === key);
     if (!hasValidAccountLocation(targetAcc)) {
-      Toast.warning(`账号【${targetAcc?.nickname || key}】未绑定地址，请先绑定地址后再执行任务`);
+      Toast.warning(`账号【${targetAcc?.nick_name}】未绑定地址，请先绑定地址后再执行任务`);
       openLocationModal(key);
       return;
     }
@@ -356,65 +396,151 @@ export const Dashboard: React.FC = () => {
     });
   };
 
-  const hasLoadedMessagesOnceRef = useRef<boolean>(false);
-
-  // 小蚕官方消息中心数据拉取
-  const fetchMessages = useCallback(async (channelId?: number, silent = false) => {
-    const effectiveKey = currentAccountKey || (accounts[0]?.key ?? '');
-    if (!effectiveKey) {
-      setMessages([]);
-      setMessageChannels([]);
-      setMessagesUnreadTotal(0);
-      hasLoadedMessagesOnceRef.current = true;
-      return;
-    }
-    const cid = channelId !== undefined ? channelId : selectedChannelId;
-    if (!silent) setMessagesLoading(true);
+  // 小蚕官方消息中心数据拉取；加载中的标志同步写入 ref，拦截同帧重复触底。
+  const fetchMessages = useCallback(async (channelId?: number, reset = true) => {
+    const store = useAppStore.getState();
+    const accountKey = store.currentAccountKey || (store.accounts[0]?.key ?? '');
+    const selection = messageSelectionRef.current;
+    const cid = channelId ?? selection.channelId;
+    if (!accountKey || cid !== selection.channelId || messageCenterRef.current.accountKey !== accountKey) return;
+    const previous = messageCenterRef.current.pages[cid] ?? createMessagePage();
+    if (previous.loading) return;
+    const page = reset ? 1 : previous.failedPage ?? previous.nextPage;
+    if (page === null) return;
+    const generation = selection.generation;
+    const isCurrent = () => {
+      const currentStore = useAppStore.getState();
+      const currentKey = currentStore.currentAccountKey || (currentStore.accounts[0]?.key ?? '');
+      return currentKey === accountKey && messageCenterRef.current.accountKey === accountKey
+        && messageSelectionRef.current.generation === generation
+        && messageSelectionRef.current.channelId === cid;
+    };
+    updateMessageCenter((state) => ({
+      ...state,
+      pages: { ...state.pages, [cid]: { ...previous, loading: true, error: '', failedPage: null } },
+    }));
     try {
       const res = await api.getMessages({
-        account_key: effectiveKey,
+        account_key: accountKey,
         channel_id: cid > 0 ? cid : undefined,
-        page: 1,
+        page,
         page_size: 25,
       });
-      if (res.ok) {
-        setMessages(res.messages || []);
-        if (res.channels && res.channels.length > 0) {
-          setMessageChannels(res.channels);
-        }
-        setMessagesUnreadTotal(res.unread_total ?? 0);
-      }
-    } catch {
-      // 异常捕获
-    } finally {
-      hasLoadedMessagesOnceRef.current = true;
-      if (!silent) setMessagesLoading(false);
+      if (!isCurrent()) return;
+      if (!res.ok) throw new Error(res.message || res.error || '获取消息失败，请重试');
+      if (!Array.isArray(res.messages)) throw new Error('消息列表返回异常，请重试');
+      const nextPage = getMessageNextPage(res, page);
+      updateMessageCenter((state) => ({
+        ...state,
+        channels: Array.isArray(res.channels) ? res.channels : state.channels,
+        unreadTotal: res.unread_total ?? state.unreadTotal,
+        pages: {
+          ...state.pages,
+          [cid]: {
+            items: mergeUniquePage(page === 1 ? [] : state.pages[cid]?.items ?? [], res.messages, (message) => message.message_id),
+            nextPage, loaded: true, loading: false, error: '', failedPage: null,
+          },
+        },
+      }));
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
+      updateMessageCenter((state) => ({
+        ...state,
+        pages: {
+          ...state.pages,
+          [cid]: {
+            ...state.pages[cid], loading: false,
+            error: error instanceof Error ? error.message : '消息加载异常，请重试',
+            failedPage: page,
+          },
+        },
+      }));
     }
-  }, [currentAccountKey, accounts[0]?.key, selectedChannelId]);
+  }, [updateMessageCenter]);
 
-  // 全部标记为已读
+  useEffect(() => {
+    messageSelectionRef.current.generation += 1;
+    messageReadRequestRef.current += 1;
+    updateMessageCenter(() => ({ accountKey: effectiveMessageAccountKey, pages: {}, channels: [], unreadTotal: 0 }));
+    setActiveMessageModal(null);
+    setMarkingRead(false);
+    if (messageListRef.current) messageListRef.current.scrollTop = 0;
+    if (effectiveMessageAccountKey) void fetchMessages();
+    return () => {
+      messageSelectionRef.current.generation += 1;
+      messageReadRequestRef.current += 1;
+    };
+  }, [effectiveMessageAccountKey, fetchMessages, updateMessageCenter]);
+
+  const handleChangeMessageChannel = (channelId: number) => {
+    if (channelId === messageSelectionRef.current.channelId) return;
+    const generation = messageSelectionRef.current.generation + 1;
+    messageSelectionRef.current = { channelId, generation };
+    const store = useAppStore.getState();
+    const accountKey = store.currentAccountKey || (store.accounts[0]?.key ?? '');
+    updateMessageCenter((state) => state.accountKey === accountKey ? ({
+      ...state,
+      pages: Object.fromEntries(Object.entries(state.pages).map(([id, page]) => [id, { ...page, loading: false }])),
+    }) : ({ accountKey, pages: {}, channels: [], unreadTotal: 0 }));
+    setSelectedChannelId(channelId);
+    setActiveMessageModal(null);
+    if (messageListRef.current) messageListRef.current.scrollTop = 0;
+    if (!messageCenterRef.current.pages[channelId]?.loaded) void fetchMessages(channelId, false);
+  };
+
+  useEffect(() => {
+    const root = messageListRef.current;
+    const sentinel = messageLoadMoreRef.current;
+    if (!dashboardActive || rightPanelTab !== 'messages' || !root || !sentinel
+      || !selectedMessagePage.loaded || selectedMessagePage.loading || selectedMessagePage.error
+      || selectedMessagePage.nextPage === null) return;
+    // 视口观察会计入所有滚动祖先的裁剪，兼容移动端由页面承担滚动的布局。
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void fetchMessages(undefined, false);
+    }, { rootMargin: '0px 0px 120px 0px' });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [dashboardActive, rightPanelTab, selectedChannelId, selectedMessagePage.loaded, selectedMessagePage.loading,
+    selectedMessagePage.error, selectedMessagePage.nextPage, messages.length, fetchMessages]);
+
+  // 全部标记为已读，同时更新所有已缓存频道并废弃标记前的在途响应。
   const handleMarkAllRead = async () => {
-    const effectiveKey = currentAccountKey || (accounts[0]?.key ?? '');
+    const effectiveKey = effectiveMessageAccountKey;
     if (!effectiveKey) {
       Toast.warning('请先绑定并选择主控小蚕账号');
       return;
     }
+    const requestId = ++messageReadRequestRef.current;
+    const isCurrent = () => {
+      const store = useAppStore.getState();
+      return messageReadRequestRef.current === requestId
+        && (store.currentAccountKey || (store.accounts[0]?.key ?? '')) === effectiveKey;
+    };
     setMarkingRead(true);
     try {
       const res = await api.markAllMessagesRead(effectiveKey);
+      if (!isCurrent()) return;
       if (res.ok) {
         Toast.success('所有消息已标记为已读');
-        setMessages((prev) => prev.map((m) => ({ ...m, unread: 0 })));
-        setMessageChannels((prev) => prev.map((c) => ({ ...c, unread: 0 })));
-        setMessagesUnreadTotal(0);
-        fetchMessages(selectedChannelId, true);
+        messageSelectionRef.current.generation += 1;
+        const currentPage = messageCenterRef.current.pages[messageSelectionRef.current.channelId];
+        updateMessageCenter((state) => ({
+          ...state,
+          pages: Object.fromEntries(Object.entries(state.pages).map(([id, page]) => [id, {
+            ...page, loading: false, items: page.items.map((message) => ({ ...message, unread: 0 })),
+          }])),
+          channels: state.channels.map((channel) => ({ ...channel, unread: 0 })),
+          unreadTotal: 0,
+        }));
+        setActiveMessageModal((message) => message ? { ...message, unread: 0 } : null);
+        if (currentPage?.loading || !currentPage?.loaded) void fetchMessages(undefined, false);
       } else {
         Toast.error(res.message || '标记已读失败');
       }
-    } catch (e: any) {
-      Toast.error(`操作失败: ${e.message || e}`);
+    } catch (error: unknown) {
+      if (isCurrent()) Toast.error(`操作失败: ${error instanceof Error ? error.message : '网络连接异常'}`);
     } finally {
-      setMarkingRead(false);
+      if (isCurrent()) setMarkingRead(false);
     }
   };
 
@@ -428,6 +554,7 @@ export const Dashboard: React.FC = () => {
     if (inFlightDashboardRef.current) return;
     inFlightDashboardRef.current = true;
     lastDashboardSignatureRef.current = signature;
+    void fetchMessages();
 
     if (!silent) setLoading(true);
     try {
@@ -465,7 +592,6 @@ export const Dashboard: React.FC = () => {
         setEnabledTaskCount(enabled);
         setTotalTaskCount(tasksRes.tasks.length);
       }
-      fetchMessages(selectedChannelId, silent);
       fetchPendingOrders(silent);
     } catch (e) {
       // 异常捕获
@@ -772,11 +898,11 @@ export const Dashboard: React.FC = () => {
     const accKey = currentAccountKey || accounts[0]?.key;
     const curAcc = accounts.find((a) => a.key === accKey);
     if (!hasValidAccountLocation(curAcc)) {
-      Toast.warning(`账号【${curAcc?.nickname || accKey}】未绑定地址，请先绑定地址后再打卡`);
+      Toast.warning(`账号【${curAcc?.nick_name}】未绑定地址，请先绑定地址后再打卡`);
       openLocationModal(accKey);
       return;
     }
-    const accLabel = curAcc ? (curAcc.nickname || curAcc.phone || '当前账号') : '当前账号';
+    const accLabel = curAcc?.nick_name || '';
 
     setBatchAllLoading(true);
     try {
@@ -829,7 +955,7 @@ export const Dashboard: React.FC = () => {
               color="orange"
               className="ring-2 ring-semi-color-primary/30 group-hover:ring-semi-color-primary group-hover:scale-105 transition-all duration-300 shadow-xs"
             >
-              {currentAccount?.nickname?.[0] || '蚕'}
+              {currentAccount?.nick_name?.[0] || ''}
             </Avatar>
             <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-gray-900 shadow-xs" />
           </div>
@@ -840,7 +966,7 @@ export const Dashboard: React.FC = () => {
                 className="font-bold text-base sm:text-lg text-semi-color-text-0 truncate max-w-[240px] cursor-pointer hover:text-semi-color-primary transition-colors"
                 onClick={() => setActiveTab('accounts')}
               >
-                {currentAccount?.nickname || '未选择主控账号'}
+                {currentAccount?.nick_name}
               </span>
               <Tag
                 color={currentAccount?.is_plus ? 'amber' : 'blue'}
@@ -869,7 +995,7 @@ export const Dashboard: React.FC = () => {
               </span>
               {Boolean(currentAccount?.vip_score) && (
                 <span className="text-semi-color-text-2">
-                  成长值: <span className="font-mono text-semi-color-text-1"><NumberAnimation to={currentAccount?.vip_score || 0} showSeparator refreshKey={dashboardRefreshKey} className="font-mono text-semi-color-text-1" /></span>
+                  成长值: <span className="font-mono text-semi-color-text-1"><NumberAnimation to={formatGrowthScore(currentAccount?.vip_score)} showSeparator refreshKey={dashboardRefreshKey} className="font-mono text-semi-color-text-1" /></span>
                 </span>
               )}
             </div>
@@ -902,7 +1028,7 @@ export const Dashboard: React.FC = () => {
             type="warning"
             closeIcon={null}
             icon={<IconMapPin />}
-            title={`当前账号【${dashAcc.nickname || dashAcc.key}】尚未绑定抢单位置`}
+            title={`当前账号【${dashAcc.nick_name}】尚未绑定抢单位置`}
             description={
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <span>系统不设默认地址，地址跟随账号独立保存。请先绑定城市与坐标位置，才能正常执行任务或抢单。</span>
@@ -1234,7 +1360,7 @@ export const Dashboard: React.FC = () => {
                                 )}
                                 {acc && accounts.length > 1 && (
                                   <Tag size="small" color="grey" type="light" className="truncate max-w-[80px] shrink-0">
-                                    {acc.nickname}
+                                    {acc.nick_name}
                                   </Tag>
                                 )}
                               </div>
@@ -1625,7 +1751,7 @@ export const Dashboard: React.FC = () => {
                           return <span className="text-xs">全部账号</span>;
                         }
                         const acc = accounts.find((a) => a.key === val);
-                        return <span className="text-xs truncate">{acc?.nickname || val}</span>;
+                        return <span className="text-xs truncate">{acc?.nick_name}</span>;
                       }}
                     >
                       <Select.Option value="all">
@@ -1635,9 +1761,9 @@ export const Dashboard: React.FC = () => {
                         <Select.Option key={a.key} value={a.key}>
                           <div className="flex items-center gap-1.5 py-0.5">
                             <Avatar size="extra-extra-small" src={a.avatar || undefined} color="orange">
-                              {a.nickname?.[0] || '蚕'}
+                              {a.nick_name?.[0] || ''}
                             </Avatar>
-                            <span className="text-xs truncate flex-1">{a.nickname}</span>
+                            <span className="text-xs truncate flex-1">{a.nick_name}</span>
                           </div>
                         </Select.Option>
                       ))}
@@ -1807,11 +1933,7 @@ export const Dashboard: React.FC = () => {
                     type="button"
                     buttonSize="small"
                     value={selectedChannelId}
-                    onChange={(e) => {
-                      const cid = Number(e.target.value);
-                      setSelectedChannelId(cid);
-                      fetchMessages(cid);
-                    }}
+                    onChange={(e) => handleChangeMessageChannel(Number(e.target.value))}
                   >
                     <Radio value={0}>
                       <span className="text-xs">全部</span>
@@ -1835,13 +1957,17 @@ export const Dashboard: React.FC = () => {
                 </div>
 
                 {/* 消息列表 */}
-                <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 p-2">
-                  {!hasLoadedMessagesOnceRef.current && messagesLoading && messages.length === 0 ? (
+                <div ref={messageListRef} className="flex-1 min-h-0 overflow-y-auto space-y-1.5 p-2">
+                  {!effectiveMessageAccountKey ? (
+                    <div className="py-8"><Empty title="请先选择账号" description="绑定小蚕账号后可查看通知消息" /></div>
+                  ) : messagesLoading && messages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full text-semi-color-text-2 gap-2 py-8">
                       <Spin size="middle" />
                       <span className="text-xs">拉取小蚕官方通知...</span>
                     </div>
-                  ) : messages.length === 0 ? (
+                  ) : selectedMessagePage.error && messages.length === 0 ? (
+                    <div className="py-6 text-center text-sm text-semi-color-text-2">消息加载失败，请在下方重试</div>
+                  ) : selectedMessagePage.loaded && messages.length === 0 && selectedMessagePage.nextPage === null ? (
                     <div className="py-8">
                       <Empty
                         title="暂无通知消息"
@@ -1932,6 +2058,26 @@ export const Dashboard: React.FC = () => {
                       );
                     })
                   )}
+                  {effectiveMessageAccountKey && (selectedMessagePage.loaded || selectedMessagePage.error || messages.length > 0) && (
+                    <div role="status" aria-live="polite" className="flex flex-wrap items-center justify-center gap-2 py-3 text-xs text-semi-color-text-2">
+                      {messagesLoading ? (
+                        <><Spin size="small" /><span>正在加载消息...</span></>
+                      ) : selectedMessagePage.error ? (
+                        <>
+                          <span className="text-semi-color-danger">{selectedMessagePage.error}</span>
+                          <Button size="small" theme="borderless" onClick={() => fetchMessages(undefined, false)}>点击重试</Button>
+                        </>
+                      ) : selectedMessagePage.nextPage !== null ? (
+                        <>
+                          <span>已展示 {messages.length} 条消息</span>
+                          <Button size="small" theme="borderless" onClick={() => fetchMessages(undefined, false)}>加载更多消息</Button>
+                        </>
+                      ) : messages.length > 0 ? (
+                        <span>已展示全部 {messages.length} 条消息，已到底部</span>
+                      ) : null}
+                    </div>
+                  )}
+                  <div ref={messageLoadMoreRef} aria-hidden="true" className="h-px shrink-0" />
                 </div>
 
                 {/* 消息底栏 */}

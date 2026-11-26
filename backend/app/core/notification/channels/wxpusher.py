@@ -177,7 +177,7 @@ class WxPusherNotifier(BaseNotifier):
 
         app_token = db.get_setting("wxpusher_app_token", "")
         uids = db.get_setting("wxpusher_uids", "")
-        return await self._do_send(app_token, uids, f"[小蚕] {data.title}", data.format_markdown())
+        return await self._do_send(app_token, uids, f"【XiaoCan Assistant】 {data.title}", data.format_markdown())
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         # 表单显式传入的值（包括空值）优先：用户取消勾选后不能回退到已保存的旧 UID，
@@ -192,9 +192,9 @@ class WxPusherNotifier(BaseNotifier):
             if "wxpusher_uids" in config
             else db.get_setting("wxpusher_uids", "")
         )
-        test_title = "[小蚕] 通知连通性测试"
+        test_title = "【XiaoCan Assistant】 通知连通性测试"
         test_content = (
-            "### [XiaoCan Assistant] 通知连通性测试\n\n"
+            "### 【XiaoCan Assistant】 通知连通性测试\n\n"
             "这是一条来自XiaoCan Assistant的连通性测试消息。如果你在微信公众号中收到此卡片，"
             "说明 WxPusher 微信推送通道已成功接入并正常工作。"
         )

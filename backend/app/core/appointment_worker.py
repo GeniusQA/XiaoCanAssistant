@@ -24,6 +24,35 @@ from . import time_service
 
 logger = logging.getLogger("xiaocan.appointment_worker")
 
+_STORE_CATEGORY_IDS: Dict[str, int] = {
+    "包子粥铺": 1,
+    "快餐简餐": 2,
+    "小吃": 4,
+    "火锅烧烤": 5,
+    "全球美食": 6,
+    "零售百货": 7,
+    "生鲜果蔬": 8,
+    "医药健康": 9,
+    "饮品": 10,
+    "鲜花绿植": 11,
+    "地方菜系": 12,
+}
+
+_STORE_CATEGORY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "火锅烧烤": ("火锅烧烤", "火锅烤肉"),
+    "包子粥铺": ("包子粥铺", "包子", "粥铺"),
+    "快餐简餐": ("快餐简餐", "快餐", "简餐"),
+    "饮品": ("饮品",),
+    "地方菜系": ("地方菜系",),
+    "小吃": ("小吃",),
+    "全球美食": ("全球美食",),
+    "面包甜点": ("面包甜点",),
+    "生鲜果蔬": ("生鲜果蔬",),
+    "医药健康": ("医药健康",),
+    "零售百货": ("零售百货",),
+    "鲜花绿植": ("鲜花绿植",),
+}
+
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
@@ -44,6 +73,32 @@ def _card_ratio(item: Dict[str, Any]) -> int:
     if match:
         return int(match.group(1))
     return 100
+
+
+def _rebate_threshold_hit(
+    item: Dict[str, Any],
+    high_rebate_only: bool,
+    min_rebate_price: float,
+    min_rebate_gap: float,
+) -> bool:
+    """高返利、最低返利金额、满返差额为并列条件，任一命中即可。"""
+    if not (high_rebate_only or min_rebate_price > 0 or min_rebate_gap > 0):
+        return True
+
+    rtype = str(item.get("rebate_type") or "")
+    rebate_price = float(item.get("rebate_price") or 0.0)
+    rebate_gap = float(item.get("rebate_gap") or 0.0)
+    rebate_rate = float(item.get("rebate_rate") or 0.0)
+    order_money = float(item.get("order_money") or 0.0)
+
+    high_hit = high_rebate_only and (
+        rebate_rate >= 75
+        or (order_money > 0 and rebate_price / order_money >= 0.75)
+        or (rtype != "percent" and rebate_gap <= 5)
+    )
+    price_hit = min_rebate_price > 0 and rebate_price >= min_rebate_price
+    gap_hit = min_rebate_gap > 0 and rtype != "percent" and rebate_gap <= min_rebate_gap
+    return bool(high_hit or price_hit or gap_hit)
 
 
 def _pick_vip_cards(cards: List[Dict[str, Any]]) -> Tuple[Optional[int], Optional[int], str]:
@@ -197,7 +252,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
     """执行小蚕官方抢单接口，并全程记录高精步骤日志入系统运行流水"""
     aid = apt.get("id") or 0
     account_key = apt.get("account_key") or account.get("key", "")
-    nickname = account.get("nickname") or account_key
+    nickname = account.get("nick_name") or ""
     if not db.has_valid_location(account):
         err_msg = f"账号【{nickname}】尚未绑定有效定位地址，请先在账号设置中绑定地址后再试"
         if aid:
@@ -491,7 +546,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
             # 发送系统通知
             await send_system_notification(
                 title="小蚕霸王餐抢单成功",
-                content=f"账号【{account.get('nickname')}】已成功抢到【{apt['store_name']}】({apt.get('rebate_desc', '')})，订单号 #{order_id}，请及时在平台下单",
+                content=f"账号【{account.get('nick_name')}】已成功抢到【{apt['store_name']}】({apt.get('rebate_desc', '')})，订单号 #{order_id}，请及时在平台下单",
                 account_key=apt.get("account_key"),
                 event=NotificationEvent.GRAB_SUCCESS,
                 level=NotificationLevel.SUCCESS
@@ -608,7 +663,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             continue
 
         if not db.has_valid_location(account):
-            nick = account.get("nickname") or acc_key
+            nick = account.get("nick_name") or ""
             err_msg = f"账号【{nick}】尚未绑定定位地址，任务已停止，请先绑定地址后重试"
             db.update_appointment(aid, {
                 "status": "failed",
@@ -691,6 +746,11 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             max_order_money = float(apt.get("max_order_money") or 0.0)
             high_rebate_only = bool(apt.get("high_rebate_only"))
             store_category = str(apt.get("store_category") or "").strip()
+            max_distance_km = float(apt.get("max_distance_km") or 0.0)
+            if max_distance_km <= 0:
+                distance_match = re.search(r"(\d+(?:\.\d+)?)\s*km", str(apt.get("distance_range") or ""), re.IGNORECASE)
+                if distance_match:
+                    max_distance_km = float(distance_match.group(1))
             auto_stop = int(apt.get("auto_stop_on_success") if apt.get("auto_stop_on_success") is not None else 1)
 
             token = account.get("token")
@@ -701,21 +761,50 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             lat = str(account["latitude"]).strip()
 
             try:
-                from ..api.endpoints import _extract_all_promos_from_raw, _normalize_shangjin_item
+                from ..api.endpoints import (
+                    _extract_all_promos_from_raw,
+                    _normalize_shangjin_item,
+                    _normalize_store_match_name,
+                    _is_exact_store_name_query,
+                )
 
-                search_tasks = [
-                    client.search_stores(
-                        keyword=kw,
-                        city_code=city_code,
-                        longitude=lon,
-                        latitude=lat,
-                        offset=0,
-                        limit=20,
-                        token=token,
-                        silk_id=silk_id,
-                        user_id=user_id
-                    )
-                ]
+                async def _search_all_pages() -> Dict[str, Any]:
+                    """官方搜索单页上限 20，监听按多页拉取，避免只能看到第一页商户。"""
+                    merged: Dict[str, Any] = {}
+                    for search_offset in range(0, 100, 20):
+                        page = await client.search_stores(
+                            keyword=kw,
+                            city_code=city_code,
+                            longitude=lon,
+                            latitude=lat,
+                            offset=search_offset,
+                            limit=20,
+                            token=token,
+                            silk_id=silk_id,
+                            user_id=user_id,
+                        )
+                        if not isinstance(page, dict):
+                            break
+                        if not merged:
+                            merged = dict(page)
+                        list_key = next(
+                            (k for k in ("promotions", "promotion_list", "feed_items") if isinstance(page.get(k), list)),
+                            None,
+                        )
+                        batch = page.get(list_key) or [] if list_key else []
+                        if list_key:
+                            current = merged.get(list_key)
+                            if not isinstance(current, list):
+                                current = []
+                            current.extend(batch)
+                            merged[list_key] = current
+                            if list_key != "promotion_list":
+                                merged["promotion_list"] = current
+                        if len(batch) < 20:
+                            break
+                    return merged
+
+                search_tasks = [_search_all_pages()]
                 has_sj = False
                 if target_plat in ("all", "meituan"):
                     has_sj = True
@@ -732,10 +821,31 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         )
                     )
 
-                feed_res = {}
+                feed_results: List[Dict[str, Any]] = []
                 if high_rebate_only or store_category:
-                    try:
-                        feed_res = await client.get_store_list(
+                    selected_categories = [
+                        item.strip()
+                        for item in re.split(r'[,，;；]', store_category)
+                        if item.strip()
+                    ]
+                    category_ids = [
+                        _STORE_CATEGORY_IDS[item]
+                        for item in selected_categories
+                        if item in _STORE_CATEGORY_IDS
+                    ]
+                    feed_bodies: List[Dict[str, Any]] = []
+                    if category_ids:
+                        # 高返利与满返差额任一命中即可：两类候选都要进入本地筛选
+                        for cid in category_ids:
+                            feed_bodies.append({"promotion_category": cid, "quick_filters": []})
+                            if high_rebate_only:
+                                feed_bodies.append({"promotion_category": cid, "quick_filters": [4]})
+                    else:
+                        feed_bodies.append({"quick_filters": []})
+                        if high_rebate_only:
+                            feed_bodies.append({"quick_filters": [4]})
+                    feed_tasks = [
+                        client.get_store_list(
                             city_code=city_code,
                             longitude=lon,
                             latitude=lat,
@@ -744,8 +854,16 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                             token=token,
                             silk_id=silk_id,
                             user_id=user_id,
-                            quick_filters=[4] if high_rebate_only else [],
+                            meal_period=0,
+                            **kwargs
                         )
+                        for kwargs in feed_bodies
+                    ]
+                    try:
+                        feed_results = [
+                            res for res in await asyncio.gather(*feed_tasks, return_exceptions=True)
+                            if isinstance(res, dict)
+                        ]
                     except Exception as feed_err:
                         logger.debug(f"官方Feed筛选调用跳过: {feed_err}")
 
@@ -759,7 +877,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 for p in raw_proms:
                     extracted = _extract_all_promos_from_raw(p, is_search=True, user_lat=float(lat), user_lon=float(lon))
                     candidates.extend(extracted)
-                if feed_res:
+                for feed_res in feed_results:
                     for p in feed_res.get("feed_items") or []:
                         extracted = _extract_all_promos_from_raw(p, is_search=False, user_lat=float(lat), user_lon=float(lon))
                         candidates.extend(extracted)
@@ -773,22 +891,42 @@ async def process_active_appointments() -> Tuple[bool, bool]:
 
                 # 规则过滤与匹配
                 matched_candidates = []
-                total_found_stores = set()
+                matched_store_names = set()
                 kw_lower = kw.lower()
+                strict_store_key = _normalize_store_match_name(kw) if _is_exact_store_name_query(kw) else ""
+                seen_candidates = set()
+                deduped_candidates = []
+                for c in candidates:
+                    if not isinstance(c, dict):
+                        continue
+                    dedup_key = (
+                        str(c.get("platform") or ""),
+                        str(c.get("store_id") or ""),
+                        str(c.get("promotion_id") or "")
+                    )
+                    if dedup_key in seen_candidates:
+                        continue
+                    seen_candidates.add(dedup_key)
+                    deduped_candidates.append(c)
+                candidates = deduped_candidates
 
                 for c in candidates:
                     s_name = (c.get("name") or "").strip()
                     if not s_name:
                         continue
-                    total_found_stores.add(s_name)
 
-                    # 1. 店名匹配规则：常规监听不区分店名，直接放行
+                    # 1. 店名匹配规则：常规监听不区分店名，直接放行。
+                    # 完整店名（含分店括号）统一走归一化精确匹配，避免官方模糊搜索混入无关商户。
                     if listen_mode == "store":
-                        if match_mode == "exact":
+                        if strict_store_key:
+                            if _normalize_store_match_name(s_name) != strict_store_key:
+                                continue
+                        elif match_mode == "exact":
                             if s_name.lower() != kw_lower:
                                 continue
                         elif kw_lower not in s_name.lower():
                             continue
+                    matched_store_names.add(_normalize_store_match_name(s_name) if strict_store_key else s_name)
 
                     # 2. 平台过滤
                     c_plat = c.get("platform")
@@ -800,6 +938,21 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     if rebate_mode_filter != "all" and c_rtype != rebate_mode_filter:
                         continue
 
+                    # 3.5 官方距离范围过滤：candidate.distance 单位为米
+                    if max_distance_km > 0:
+                        c_distance_m = float(c.get("distance") or 0.0)
+                        if c_distance_m <= 0:
+                            distance_text = str(c.get("distance_text") or "")
+                            dm = re.search(r"(\d+(?:\.\d+)?)\s*km", distance_text, re.IGNORECASE)
+                            if dm:
+                                c_distance_m = float(dm.group(1)) * 1000
+                            else:
+                                dm = re.search(r"(\d+(?:\.\d+)?)\s*m", distance_text, re.IGNORECASE)
+                                if dm:
+                                    c_distance_m = float(dm.group(1))
+                        if c_distance_m <= 0 or c_distance_m > max_distance_km * 1000:
+                            continue
+
                     # 4. 活动要求过滤
                     if activity_requirement != "all":
                         c_activity_tags = c.get("activity_tags") or []
@@ -808,18 +961,9 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         if activity_requirement not in c_activity_tags:
                             continue
 
-                    # 5. 最低返利金额与实付满返差额：两者均设置时满足其一即可
-                    c_rebate_price = float(c.get("rebate_price") or 0.0)
-                    c_rebate_gap = float(c.get("rebate_gap") or 0.0)
-                    if c_rtype == "percent":
-                        # 比例返没有“满X返Y”门槛，只受最低返利金额约束。
-                        if min_rebate_price > 0 and c_rebate_price < min_rebate_price:
-                            continue
-                    elif min_rebate_price > 0 or min_rebate_gap > 0:
-                        meets_rebate = min_rebate_price > 0 and c_rebate_price >= min_rebate_price
-                        meets_gap = min_rebate_gap > 0 and c_rebate_gap <= min_rebate_gap
-                        if not (meets_rebate or meets_gap):
-                            continue
+                    # 5. 高返利/最低返利金额/满返差额：均为并列条件，任一命中即可
+                    if not _rebate_threshold_hit(c, high_rebate_only, min_rebate_price, min_rebate_gap):
+                        continue
 
                     # 6. 最低返利比例
                     c_rebate_rate = float(c.get("rebate_rate") or 0.0)
@@ -834,18 +978,13 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                             if item.strip()
                         ]
                         c_store_category = str(c.get("store_category") or "")
-                        if not any(item in c_store_category for item in selected_categories):
-                            continue
-
-                    # 官方Feed高返利本地兜底：返利比例≥75% 或满返差额≤5
-                    if high_rebate_only:
-                        c_rate = float(c.get("rebate_rate") or 0.0)
-                        c_gap = float(c.get("rebate_gap") or 0.0)
-                        c_rebate_value = float(c.get("rebate_price") or 0.0)
-                        c_threshold = float(c.get("order_money") or 0.0)
-                        ratio_hit = c_rate >= 75 or (c_threshold > 0 and c_rebate_value / c_threshold >= 0.75)
-                        gap_hit = c_rtype == "fixed" and c_gap <= 5
-                        if not (ratio_hit or gap_hit):
+                        category_hit = False
+                        for item in selected_categories:
+                            aliases = _STORE_CATEGORY_ALIASES.get(item, (item,))
+                            if any(alias in c_store_category for alias in aliases):
+                                category_hit = True
+                                break
+                        if not category_hit:
                             continue
 
                     # 6. 最高起送/门槛金额
@@ -968,7 +1107,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                                 _append_apt_log(aid, linked_log_id, f"[{t_grab}] 账号鉴权失效: {fail_msg}，任务已自动终止，请在「账号管理」中更新Token", sync_db=True, status="error")
                             await send_system_notification(
                                 title="小蚕账号凭据失效",
-                                content=f"账号【{apt.get('nickname') or account_key}】鉴权失效 (HTTP 401)，任务已停止，请重新提取或更新 Token。",
+                                content=f"账号【{apt.get('nick_name') or ""}】鉴权失效 (HTTP 401)，任务已停止，请重新提取或更新 Token。",
                                 account_key=account_key,
                                 event=NotificationEvent.TOKEN_WARN,
                                 level=NotificationLevel.WARNING
@@ -985,7 +1124,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         _append_apt_log(aid, linked_log_id, step_str, sync_db=(poll_cnt == 1 or poll_cnt % 3 == 0 or is_on_minute_probe), status="running")
                 else:
                     # 未找到符合条件的方案
-                    store_count = len(total_found_stores)
+                    store_count = len(matched_store_names)
                     filter_desc = f"关键词「{kw}」" if listen_mode == "store" else "常规模式 (不区分店名)"
                     step_str = f"[{t_now}] 第 {poll_cnt} 次嗅探{probe_tag}: {filter_desc}，发现 {store_count} 家商户 (当前暂无满足条件的剩余名额)，持续保持监听..."
                     if linked_log_id > 0:
@@ -1003,7 +1142,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         _append_apt_log(aid, linked_log_id, f"[{t_err}] 账号鉴权失效: {err_msg}，任务已自动终止，请更新Token", sync_db=True, status="error")
                     await send_system_notification(
                         title="小蚕账号凭据失效",
-                        content=f"账号【{apt.get('nickname') or account_key}】鉴权失效 (HTTP 401)，监听已自动挂起停止，请重新更新凭据。",
+                        content=f"账号【{apt.get('nick_name') or ""}】鉴权失效 (HTTP 401)，监听已自动挂起停止，请重新更新凭据。",
                         account_key=account_key,
                         event=NotificationEvent.TOKEN_WARN,
                         level=NotificationLevel.WARNING
@@ -1058,8 +1197,10 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             db.update_appointment(aid, {"last_checked_at": now_str})
 
             high_rebate_only = bool(apt.get("high_rebate_only"))
+            min_rebate_price = float(apt.get("min_rebate_price") or 0.0)
+            min_rebate_gap = float(apt.get("min_rebate_gap") or 0.0)
             store_category = str(apt.get("store_category") or "").strip()
-            if high_rebate_only or store_category:
+            if high_rebate_only or min_rebate_price > 0 or min_rebate_gap > 0 or store_category:
                 detail = await client.get_store_promotion_detail(
                     promotion_id=apt["promotion_id"],
                     token=account["token"],
@@ -1077,12 +1218,24 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     for item in re.split(r'[,，;；]', store_category)
                     if item.strip()
                 ]
-                if selected_categories and not any(item in category_text for item in selected_categories):
+                category_hit = not selected_categories or any(
+                    alias in category_text
+                    for item in selected_categories
+                    for alias in _STORE_CATEGORY_ALIASES.get(item, (item,))
+                )
+                if not category_hit:
                     continue
-                if high_rebate_only:
+                if high_rebate_only or min_rebate_price > 0 or min_rebate_gap > 0:
                     order_money = float(pdetail.get("order_money") or 0) / 100
                     rebate = float(pdetail.get("user_rebate") or pdetail.get("discount_amount") or 0) / 100
-                    if order_money <= 0 or rebate / order_money < 0.75:
+                    normalized = {
+                        "rebate_type": "fixed" if order_money > 0 else "percent",
+                        "rebate_price": rebate,
+                        "rebate_gap": max(0.0, order_money - rebate) if order_money > 0 else 0.0,
+                        "rebate_rate": (rebate / order_money * 100) if order_money > 0 else 0.0,
+                        "order_money": order_money,
+                    }
+                    if not _rebate_threshold_hit(normalized, high_rebate_only, min_rebate_price, min_rebate_gap):
                         continue
 
             # 3. 查验最新实时库存

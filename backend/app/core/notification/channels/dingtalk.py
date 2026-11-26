@@ -40,7 +40,7 @@ class DingTalkNotifier(BaseNotifier):
         payload = {
             "msgtype": "markdown",
             "markdown": {
-                "title": f"[XiaoCan Assistant] {title}",
+                "title": f"【XiaoCan Assistant】 {title}",
                 "text": text
             }
         }
@@ -79,7 +79,7 @@ class DingTalkNotifier(BaseNotifier):
         secret = config.get("dingtalk_secret") or db.get_setting("dingtalk_secret", "")
         test_title = "通知连通性测试"
         test_text = (
-            "### [XiaoCan Assistant] 通知连通性测试\n\n"
+            "### 【XiaoCan Assistant】 通知连通性测试\n\n"
             "这是一条来自XiaoCan Assistant的连通性测试消息。如果你在钉钉群中收到此卡片，"
             "说明钉钉群机器人通道已成功接入并正常工作。"
         )

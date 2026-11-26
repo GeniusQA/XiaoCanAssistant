@@ -120,7 +120,7 @@ def claim_single_account(account_key: str, record_log: bool = True) -> Dict[str,
         token = account.get("meituan_token") or account.get("token")
         saved_at = account.get("meituan_saved_at") or account.get("saved_at")
         nickname = account.get("meituan_nickname") or account.get("nickname") or account_key
-        main_nickname = main_acc.get("nickname") if main_acc else account_key
+        main_nickname = main_acc.get("nick_name") if main_acc else ""
         pool = account.get("meituan_history_pool") or account.get("history_pool") or []
 
         if not token:

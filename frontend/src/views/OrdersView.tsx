@@ -18,6 +18,7 @@ import {
   Spin,
   Banner,
   InputNumber,
+  Select,
   Tooltip,
   Space
 } from '@douyinfe/semi-ui';
@@ -72,13 +73,27 @@ const calcRemainingSec = (row?: Order, currentNowSec: number = getNtpNowSec()): 
   return tt - currentNowSec;
 };
 
+const timeoutSecFromUntil = (value: string): number => {
+  const text = String(value || '').trim();
+  const matched = text.match(/^(\d{1,2}):(\d{2})$/);
+  if (!matched) return 7200;
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(Number(matched[1]), Number(matched[2]), 0, 0);
+  if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+  return Math.max(60, Math.floor((target.getTime() - now.getTime()) / 1000));
+};
+
 export const OrdersView: React.FC = () => {
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
   const accounts = useAppStore((s) => s.accounts);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const requestStoreAction = useAppStore((s) => s.requestStoreAction);
   const containerRef = useRef<HTMLDivElement>(null);
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const [tableScrollY, setTableScrollY] = useState<number>(460);
+  const [tablePageSize, setTablePageSize] = useState<number>(20);
+  const [tableCurrentPage, setTableCurrentPage] = useState<number>(1);
 
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(false);
@@ -94,6 +109,12 @@ export const OrdersView: React.FC = () => {
   const [submittingDelayCard, setSubmittingDelayCard] = useState(false);
   const [cancellingOrderId, setCancellingOrderId] = useState<number | null>(null);
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
+  const [restoringOrders, setRestoringOrders] = useState(false);
+  const [monitorOrder, setMonitorOrder] = useState<Order | null>(null);
+  const [monitorUntilTime, setMonitorUntilTime] = useState<string>('23:59');
+  const [monitorInterval, setMonitorInterval] = useState<number>(5);
+  const [monitorRedpackMode, setMonitorRedpackMode] = useState<number>(0);
+  const [monitorSubmitting, setMonitorSubmitting] = useState(false);
   const [currentNowSec, setCurrentNowSec] = useState<number>(() => getNtpNowSec());
 
   useEffect(() => {
@@ -153,15 +174,29 @@ export const OrdersView: React.FC = () => {
 
     if (!silent) setLoading(true);
     try {
-      const ordersRes = await api.getOrders({
+      const baseParams = {
         account_key: effectiveKey || undefined,
         status: activeStatusTab,
         platform: platformFilter,
-        keyword: keywordToSearch
-      });
+        keyword: keywordToSearch,
+        limit: 500,
+      };
+      const ordersRes = await api.getOrders({ ...baseParams, offset: 0 });
 
       if (ordersRes.ok) {
-        setOrders(ordersRes.orders || []);
+        const allOrders = [...(ordersRes.orders || [])];
+        const total = Number(ordersRes.total || allOrders.length);
+        while (allOrders.length < total) {
+          const nextRes = await api.getOrders({
+            ...baseParams,
+            offset: allOrders.length,
+            sync: false,
+          });
+          const nextOrders = nextRes.ok ? (nextRes.orders || []) : [];
+          if (!nextOrders.length) break;
+          allOrders.push(...nextOrders);
+        }
+        setOrders(allOrders);
       }
     } catch (e) {
       lastOrdersSignatureRef.current = '';
@@ -173,6 +208,7 @@ export const OrdersView: React.FC = () => {
   };
 
   useEffect(() => {
+    setTableCurrentPage(1);
     fetchOrders();
   }, [currentAccountKey, activeStatusTab, platformFilter]);
 
@@ -316,6 +352,70 @@ export const OrdersView: React.FC = () => {
     }
   };
 
+  const handleRestoreOrders = async () => {
+    if (!currentAccountKey && !accounts[0]?.key) {
+      Toast.warning('请先选择账号');
+      return;
+    }
+    setRestoringOrders(true);
+    try {
+      const res = await api.restoreOrdersLocal(currentAccountKey || accounts[0]?.key);
+      if (!res.ok) throw new Error(res.message || '恢复官方订单失败');
+      Toast.success(res.message || '删除标记已清理，正在重新同步官方订单');
+      await fetchOrders(undefined, true);
+    } catch (e: any) {
+      Toast.error(`恢复订单异常: ${e.response?.data?.detail || e.message || e}`);
+    } finally {
+      setRestoringOrders(false);
+    }
+  };
+
+  const handleOpenOrderMonitor = (order: Order) => {
+    if (!currentAccountKey && !accounts[0]?.key) {
+      Toast.warning('请先选择账号');
+      return;
+    }
+    setMonitorOrder(order);
+    setMonitorUntilTime('23:59');
+    setMonitorInterval(5);
+    setMonitorRedpackMode(0);
+  };
+
+  const handleConfirmOrderMonitor = async () => {
+    if (!monitorOrder) return;
+    const keyword = String(monitorOrder.store_name || '').trim();
+    if (!keyword) {
+      Toast.warning('该订单缺少店铺名称，无法创建名额监听');
+      return;
+    }
+    setMonitorSubmitting(true);
+    try {
+      const res = await api.createNameMonitor({
+        account_key: currentAccountKey || accounts[0]?.key || '',
+        keyword,
+        listen_mode: 'store',
+        match_mode: 'contains',
+        platform: (['all', 'meituan', 'eleme', 'jingdong'].includes(String(monitorOrder.platform || ''))
+          ? String(monitorOrder.platform)
+          : 'all') as any,
+        store_icon: String(monitorOrder.store_icon || ''),
+        until_time: monitorUntilTime,
+        timeout_sec: timeoutSecFromUntil(monitorUntilTime),
+        check_interval: Math.max(3, Number(monitorInterval) || 5),
+        redpack_mode: monitorRedpackMode,
+        auto_use_best_vip_card: monitorRedpackMode === 0,
+        auto_stop_on_success: 1,
+      });
+      if (!res.ok) throw new Error(res.message || '创建监听失败');
+      Toast.success(res.message || '已开启名额监听');
+      setMonitorOrder(null);
+    } catch (e: any) {
+      Toast.error(`名额监听创建异常: ${e.response?.data?.detail || e.message || e}`);
+    } finally {
+      setMonitorSubmitting(false);
+    }
+  };
+
   const handleDeleteOrder = async (order: Order) => {
     setDeletingOrderId(order.id);
     try {
@@ -428,9 +528,7 @@ export const OrdersView: React.FC = () => {
         const couponBonus = Number(row?.coupon_bonus || 0);
         const vipExtraReward = Number(row?.vip_extra_reward || 0);
         const officialTotal = Number(row?.total_rebate || 0);
-        const expectedRebate = Number(row?.expected_rebate || 0);
         const actualPaid = Number(row?.actual_paid_amount || 0);
-        const thresholdShortfall = Number(row?.threshold_shortfall || 0);
         const isPercentOrder =
           row?.order_type === 12 ||
           Boolean(row?.rebate_ratio && row.rebate_ratio > 0) ||
@@ -449,9 +547,6 @@ export const OrdersView: React.FC = () => {
               )}
             </div>
             <div className="text-[11px] text-semi-color-text-2 font-mono space-y-0.5">
-              {expectedRebate > officialTotal && (
-                <span className="block">预计返利 ¥{expectedRebate.toFixed(2)}</span>
-              )}
               <span className="block">活动返利红包 ¥{redpackAmount || '0.00'}</span>
               {vipExtraReward > 0 && (
                 <span className="block">会员返利券 ¥{vipExtraReward.toFixed(2)}</span>
@@ -463,9 +558,6 @@ export const OrdersView: React.FC = () => {
                 <span>按比例返: {row?.rebate_ratio ? `${row.rebate_ratio}%` : '比例返'}</span>
               ) : (
                 <span>实付金额: ¥{(actualPaid || Number(row?.order_money || 0)).toFixed(2)}</span>
-              )}
-              {thresholdShortfall > 0 && (
-                <div className="text-[11px] text-semi-color-danger">未满门槛扣减 ¥{thresholdShortfall.toFixed(2)}</div>
               )}
             </div>
           </div>
@@ -723,7 +815,57 @@ export const OrdersView: React.FC = () => {
           );
         }
 
-        if (status === 'completed' || status === 'cancelled') {
+        if (status === 'completed') {
+          const storeActionPayload = {
+            keyword: String(row?.store_name || '').trim(),
+            storeId: String(row?.store_id || '').trim(),
+            storeIcon: String(row?.store_icon || '').trim(),
+            platform: String(row?.platform || '').trim(),
+            accountKey: currentAccountKey,
+          };
+          return (
+            <div className="flex flex-wrap items-center gap-1">
+              <Button
+                theme="solid"
+                type="primary"
+                size="small"
+                className="!px-2"
+                onClick={() => requestStoreAction({ type: 'grab', ...storeActionPayload })}
+              >
+                立即抢单
+              </Button>
+              <Button
+                theme="light"
+                type="warning"
+                size="small"
+                className="!px-2"
+                onClick={() => handleOpenOrderMonitor(row)}
+              >
+                名额监听
+              </Button>
+              <Popconfirm
+                title="确认删除该订单？"
+                content="将从官方订单列表与本地记录中彻底删除该条订单。"
+                okText="确认删除"
+                cancelText="取消"
+                okType="danger"
+                onConfirm={() => handleDeleteOrder(row)}
+              >
+                <Button
+                  theme="light"
+                  type="tertiary"
+                  size="small"
+                  icon={<IconDelete size="small" />}
+                  loading={deletingOrderId === row.id}
+                >
+                  删除订单
+                </Button>
+              </Popconfirm>
+            </div>
+          );
+        }
+
+        if (status === 'cancelled') {
           return (
             <Popconfirm
               title="确认删除该订单？"
@@ -839,6 +981,21 @@ export const OrdersView: React.FC = () => {
         </div>
 
         <Space>
+          <Popconfirm
+            title="恢复官方订单？"
+            content="将清除本地删除标记，并从官方重新同步全部订单；已手动删除的记录也会重新出现。"
+            okText="确认恢复"
+            cancelText="取消"
+            onConfirm={handleRestoreOrders}
+          >
+            <Button
+              theme="light"
+              type="primary"
+              loading={restoringOrders}
+            >
+              恢复官方订单
+            </Button>
+          </Popconfirm>
           {['completed', 'cancelled', 'all'].includes(activeStatusTab) && (
             <Popconfirm
               title="确认批量移除订单？"
@@ -932,9 +1089,14 @@ export const OrdersView: React.FC = () => {
             dataSource={orders}
             loading={loading}
             pagination={{
-              pageSize: 20,
+              currentPage: tableCurrentPage,
+              pageSize: tablePageSize,
               showSizeChanger: true,
               pageSizeOpts: [10, 20, 50, 100],
+              onChange: (page: number, size: number) => {
+                setTableCurrentPage(page);
+                setTablePageSize(size);
+              },
             }}
             scroll={{ y: tableScrollY, x: 1600 }}
             size="middle"
@@ -1073,6 +1235,73 @@ export const OrdersView: React.FC = () => {
             )}
           </div>
         )}
+      </Modal>
+
+      <Modal
+        title="名额监听配置"
+        visible={Boolean(monitorOrder)}
+        onCancel={() => setMonitorOrder(null)}
+        onOk={handleConfirmOrderMonitor}
+        okText="确定"
+        cancelText="取消"
+        okType="warning"
+        confirmLoading={monitorSubmitting}
+        width={560}
+        centered
+      >
+        <div className="space-y-4 pt-1">
+          <Banner
+            type="warning"
+            fullMode={false}
+            description="系统将按设定频率自动轮询检测补仓名额，发现有名额时自动尝试锁定该商家活动。"
+          />
+          <div className="bg-semi-color-fill-0 border border-semi-color-border rounded-lg p-3 space-y-2 text-sm">
+            <div className="flex justify-between gap-3">
+              <Text type="secondary" className="flex-shrink-0">商户店铺</Text>
+              <Text strong className="text-right break-all">{monitorOrder?.store_name || '-'}</Text>
+            </div>
+            <div className="flex justify-between gap-3">
+              <Text type="secondary" className="flex-shrink-0">活动档位</Text>
+              <Text className="text-right break-all">{monitorOrder?.official_order_desc || '-'}</Text>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-sm font-medium mb-1.5">监听截止时间</div>
+              <Input
+                value={monitorUntilTime}
+                onChange={(value) => setMonitorUntilTime(value || '23:59')}
+                placeholder="23:59"
+              />
+              <div className="text-xs text-semi-color-text-2 mt-1">到达此时间后自动停止监听</div>
+            </div>
+            <div>
+              <div className="text-sm font-medium mb-1.5">轮询刷新间隔（秒）</div>
+              <InputNumber
+                min={3}
+                max={60}
+                step={1}
+                value={monitorInterval}
+                onChange={(value) => setMonitorInterval(Number(value) || 5)}
+                style={{ width: '100%' }}
+              />
+              <div className="text-xs text-semi-color-text-2 mt-1">建议 3~5 秒，平衡时效与稳定性</div>
+            </div>
+          </div>
+          <div>
+            <div className="text-sm font-medium mb-1.5">红包策略</div>
+            <Select
+              value={monitorRedpackMode}
+              onChange={(value) => setMonitorRedpackMode(Number(value) || 0)}
+              style={{ width: '100%' }}
+            >
+              <Select.Option value={0}>自动最优红包/返利券</Select.Option>
+              <Select.Option value={1}>指定红包或返利券</Select.Option>
+              <Select.Option value={2}>不使用红包</Select.Option>
+            </Select>
+            <div className="text-xs text-semi-color-text-2 mt-1">抢单命中时自动选用最优红包与返利券</div>
+          </div>
+        </div>
       </Modal>
     </div>
   );

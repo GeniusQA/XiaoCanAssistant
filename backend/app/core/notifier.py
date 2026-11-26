@@ -52,7 +52,7 @@ async def send_qq_bot_notification(
     gid = group_id or db.get_setting("qq_bot_group_id", "")
     uid = user_id or db.get_setting("qq_bot_user_id", "")
     tkn = token or db.get_setting("qq_bot_token", "")
-    text = f"[XiaoCan Assistant] {title}\n{content}"
+    text = f"【XiaoCan Assistant】 {title}\n{content}"
     return await notifier._do_send(raw_api, ttype, gid, uid, tkn, text)
 
 
@@ -65,7 +65,7 @@ async def send_feishu_notification(webhook_url: str, title: str, content: str, s
 async def send_dingtalk_notification(webhook_url: str, secret: Optional[str], title: str, content: str) -> Dict[str, Any]:
     """向钉钉自定义机器人 Webhook 推送 Markdown 消息"""
     notifier = ALL_NOTIFIERS["dingtalk"]
-    text = f"### [XiaoCan Assistant] {title}\n\n{content}"
+    text = f"### 【XiaoCan Assistant】 {title}\n\n{content}"
     return await notifier._do_send(webhook_url, secret, title, text)
 
 
@@ -91,6 +91,7 @@ def is_event_subscribed(event: Union[str, NotificationEvent]) -> bool:
         NotificationEvent.COUPON_EXPIRE.value: ("notify_on_coupon_expire", True),
         NotificationEvent.TASK_FAIL.value: ("notify_on_task_fail", True),
         NotificationEvent.CLAW_SESSION_RENEWAL.value: ("notify_on_claw_renewal", True),
+        NotificationEvent.CLAW_SESSION_EXPIRED.value: ("notify_on_claw_renewal", True),
     }
 
     if ev_str in mapping:
@@ -153,11 +154,11 @@ async def send_single_custom_channel(
         )
     elif chan == "serverchan":
         key = config.get("serverchan_sendkey") or db.get_setting("serverchan_sendkey", "")
-        return await notifier._do_send(key, f"[小蚕] {title}", data.format_markdown())
+        return await notifier._do_send(key, f"【XiaoCan Assistant】 {title}", data.format_markdown())
     elif chan == "wxpusher":
         app_token = config.get("wxpusher_app_token") or db.get_setting("wxpusher_app_token", "")
         uids = config.get("wxpusher_uids") or db.get_setting("wxpusher_uids", "")
-        return await notifier._do_send(app_token, uids, f"[小蚕] {title}", data.format_markdown())
+        return await notifier._do_send(app_token, uids, f"【XiaoCan Assistant】 {title}", data.format_markdown())
     elif chan == "wecom":
         url = config.get("wecom_webhook") or db.get_setting("wecom_webhook", "")
         return await notifier._do_send(url, data.format_markdown())
@@ -201,7 +202,7 @@ async def send_single_custom_channel(
         password = config.get("email_pass") or db.get_setting("email_pass", "")
         from_addr = config.get("email_from") or db.get_setting("email_from", "")
         to_addr = config.get("email_to") or db.get_setting("email_to", "")
-        subject = f"[XiaoCan Assistant] {title}"
+        subject = f"【XiaoCan Assistant】 {title}"
         return await notifier._do_send(host, port, ssl_on, user, password, from_addr, to_addr, subject, content)
     elif chan == "gotify":
         url = config.get("gotify_url") or db.get_setting("gotify_url", "")
@@ -271,7 +272,7 @@ async def send_account_notification(
 
     # global 模式下广播
     acc = db.get_account_by_key(account_key)
-    acc_name = acc.get("nickname") if acc else account_key
+    acc_name = acc.get("nick_name") if acc else ""
     data = NotificationData(
         title=title,
         content=content,
@@ -286,7 +287,7 @@ async def send_account_notification(
 async def test_account_channel(account_key: str, mode: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """即时测试指定账号的通知通道连通性"""
     acc = db.get_account_by_key(account_key)
-    acc_name = acc.get("nickname") if acc else account_key
+    acc_name = acc.get("nick_name") if acc else ""
     test_title = f"专属通知连通测试 · {acc_name}"
     test_content = (
         f"这是一条发往账号【{acc_name}】专属通道的连通性测试消息。\n"
@@ -349,7 +350,7 @@ async def send_system_notification(
     if account_key:
         acc = db.get_account_by_key(account_key.strip())
         if acc:
-            acc_name = acc.get("nickname")
+            acc_name = acc.get("nick_name")
 
     n_level = NotificationLevel(level) if level in [e.value for e in NotificationLevel] else NotificationLevel.INFO
     data = NotificationData(

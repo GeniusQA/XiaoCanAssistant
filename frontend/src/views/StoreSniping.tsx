@@ -34,7 +34,6 @@ import {
   IconSearch,
   IconArrowUp,
   IconClock,
-  IconAlertCircle,
   IconTicketCode,
   IconGift,
   IconFastForward,
@@ -51,6 +50,8 @@ import { useAppStore } from '../store/useAppStore';
 import { api } from '../api';
 import { getNtpNowMs } from '../utils/ntpTime';
 import { useOnActivated } from '../utils/useOnActivated';
+import { useMobileLayout, useListPagination } from '../utils/useListPagination';
+import { ListFooter } from '../components/ListFooter';
 import type { StoreItem, StorePromotion, StoreAppointment, AccountDetailData } from '../types';
 
 
@@ -343,6 +344,7 @@ export const StoreSniping: React.FC = () => {
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
   const activeLocation = useAppStore((s) => s.activeLocation);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const consumeStoreAction = useAppStore((s) => s.consumeStoreAction);
   const openLocationModal = useAppStore((s) => s.openLocationModal);
   const currentAccount = useMemo(() => accounts.find(a => a.key === currentAccountKey) || accounts[0], [accounts, currentAccountKey]);
 
@@ -537,11 +539,19 @@ export const StoreSniping: React.FC = () => {
   const [sortBy, setSortBy] = useState<'default' | 'distance' | 'rebate' | 'rate' | 'left'>('default');
   const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [activeSearchKeyword, setActiveSearchKeyword] = useState<string>('');
+  const pendingStoreActionRef = useRef<ReturnType<typeof useAppStore.getState>['pendingStoreAction']>(null);
+  const pendingStoreActionDoneRef = useRef<number>(0);
   
   // 流式触底加载状态
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
-  const [loadMoreError, setLoadMoreError] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState('');
+  const [storesError, setStoresError] = useState('');
+  const isMobile = useMobileLayout();
+  const appActiveTab = useAppStore(s => s.activeTab);
+  const storesRequestRef = useRef(0);
+  const storesAbortRef = useRef<AbortController | null>(null);
+  const emptyBatchRef = useRef(0);
   const [showBackTop, setShowBackTop] = useState(false);
 
   const mainContainerRef = useRef<HTMLDivElement | null>(null);
@@ -558,7 +568,7 @@ export const StoreSniping: React.FC = () => {
     appointments: 480,
   });
   const showBackTopRef = useRef<boolean>(false);
-  const scrollRafRef = useRef<number | null>(null);
+
   const hasMoreRef = useRef<boolean>(true);
   const loadingRef = useRef<boolean>(false);
   const loadingMoreRef = useRef<boolean>(false);
@@ -637,6 +647,8 @@ export const StoreSniping: React.FC = () => {
 
 
 
+  const appointmentPages = useListPagination(appointments, currentAccountKey || '', 10);
+
   // 预约配置弹窗
   const [appointModalVisible, setAppointModalVisible] = useState(false);
   const appointFormApiRef = useRef<any>(null);
@@ -652,6 +664,7 @@ export const StoreSniping: React.FC = () => {
   const [editingMonitorId, setEditingMonitorId] = useState<number | null>(null);
   const [nameMonitorInitialValues, setNameMonitorInitialValues] = useState<Record<string, any> | null>(null);
   const [officialCategories, setOfficialCategories] = useState<string[]>([]);
+  const [officialDistanceRanges, setOfficialDistanceRanges] = useState<Array<{ id: number; value: string; label: string; km: number }>>([]);
 
   // 同店双返利状态
   const [dualStores, setDualStores] = useState<StoreItem[]>([]);
@@ -828,8 +841,9 @@ export const StoreSniping: React.FC = () => {
     }
   }, [sortBy, activeTabKey]);
 
-  // 视口高度自适应：针对不同 Tab 独立隔离高度，杜绝因 Tab 筛选栏挂载/卸载导致的动态表头跳动
+  // 桌面视口计算与移动端自然展开隔离，避免高度反馈。
   useEffect(() => {
+    if (isMobile) return;
     const updateHeight = () => {
       if (!tabWrapperRef.current) return;
       const ch = tabWrapperRef.current.clientHeight;
@@ -884,7 +898,7 @@ export const StoreSniping: React.FC = () => {
       window.removeEventListener('resize', updateHeight);
       ro?.disconnect();
     };
-  }, [activeTabKey]);
+  }, [activeTabKey, isMobile, accounts.length > 0]);
 
   // GSAP: 遵循 gsap-skills 与 gsap-performance 规范，Tab 切换纯 GPU 合成淡入，杜绝整体容器下坠与回流抖动
   useGSAP(() => {
@@ -1057,6 +1071,16 @@ export const StoreSniping: React.FC = () => {
   const inFlightStoresRef = useRef<boolean>(false);
 
   const fetchStores = useCallback(async (kw?: string, force = false) => {
+    if (accounts.length === 0 || !activeLocation?.longitude || !activeLocation?.latitude) {
+      storesRequestRef.current += 1;
+      storesAbortRef.current?.abort();
+      lastStoresQuerySignatureRef.current = '';
+      inFlightStoresRef.current = false;
+      loadingRef.current = false;
+      loadingMoreRef.current = false;
+      setLoading(false);
+      setLoadingMore(false);
+    }
     if (accounts.length === 0) {
       setStores([]);
       setHasMore(false);
@@ -1075,11 +1099,20 @@ export const StoreSniping: React.FC = () => {
     if (!force && lastStoresQuerySignatureRef.current === querySignature) {
       return;
     }
-    if (inFlightStoresRef.current) return;
+    storesAbortRef.current?.abort();
+    const controller = new AbortController();
+    storesAbortRef.current = controller;
+    const requestId = ++storesRequestRef.current;
     inFlightStoresRef.current = true;
     lastStoresQuerySignatureRef.current = querySignature;
 
     setLoading(true);
+    setLoadingMore(false);
+    loadingMoreRef.current = false;
+    setLoadMoreError('');
+    setStoresError('');
+    emptyBatchRef.current = 0;
+    setStores([]);
     loadingRef.current = true;
     setHasMore(true);
     hasMoreRef.current = true;
@@ -1100,7 +1133,8 @@ export const StoreSniping: React.FC = () => {
         sort_by: sortBy,
         keyword: keywordToSearch,
         offset: 0
-      });
+      }, controller.signal);
+      if (requestId !== storesRequestRef.current) return;
       if (res.ok) {
         const fetchedStores = res.stores || [];
         setStores(fetchedStores);
@@ -1117,6 +1151,8 @@ export const StoreSniping: React.FC = () => {
           tableBody.scrollTop = 0;
         }
       } else {
+        lastStoresQuerySignatureRef.current = '';
+        setStoresError(res.error || res.message || '获取店铺列表失败');
         setStores([]);
         setHasMore(false);
         hasMoreRef.current = false;
@@ -1125,14 +1161,18 @@ export const StoreSniping: React.FC = () => {
         }
       }
     } catch {
+      if (requestId !== storesRequestRef.current) return;
       lastStoresQuerySignatureRef.current = '';
+      setStoresError('获取店铺列表失败，请重试');
       Toast.error('获取店铺列表失败');
       setHasMore(false);
       hasMoreRef.current = false;
     } finally {
-      inFlightStoresRef.current = false;
-      setLoading(false);
-      loadingRef.current = false;
+      if (requestId === storesRequestRef.current) {
+        inFlightStoresRef.current = false;
+        setLoading(false);
+        loadingRef.current = false;
+      }
     }
   }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy]);
 
@@ -1144,9 +1184,12 @@ export const StoreSniping: React.FC = () => {
       return;
     }
 
+    const requestId = storesRequestRef.current;
+    const requestedOffset = nextOffsetRef.current;
+    if (loadMoreError) emptyBatchRef.current = 0;
     setLoadingMore(true);
     loadingMoreRef.current = true;
-    setLoadMoreError(false);
+    setLoadMoreError('');
 
     try {
       const res = await api.getStores({
@@ -1162,13 +1205,18 @@ export const StoreSniping: React.FC = () => {
         keyword: activeSearchKeywordRef.current,
         offset: nextOffsetRef.current,
         page_pv_id: pagePvIdRef.current || undefined
-      });
-
+      }, storesAbortRef.current?.signal);
+      if (requestId !== storesRequestRef.current) return;
+      if (!res.ok) throw new Error(res.error || res.message || '加载更多店铺失败');
+      const cursor = res.next_offset ?? (requestedOffset + (res.stores?.length || 20));
+      if (res.has_more && cursor <= requestedOffset) throw new Error('分页游标未前进，请重试或刷新列表');
       if (res.ok) {
         if (res.page_pv_id) {
           pagePvIdRef.current = res.page_pv_id;
         }
         const newStores = res.stores || [];
+        emptyBatchRef.current = newStores.length === 0 ? emptyBatchRef.current + 1 : 0;
+        if (emptyBatchRef.current >= 5 && res.has_more) setLoadMoreError('暂未找到更多匹配数据，点击继续加载');
         if (newStores.length === 0) {
           if (!res.has_more) {
             setHasMore(false);
@@ -1310,84 +1358,51 @@ export const StoreSniping: React.FC = () => {
           const newOffset = res.next_offset !== undefined ? res.next_offset : (nextOffsetRef.current + newStores.length);
           nextOffsetRef.current = newOffset;
         }
-      } else {
-        setHasMore(false);
-        hasMoreRef.current = false;
       }
-    } catch {
-      setLoadMoreError(true);
+    } catch (error) {
+      if (requestId === storesRequestRef.current) setLoadMoreError(error instanceof Error ? error.message : '加载更多店铺失败，请重试');
     } finally {
-      setLoadingMore(false);
-      loadingMoreRef.current = false;
+      if (requestId === storesRequestRef.current) {
+        setLoadingMore(false);
+        loadingMoreRef.current = false;
+      }
     }
-  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy, getStoreBranchIdentityKey]);
+  }, [loadMoreError, accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy, getStoreBranchIdentityKey]);
 
-  const scrollToTop = () => {
-    const tableBody = tableContainerRef.current?.querySelector('.semi-table-body') as HTMLElement;
-    if (tableBody) {
-      tableBody.scrollTo({ top: 0, behavior: 'smooth' });
+  const activeStoreContainer = activeTabKey === 'brand_coupon' ? brandContainerRef : tableContainerRef;
+  const getStoreScrollRoot = () => {
+    const tableRoot = activeStoreContainer.current?.querySelector('.semi-table-body');
+    if (tableRoot instanceof HTMLElement && tableRoot.scrollHeight > tableRoot.clientHeight + 1) return tableRoot;
+    let node: HTMLElement | null = mainContainerRef.current;
+    while (node) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll)/.test(`${style.overflowY} ${style.overflow}`) && node.scrollHeight > node.clientHeight + 1) return node;
+      node = node.parentElement;
     }
+    return null;
   };
+  const scrollToTop = () => getStoreScrollRoot()?.scrollTo({ top: 0, behavior: 'smooth' });
 
   useEffect(() => {
-    const container = tableContainerRef.current;
-    if (!container) return;
-
-    let tableBody = container.querySelector('.semi-table-body') as HTMLElement;
-
-    const onScrollHandler = () => {
-      if (!tableBody) return;
-      if (scrollRafRef.current !== null) return;
-
-      scrollRafRef.current = requestAnimationFrame(() => {
-        scrollRafRef.current = null;
-        if (!tableBody) return;
-        const { scrollTop, scrollHeight, clientHeight } = tableBody;
-
-        // 仅在布尔值反转时触发状态更新，杜绝滚动中每帧重复 re-render
-        const nextShow = scrollTop > 240;
-        if (nextShow !== showBackTopRef.current) {
-          showBackTopRef.current = nextShow;
-          setShowBackTop(nextShow);
-        }
-
-        // 触底加载增加前置检查，避免高频重复请求
-        if (scrollHeight - scrollTop - clientHeight < 160) {
-          if (!loadingRef.current && !loadingMoreRef.current && hasMoreRef.current) {
-            loadMoreStores();
-          }
-        }
-      });
-    };
-
-    if (!tableBody) {
-      const timer = setTimeout(() => {
-        tableBody = container.querySelector('.semi-table-body') as HTMLElement;
-        if (tableBody) {
-          tableBody.addEventListener('scroll', onScrollHandler, { passive: true });
-        }
-      }, 150);
-      return () => {
-        clearTimeout(timer);
-        if (tableBody) {
-          tableBody.removeEventListener('scroll', onScrollHandler);
-        }
-        if (scrollRafRef.current !== null) {
-          cancelAnimationFrame(scrollRafRef.current);
-          scrollRafRef.current = null;
-        }
-      };
-    }
-
-    tableBody.addEventListener('scroll', onScrollHandler, { passive: true });
-    return () => {
-      tableBody?.removeEventListener('scroll', onScrollHandler);
-      if (scrollRafRef.current !== null) {
-        cancelAnimationFrame(scrollRafRef.current);
-        scrollRafRef.current = null;
+    if (appActiveTab !== 'store' || !['stores', 'brand_coupon'].includes(activeTabKey)) return;
+    const root = getStoreScrollRoot();
+    if (!root) return;
+    const update = () => {
+      const show = root.scrollTop > 240;
+      if (show !== showBackTopRef.current) {
+        showBackTopRef.current = show;
+        setShowBackTop(show);
       }
     };
-  }, [activeTabKey, stores.length, loadMoreStores]);
+    root.addEventListener('scroll', update, { passive: true });
+    update();
+    return () => root.removeEventListener('scroll', update);
+  }, [appActiveTab, activeTabKey, isMobile, stores.length]);
+
+  useEffect(() => () => {
+    storesRequestRef.current += 1;
+    storesAbortRef.current?.abort();
+  }, []);
 
   const handleSearch = useCallback((kwFromInput?: string) => {
     const kw = (typeof kwFromInput === 'string' ? kwFromInput : searchKeyword).trim();
@@ -1687,8 +1702,52 @@ export const StoreSniping: React.FC = () => {
     void api.getStoreCategories(currentAccountKey).then((res) => {
       if (res.ok) setOfficialCategories(res.categories || []);
     }).catch(() => {});
+    void api.getStoreDistanceRanges(currentAccountKey).then((res) => {
+      if (res.ok) setOfficialDistanceRanges(res.distance_ranges || []);
+    }).catch(() => {});
     setNameMonitorVisible(true);
   }, [currentAccountKey, searchKeyword, activeLocation, openLocationModal]);
+
+  // 消费从「已完成订单」跳转过来的快捷操作：先搜索目标商家，再复用原有按钮逻辑。
+  useEffect(() => {
+    if (appActiveTab !== 'store') return;
+    const action = consumeStoreAction();
+    if (!action) return;
+    if (action.accountKey && action.accountKey !== currentAccountKey) {
+      Toast.warning('请切换到该订单所属账号后再执行快捷抢单');
+      return;
+    }
+    pendingStoreActionRef.current = action;
+    pendingStoreActionDoneRef.current = 0;
+    setActiveTabKey('stores');
+    setSearchKeyword(action.keyword);
+    setActiveSearchKeyword(action.keyword);
+    activeSearchKeywordRef.current = action.keyword;
+    fetchStores(action.keyword, true);
+  }, [appActiveTab, consumeStoreAction, currentAccountKey, fetchStores]);
+
+  useEffect(() => {
+    const action = pendingStoreActionRef.current;
+    if (!action || !stores.length || pendingStoreActionDoneRef.current === action.token) return;
+    const targetKeyword = cleanEmoji(action.keyword).replace(/\s+/g, '');
+    const normalizeName = (value?: string) => cleanEmoji(value).replace(/\s+/g, '');
+    const matched = (action.storeId && stores.find((s) => String(s.store_id) === action.storeId))
+      || stores.find((s) => {
+        const name = normalizeName(s.name);
+        return name && targetKeyword && (name.includes(targetKeyword) || targetKeyword.includes(name));
+      });
+    if (!matched) return;
+    pendingStoreActionDoneRef.current = action.token;
+    if (action.type === 'grab') {
+      void handleGrabNow(matched);
+    } else if (action.type === 'monitor') {
+      handleOpenAppoint(matched, undefined, 'monitor');
+    } else if (action.type === 'appoint') {
+      handleOpenAppoint(matched, undefined, 'countdown');
+    } else {
+      handleOpenNameMonitor(action.keyword, action.storeIcon || matched.icon);
+    }
+  }, [stores, handleGrabNow, handleOpenAppoint, handleOpenNameMonitor]);
 
   const timeoutSecFromUntilTime = (untilTime?: string): number => {
     if (!untilTime || untilTime === '23:59') return 0;
@@ -1701,11 +1760,67 @@ export const StoreSniping: React.FC = () => {
     return Math.max(60, Math.floor((target.getTime() - now.getTime()) / 1000));
   };
 
+  const formatScheduleTime = (date: Date): string => {
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:00`;
+  };
+
+  const normalizeScheduleTime = (value: unknown): string => {
+    if (!value) return '';
+    if (value instanceof Date) return formatScheduleTime(value);
+    const text = String(value).trim().replace('T', ' ');
+    if (!text) return '';
+    const matched = text.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})(?::\d{2})?$/);
+    return matched ? `${matched[1]}:00` : text;
+  };
+
+  const nextQuarterHour = (offsetMinutes: number): Date => {
+    const date = new Date(Date.now() + offsetMinutes * 60 * 1000);
+    date.setSeconds(0, 0);
+    date.setMinutes(Math.ceil(date.getMinutes() / 15) * 15, 0, 0);
+    return date;
+  };
+
+  const schedulePresets = [
+    { text: '15 分钟后', start: () => nextQuarterHour(15) },
+    { text: '30 分钟后', start: () => nextQuarterHour(30) },
+    { text: '1 小时后', start: () => nextQuarterHour(60) },
+    { text: '明天此时', start: () => nextQuarterHour(24 * 60) },
+  ];
+
+  const disabledScheduleDate = (date?: Date): boolean => {
+    if (!date) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return date.getTime() < today.getTime();
+  };
+
+  const disabledScheduleTime = (date?: Date | Date[]) => {
+    const selected = Array.isArray(date) ? date[0] : date;
+    if (!selected) return {};
+    const now = new Date();
+    if (selected.toDateString() !== now.toDateString()) return {};
+    const disabledHours = Array.from({ length: now.getHours() }, (_, index) => index);
+    return {
+      disabledHours: () => disabledHours,
+      disabledMinutes: (hour: number) => (
+        hour === now.getHours()
+          ? Array.from({ length: Math.min(60, now.getMinutes() + 1) }, (_, index) => index)
+          : []
+      ),
+      disabledSeconds: () => [],
+    };
+  };
+
   const handleEditMonitor = useCallback((row: StoreAppointment) => {
     if (!currentAccountKey) {
       Toast.warning('请先选择或绑定账号');
       return;
     }
+    const savedCategories = String(row.store_category || '')
+      .split(/[,，;；]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
     setEditingMonitorId(row.id);
     setNameMonitorInitialValues({
       listen_mode: row.listen_mode || 'store',
@@ -1718,11 +1833,10 @@ export const StoreSniping: React.FC = () => {
       min_rebate_gap: Number(row.min_rebate_gap || 0),
       min_rebate_rate: Number(row.min_rebate_rate || 0),
       high_rebate_only: Boolean(row.high_rebate_only),
-      store_category: String(row.store_category || '')
-        .split(/[,，;；]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
+      distance_range: row.distance_range || (row.max_distance_km ? `附近${row.max_distance_km}km` : ''),
+      store_category: savedCategories,
       timeout_sec: timeoutSecFromUntilTime(row.until_time),
+      start_time: row.start_time && /^\d{4}-/.test(row.start_time) ? row.start_time : '',
       until_time: row.until_time || '',
       check_interval: Number(row.check_interval || 10),
       auto_stop_on_success: row.auto_stop_on_success !== 0,
@@ -1733,6 +1847,13 @@ export const StoreSniping: React.FC = () => {
     });
     setNameMonitorInitialKeyword(row.keyword || row.store_name || '');
     setNameMonitorInitialIcon(row.store_icon || '');
+    void api.getStoreCategories(currentAccountKey).then((res) => {
+      const officialList = res.ok ? (res.categories || []) : [];
+      setOfficialCategories(Array.from(new Set([...savedCategories, ...officialList])));
+    }).catch(() => {});
+    void api.getStoreDistanceRanges(currentAccountKey).then((res) => {
+      if (res.ok) setOfficialDistanceRanges(res.distance_ranges || []);
+    }).catch(() => {});
     setNameMonitorVisible(true);
   }, [currentAccountKey]);
 
@@ -1758,6 +1879,25 @@ export const StoreSniping: React.FC = () => {
     const monitorPlatform = rebateFilter === 'percent' && ['eleme', 'jingdong'].includes(values.platform)
       ? 'meituan'
       : (values.platform || 'all');
+    const distanceRange = String(values.distance_range || '').trim();
+    const matchedDistance = officialDistanceRanges.find((item) => item.value === distanceRange);
+    const distanceKmMatch = distanceRange.match(/(\d+(?:\.\d+)?)\s*km/i);
+    const maxDistanceKm = distanceRange
+      ? Number(matchedDistance?.km || distanceKmMatch?.[1] || 0)
+      : 0;
+    const scheduledStart = normalizeScheduleTime(values.start_time);
+    if (scheduledStart) {
+      const startMs = new Date(scheduledStart.replace(' ', 'T')).getTime();
+      if (!Number.isFinite(startMs) || startMs <= Date.now()) {
+        Toast.warning('抢单开始时间必须晚于当前时间，请重新选择');
+        return;
+      }
+      const minute = Number(scheduledStart.slice(14, 16));
+      if (!Number.isInteger(minute) || minute % 15 !== 0) {
+        Toast.warning('抢单时间请选择 15 分钟粒度的时间点');
+        return;
+      }
+    }
     setNameMonitorSubmitting(true);
     try {
       const rpMode = values.redpack_mode ?? 0;
@@ -1780,13 +1920,24 @@ export const StoreSniping: React.FC = () => {
       }
 
       const timeoutSec = values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200;
-      let untilTime: string | undefined = timeoutSec === 0 ? '23:59' : undefined;
-      if (
+      const keepOriginalUntil = Boolean(
         editingMonitorId &&
         nameMonitorInitialValues?.until_time &&
-        Number(nameMonitorInitialValues.timeout_sec) === timeoutSec
-      ) {
-        untilTime = String(nameMonitorInitialValues.until_time);
+        Number(nameMonitorInitialValues.timeout_sec) === timeoutSec &&
+        scheduledStart === normalizeScheduleTime(nameMonitorInitialValues?.start_time)
+      );
+      let untilTime: string | undefined = keepOriginalUntil
+        ? String(nameMonitorInitialValues?.until_time)
+        : undefined;
+      if (!untilTime && scheduledStart) {
+        const startMs = new Date(scheduledStart.replace(' ', 'T')).getTime();
+        if (timeoutSec === 0) {
+          const dayEnd = new Date(startMs);
+          dayEnd.setHours(23, 59, 0, 0);
+          untilTime = formatScheduleTime(dayEnd);
+        } else {
+          untilTime = formatScheduleTime(new Date(startMs + timeoutSec * 1000));
+        }
       }
 
       const res = await api.createNameMonitor({
@@ -1805,9 +1956,12 @@ export const StoreSniping: React.FC = () => {
         store_category: Array.isArray(values.store_category)
           ? values.store_category.map((item: any) => String(item).trim()).filter(Boolean).join(',')
           : String(values.store_category || '').trim(),
+        distance_range: distanceRange,
+        max_distance_km: maxDistanceKm,
         max_order_money: 0,
         auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
         timeout_sec: timeoutSec,
+        start_time: scheduledStart || undefined,
         until_time: untilTime,
         check_interval: Number(values.check_interval ?? 10),
         redpack_mode: rpMode,
@@ -2707,6 +2861,7 @@ export const StoreSniping: React.FC = () => {
                 <div className="flex items-center gap-2 mt-1 text-xs text-semi-color-text-2 flex-wrap">
                   {row?.high_rebate_only ? <span>高返利</span> : null}
                   {row?.store_category ? <span>分类: {row.store_category}</span> : null}
+                  {row?.distance_range ? <span>距离: {row.distance_range}</span> : null}
                   {row?.min_rebate_price ? <span>最低返利: ¥{row.min_rebate_price}</span> : null}
                   {row?.min_rebate_gap ? <span>满返差额: ¥{row.min_rebate_gap}</span> : null}
                   {row?.min_rebate_rate ? <span>最低比例: {row.min_rebate_rate}%</span> : null}
@@ -3133,7 +3288,7 @@ export const StoreSniping: React.FC = () => {
           type="warning"
           closeIcon={null}
           icon={<IconMapPin />}
-          title={`当前账号${currentAccount?.nickname ? `【${currentAccount.nickname}】` : ''}尚未绑定抢单地址`}
+          title={`当前账号${currentAccount?.nick_name ? `【${currentAccount.nick_name}】` : ''}尚未绑定抢单地址`}
           description={
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mt-0.5">
               <span>系统不设默认地址，位置跟随账号单独保存。请先为该账号绑定所在城市与坐标位置，才能检索附近店铺与执行抢单。</span>
@@ -3411,7 +3566,7 @@ export const StoreSniping: React.FC = () => {
                 dataSource={regularStores}
                 loading={loading}
                 pagination={false}
-                scroll={{ y: tabScrollHeights.stores || 480, x: 1300 }}
+                scroll={isMobile ? { x: 1300 } : { y: tabScrollHeights.stores || 480, x: 1300 }}
                 empty={
                   loading ? (
                     <div className="py-24" />
@@ -3459,45 +3614,21 @@ export const StoreSniping: React.FC = () => {
                           </Button>
                         </div>
                       ) : (
-                        <div>暂无符合条件的附近店铺，您可以尝试更换定位坐标或调整筛选条件</div>
+                        <div>{storesError || (hasMore ? '正在继续查找符合条件的附近店铺...' : '暂无符合条件的附近店铺，您可以尝试更换定位坐标或调整筛选条件')}</div>
                       )}
                     </div>
                   )
                 }
               />
 
-              {/* 触底加载状态栏 */}
-              {regularStores.length > 0 && (
-                <div className="store-table-footer flex-shrink-0 mt-auto border-t border-semi-color-border bg-semi-color-fill-0 py-2.5 px-4 flex items-center justify-center">
-                  {loadingMore ? (
-                    <div className="flex items-center gap-2 text-semi-color-primary text-xs font-medium">
-                      <Spin size="small" />
-                      <span>正在获取更多商户数据...</span>
-                    </div>
-                  ) : loadMoreError ? (
-                    <div
-                      className="text-xs text-semi-color-danger cursor-pointer hover:underline flex items-center gap-1.5"
-                      onClick={() => loadMoreStores()}
-                    >
-                      <IconAlertCircle size="small" />
-                      <span>网络连接稍慢，点击重新加载</span>
-                    </div>
-                  ) : hasMore ? (
-                    <div
-                      className="text-xs text-semi-color-text-2 cursor-pointer hover:text-semi-color-primary transition-colors flex items-center gap-2"
-                      onClick={() => loadMoreStores()}
-                    >
-                      <Tag color="blue" size="small">触底加载</Tag>
-                      <span>已展示 {regularStores.length} 家附近店铺 · 向下滚动或点击加载更多</span>
-                    </div>
-                  ) : (
-                    <div className="text-xs text-semi-color-text-3 flex items-center gap-2">
-                      <Tag color="grey" size="small">已到底部</Tag>
-                      <span>已呈现全部 {regularStores.length} 家附近店铺</span>
-                    </div>
-                  )}
-                </div>
-              )}
+              <ListFooter
+                count={regularStores.length}
+                hasMore={hasMore}
+                loading={loading || loadingMore}
+                error={storesError || loadMoreError}
+                active={appActiveTab === 'store' && activeTabKey === 'stores'}
+                onLoadMore={() => { if (storesError) void fetchStores(undefined, true); else void loadMoreStores(); }}
+              />
 
               {/* 回到顶部按钮 */}
               {showBackTop && (
@@ -3532,26 +3663,27 @@ export const StoreSniping: React.FC = () => {
                 dataSource={brandCouponStores}
                 loading={loading}
                 pagination={false}
-                scroll={{ y: tabScrollHeights.brand_coupon || 480, x: 1300 }}
+                scroll={isMobile ? { x: 1300 } : { y: tabScrollHeights.brand_coupon || 480, x: 1300 }}
                 empty={
                   loading ? (
                     <div className="py-24" />
                   ) : (
                     <div className="py-16 text-center text-semi-color-text-3">
-                      <div>暂未检测到周边门店通用的商户，您可以在「附近店铺」中查看所有常规返利门店</div>
+                      <div>{storesError || (hasMore ? '正在继续查找大牌专享商户...' : '暂无符合条件的大牌专享商户，您可以在「附近店铺」中查看常规返利门店')}</div>
                     </div>
                   )
                 }
               />
 
-              {brandCouponStores.length > 0 && (
-                <div className="store-table-footer flex-shrink-0 mt-auto border-t border-semi-color-border bg-semi-color-fill-0 py-2.5 px-4 flex items-center justify-center">
-                  <div className="text-xs text-semi-color-text-3 flex items-center gap-2">
-                    <Tag color="grey" size="small">已到底部</Tag>
-                    <span>已呈现全部 {brandCouponStores.length} 家周边门店通用商户</span>
-                  </div>
-                </div>
-              )}
+              <ListFooter
+                count={brandCouponStores.length}
+                hasMore={hasMore}
+                loading={loading || loadingMore}
+                error={storesError || loadMoreError}
+                active={appActiveTab === 'store' && activeTabKey === 'brand_coupon'}
+                onLoadMore={() => { if (storesError) void fetchStores(undefined, true); else void loadMoreStores(); }}
+              />
+
             </div>
           )}
 
@@ -3675,7 +3807,7 @@ export const StoreSniping: React.FC = () => {
                     dataSource={displayedDualStores}
                     loading={dualScanLoading}
                     pagination={false}
-                    scroll={{ y: tabScrollHeights.dual_rebate || 440, x: 1100 }}
+                    scroll={isMobile ? { x: 1100 } : { y: tabScrollHeights.dual_rebate || 440, x: 1100 }}
                     empty={
                       dualScanLoading ? (
                         <div className="py-24" />
@@ -3771,13 +3903,10 @@ export const StoreSniping: React.FC = () => {
               <Table
                 rowKey={(row) => String(row?.id)}
                 columns={appointColumns}
-                dataSource={appointments}
+                dataSource={appointmentPages.dataSource}
                 loading={appointmentsLoading}
-                pagination={{
-                  pageSize: 10,
-                  showTotal: true,
-                }}
-                scroll={{ y: tabScrollHeights.appointments || 480, x: 1000 }}
+                pagination={appointmentPages.pagination}
+                scroll={isMobile ? { x: 1000 } : { y: tabScrollHeights.appointments || 480, x: 1000 }}
                 empty={
                   appointmentsLoading ? (
                     <div className="py-24" />
@@ -3786,6 +3915,7 @@ export const StoreSniping: React.FC = () => {
                   )
                 }
               />
+              {isMobile && <ListFooter count={appointmentPages.visibleCount} total={appointments.length} hasMore={appointmentPages.hasMore} loading={appointmentsLoading} active={appActiveTab === 'store' && activeTabKey === 'appointments'} onLoadMore={appointmentPages.loadMore} />}
             </div>
           )}
         </div>
@@ -4078,7 +4208,6 @@ export const StoreSniping: React.FC = () => {
                         <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
                           <div className="min-w-0">
                             <div className="font-medium text-semi-color-text-0 truncate">{option.name}</div>
-                            {option.desc && <div className="text-[11px] text-semi-color-text-2 truncate">{option.desc}</div>}
                           </div>
                           <span className="text-[11px] text-semi-color-text-2 shrink-0">
                             {option.source === 'order' ? '订单可用' : '已持有'}
@@ -4102,9 +4231,9 @@ export const StoreSniping: React.FC = () => {
           <div className="flex items-center justify-between w-full pr-8">
             <div className="flex items-center gap-2">
               <span className="font-semibold text-base">卡券与红包资产明细</span>
-              {currentAccount?.nickname && (
+              {currentAccount?.nick_name && (
                 <Tag color="blue" size="small" type="light">
-                  {cleanEmoji(currentAccount.nickname)}
+                  {cleanEmoji(currentAccount.nick_name)}
                 </Tag>
               )}
             </div>
@@ -4398,6 +4527,8 @@ export const StoreSniping: React.FC = () => {
             min_rebate_rate: 0,
             high_rebate_only: false,
             store_category: [],
+            distance_range: '',
+            max_distance_km: 0,
             timeout_sec: 7200,
             check_interval: 10,
             auto_stop_on_success: true,
@@ -4419,7 +4550,7 @@ export const StoreSniping: React.FC = () => {
                 buttonSize="middle"
                 className="w-full"
               >
-                <Radio value="store">抢单监听</Radio>
+                <Radio value="store">店名监听</Radio>
                 <Radio value="general">常规监听</Radio>
               </Form.RadioGroup>
 
@@ -4541,7 +4672,6 @@ export const StoreSniping: React.FC = () => {
                         <div className="flex items-center justify-between w-full pr-2 text-xs py-0.5 gap-2">
                           <div className="min-w-0">
                             <div className="font-medium text-semi-color-text-0 truncate">{option.name}</div>
-                            {option.desc && <div className="text-[11px] text-semi-color-text-2 truncate">{option.desc}</div>}
                           </div>
                           <span className="text-[11px] text-semi-color-text-2 shrink-0">
                             {option.source === 'order' ? '订单可用' : '已持有'}
@@ -4625,10 +4755,21 @@ export const StoreSniping: React.FC = () => {
 
               <Row gutter={[16, 0]}>
                 <Col xs={24} sm={12}>
-                  <Form.Switch
-                    field="high_rebate_only"
-                    label="高返利"
-                  />
+                  <Form.Select
+                    field="distance_range"
+                    label="距离范围"
+                    placeholder="全部距离"
+                    showClear
+                    filter
+                    style={{ width: '100%' }}
+                  >
+                    <Select.Option value="">全部距离</Select.Option>
+                    {officialDistanceRanges.map((range) => (
+                      <Select.Option key={`${range.id}-${range.value}`} value={range.value}>
+                        {range.label}
+                      </Select.Option>
+                    ))}
+                  </Form.Select>
                 </Col>
                 <Col xs={24} sm={12}>
                   <Form.Select
@@ -4643,6 +4784,15 @@ export const StoreSniping: React.FC = () => {
                       <Select.Option key={category} value={category}>{category}</Select.Option>
                     ))}
                   </Form.Select>
+                </Col>
+              </Row>
+
+              <Row gutter={[16, 0]}>
+                <Col span={24}>
+                  <Form.Switch
+                    field="high_rebate_only"
+                    label="高返利"
+                  />
                 </Col>
               </Row>
 
@@ -4675,7 +4825,7 @@ export const StoreSniping: React.FC = () => {
                       step={1}
                       precision={2}
                       placeholder="不设门槛"
-                      helpText="实付满返差额=门槛金额-返利金额，与最低返利金额门槛满足其一即可；差额越小返利越多，例如设置5表示接受差额≤5（满20返15命中）"
+                      helpText="实付满返差额=门槛金额-返利金额；高返利、最低返利金额、满返差额满足其一即可触发抢单"
                       style={{ width: '100%' }}
                     />
                   </Col>
@@ -4699,6 +4849,30 @@ export const StoreSniping: React.FC = () => {
                   </Col>
                 </Row>
               )}
+
+              {/* 抢单开始时间：日期时间选择器，禁用过去日期与时间，分钟粒度 15 分钟 */}
+              <Row gutter={[16, 0]}>
+                <Col span={24}>
+                  <Form.DatePicker
+                    field="start_time"
+                    label="抢单时间"
+                    type="dateTime"
+                    format="yyyy-MM-dd HH:mm:ss"
+                    onChangeWithDateFirst={false}
+                    presets={schedulePresets}
+                    presetPosition="left"
+                    disabledDate={disabledScheduleDate}
+                    disabledTime={disabledScheduleTime}
+                    startYear={new Date().getFullYear()}
+                    endYear={new Date().getFullYear() + 1}
+                    timePickerOpts={{ hourStep: 1, minuteStep: 15, secondStep: 60, hideDisabledOptions: true }}
+                    showClear
+                    placeholder="立即开始（清空即立即执行）"
+                    helpText="选择未来 15 分钟粒度的时间点；过去日期和时间不可选，清空则立即开始"
+                    style={{ width: '100%' }}
+                  />
+                </Col>
+              </Row>
 
               {/* 持续时长与轮询频率：2列排布 */}
               <Row gutter={[16, 0]}>

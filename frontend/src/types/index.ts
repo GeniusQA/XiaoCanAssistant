@@ -163,7 +163,7 @@ export interface FlashSaleShelfResponse {
   ok: boolean;
   account: {
     key: string;
-    nickname: string;
+    nick_name: string;
     is_plus: boolean;
     vip_level: number;
     yb_point: number;
@@ -358,6 +358,8 @@ export interface StoreAppointment {
   min_rebate_rate?: number;
   high_rebate_only?: boolean | number;
   store_category?: string;
+  distance_range?: string;
+  max_distance_km?: number;
   rebate_mode_filter?: 'all' | 'fixed' | 'percent' | string;
   auto_stop_on_success?: number | boolean;
   max_order_money?: number;
@@ -379,6 +381,8 @@ export interface NameMonitorPayload {
   min_rebate_rate?: number;
   high_rebate_only?: boolean;
   store_category?: string;
+  distance_range?: string;
+  max_distance_km?: number;
   max_order_money?: number;
   auto_stop_on_success?: number;
   timeout_sec?: number;
@@ -915,6 +919,10 @@ export interface XiaoCanMessagesResponse {
   channels: XiaoCanMessageChannel[];
   messages: XiaoCanMessage[];
   unread_total: number;
+  page?: number;
+  page_size?: number;
+  has_more?: boolean;
+  next_page?: number | null;
   error?: string;
   message?: string;
 }

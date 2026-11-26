@@ -47,10 +47,10 @@ class ServerChanNotifier(BaseNotifier):
             return {"ok": False, "channel": self.name, "skipped": True, "message": "Server酱通道已关闭"}
 
         sendkey = db.get_setting("serverchan_sendkey", "")
-        return await self._do_send(sendkey, f"[小蚕] {data.title}", data.format_markdown())
+        return await self._do_send(sendkey, f"【XiaoCan Assistant】 {data.title}", data.format_markdown())
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         sendkey = config.get("serverchan_sendkey") or db.get_setting("serverchan_sendkey", "")
         test_title = "通知连通性测试"
         test_content = "这是一条来自XiaoCan Assistant的连通性测试消息。如果你在微信公众号中收到此卡片，说明 Server酱 (Turbo/3) 推送通道已成功接入并正常工作。"
-        return await self._do_send(sendkey, f"[小蚕] {test_title}", test_content)
+        return await self._do_send(sendkey, f"【XiaoCan Assistant】 {test_title}", test_content)

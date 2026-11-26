@@ -114,6 +114,16 @@ const getStoredSidebarCollapsed = (): boolean => {
   }
 };
 
+export interface PendingStoreAction {
+  type: 'grab' | 'monitor' | 'appoint' | 'name';
+  keyword: string;
+  storeId?: string;
+  storeIcon?: string;
+  platform?: string;
+  accountKey?: string;
+  token: number;
+}
+
 interface AppState {
   activeTab: string;
   tabActivationTick: number;
@@ -129,8 +139,11 @@ interface AppState {
   locationModalVisible: boolean;
   locationModalAccountKey: string | null;
   isSidebarCollapsed: boolean;
-  
+  pendingStoreAction: PendingStoreAction | null;
+
   setActiveTab: (tab: string) => void;
+  requestStoreAction: (action: Omit<PendingStoreAction, 'token'>) => void;
+  consumeStoreAction: () => PendingStoreAction | null;
   setSettingsSubTab: (tab: string) => void;
   /** 跳转到 系统与通知 - 位置与地理服务 (供地图源配置引导使用) */
   openMapSourceSettings: () => void;
@@ -173,6 +186,20 @@ export const useAppStore = create<AppState>((set, get) => {
     locationModalVisible: false,
     locationModalAccountKey: null,
     isSidebarCollapsed: getStoredSidebarCollapsed(),
+    pendingStoreAction: null,
+
+  requestStoreAction: (action) =>
+    set((state) => ({
+      pendingStoreAction: { ...action, token: Date.now() + Math.random() },
+      activeTab: 'store',
+      tabActivationTick: state.tabActivationTick + 1,
+    })),
+
+  consumeStoreAction: () => {
+    const action = get().pendingStoreAction;
+    if (action) set({ pendingStoreAction: null });
+    return action;
+  },
 
   setActiveTab: (tab: string) =>
     set((state) => ({

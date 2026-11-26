@@ -129,7 +129,7 @@ async def run_dual_rebate_monitor(
         return "\n".join(log_lines) + "\n", False
 
     if not db.has_valid_location(acc):
-        nickname = acc.get("nickname") or account_key
+        nickname = acc.get("nick_name") or ""
         err_msg = f"[{now_str}] [已跳过] 账号【{nickname}】尚未绑定有效定位地址，禁止使用默认定位扫描，请先为该账号绑定地址！"
         log_lines.append(err_msg)
         return "\n".join(log_lines) + "\n", False
@@ -137,7 +137,7 @@ async def run_dual_rebate_monitor(
     city_code = int(acc["city_code"])
     longitude = str(acc["longitude"]).strip()
     latitude = str(acc["latitude"]).strip()
-    nickname = acc.get("nickname") or account_key
+    nickname = acc.get("nick_name") or ""
 
     # 前置动态协同检查：若当前账号正在执行高优任务 (红包雨、秒杀、预约抢单)，动态监听其完成事件
     from .scheduler import get_running_high_priority_tasks, wait_for_any_high_priority_finish

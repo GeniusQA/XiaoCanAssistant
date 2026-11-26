@@ -175,7 +175,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
                     src={matchedAccount?.avatar || undefined}
                     color="orange"
                   >
-                    {matchedAccount?.nickname?.[0] || '用'}
+                    {matchedAccount?.nick_name?.[0] || ''}
                   </Avatar>
                   <Text strong ellipsis={{ showTooltip: true }} style={{ maxWidth: 140 }}>
                     {accountNickname}

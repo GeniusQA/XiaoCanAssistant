@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import re
+import socket
 import tempfile
 import sys
 import time
@@ -39,6 +40,23 @@ from ..core import time_service
 logger = logging.getLogger("xiaocan.protocol")
 
 GW_BASE_URL = "https://gw.xiaocantech.com/rpc"
+GW_HOST = "gw.xiaocantech.com"
+# 官方网关已知可用 A 记录：系统 DNS 临时异常时通过 CURLOPT_RESOLVE 强制绑定，
+# Host/SNI/证书校验仍使用官方域名，避免降级为 IP 直连导致证书或风控异常。
+GW_FALLBACK_IPS = ("49.234.242.171",)
+
+
+def _is_dns_failure(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        isinstance(exc, socket.gaierror)
+        or "could not resolve host" in text
+        or "curl: (6)" in text
+        or "curl 6" in text
+        or "nodata" in text
+        or "name resolution" in text
+        or "temporary failure in name resolution" in text
+    )
 
 # ---------------- TLS 指纹伪装 ----------------
 # 通过环境变量 XIAOCAN_TLS_IMPERSONATE 选择传输层:
@@ -161,7 +179,7 @@ class _CurlCffiTransport:
     certifi 非 ASCII 路径在部分环境触发 curl 77 (见 _resolve_curl_ca_bundle)。
     """
 
-    def __init__(self, timeout: float, **fingerprint_kwargs: Any):
+    def __init__(self, timeout: float, dns_resolve: Optional[List[str]] = None, **fingerprint_kwargs: Any):
         kwargs: Dict[str, Any] = {
             "timeout": timeout,
             "trust_env": False,
@@ -186,6 +204,11 @@ class _CurlCffiTransport:
             if dns_servers:
                 curl_opts = kwargs.get("curl_options") or {}
                 curl_opts[_CurlOpt.DNS_SERVERS] = dns_servers
+                kwargs["curl_options"] = curl_opts
+
+            if dns_resolve:
+                curl_opts = kwargs.get("curl_options") or {}
+                curl_opts[_CurlOpt.RESOLVE] = list(dns_resolve)
                 kwargs["curl_options"] = curl_opts
 
         self._kwargs = kwargs
@@ -315,7 +338,11 @@ class _HttpxTransport:
                 pass
 
 
-def _build_transport(timeout: float, transport_mode: Optional[str] = None):
+def _build_transport(
+    timeout: float,
+    transport_mode: Optional[str] = None,
+    dns_resolve: Optional[List[str]] = None,
+):
     """按指定模式或 XIAOCAN_TLS_IMPERSONATE 构建传输层, 返回 (engine, session)。
 
     session 统一具备 post(url, json=..., headers=...) 与 aclose(), XiaoCanClient 与
@@ -343,7 +370,7 @@ def _build_transport(timeout: float, transport_mode: Optional[str] = None):
     else:
         # 其他值 -> curl_cffi 内置 impersonate 目标 (如 chrome131)
         fingerprint_kwargs = {"impersonate": mode}
-    return "curl_cffi", _CurlCffiTransport(timeout, **fingerprint_kwargs)
+    return "curl_cffi", _CurlCffiTransport(timeout, dns_resolve=dns_resolve, **fingerprint_kwargs)
 
 # 美团赏金按比例返活动 (source=5) 元数据热缓存: poi_event_id -> {wm_poi_id, meituan_pv_id, store_name}
 _SHANGJIN_EVENT_META: Dict[str, Dict[str, str]] = {}
@@ -788,6 +815,7 @@ class XiaoCanClient:
         self.timeout = timeout
         # 按协议档案的 transport_mode 懒加载并复用对应的 TLS 传输会话，确保跨 Profile 切换时 TLS 与 UA 成对生效
         self._transports: Dict[str, tuple[str, Any]] = {}
+        self._dns_fallback_transports: Dict[str, tuple[str, Any]] = {}
         init_prof = get_active_protocol_profile()
         self.engine, self.session = self._get_transport(init_prof["transport_mode"])
         self._initial_session = self.session
@@ -805,8 +833,55 @@ class XiaoCanClient:
         self.engine = built[0]
         return built
 
+    def _get_dns_fallback_transport(self, transport_mode: Optional[str] = None) -> tuple[str, Any]:
+        mode = str(transport_mode or os.getenv(TLS_IMPERSONATE_ENV) or "okhttp").strip().lower() or "okhttp"
+        cached = self._dns_fallback_transports.get(mode)
+        if cached is not None:
+            return cached
+        resolve_entries = [f"{GW_HOST}:443:{ip}" for ip in GW_FALLBACK_IPS]
+        built = _build_transport(self.timeout, transport_mode=mode, dns_resolve=resolve_entries)
+        self._dns_fallback_transports[mode] = built
+        return built
+
+    async def _post_gateway(
+        self,
+        engine: str,
+        session: Any,
+        transport_mode: Optional[str],
+        payload: Dict[str, Any],
+        headers: Dict[str, str],
+    ):
+        try:
+            return await session.post(GW_BASE_URL, json=payload, headers=headers)
+        except Exception as first_error:
+            if not _is_dns_failure(first_error):
+                raise
+            logger.warning(
+                "RPC 网关 DNS 解析失败 (%s, engine=%s)，启用固定 IP 映射重试: %s",
+                GW_HOST, engine, first_error,
+            )
+            try:
+                _, fallback_session = self._get_dns_fallback_transport(transport_mode)
+                return await fallback_session.post(GW_BASE_URL, json=payload, headers=headers)
+            except Exception as second_error:
+                if not _is_dns_failure(second_error):
+                    raise
+                logger.warning("RPC 网关固定 IP 映射仍解析失败，改用 httpx 系统解析器重试: %s", second_error)
+                cached_httpx = self._dns_fallback_transports.get("httpx")
+                if cached_httpx is None:
+                    cached_httpx = _build_transport(self.timeout, transport_mode="off")
+                    self._dns_fallback_transports["httpx"] = cached_httpx
+                return await cached_httpx[1].post(GW_BASE_URL, json=payload, headers=headers)
+
     async def close(self):
         closed_ids = set()
+        for _, sess in list(self._dns_fallback_transports.values()):
+            if id(sess) not in closed_ids:
+                closed_ids.add(id(sess))
+                try:
+                    await sess.aclose()
+                except Exception:
+                    pass
         for _, sess in list(self._transports.values()):
             if id(sess) not in closed_ids:
                 closed_ids.add(id(sess))
@@ -890,10 +965,12 @@ class XiaoCanClient:
             req_ua = headers.get("User-Agent", "")
             eng, sess = self._get_transport(profile_dict.get("transport_mode"))
             try:
-                resp = await sess.post(
-                    GW_BASE_URL,
-                    json=payload,
-                    headers=headers,
+                resp = await self._post_gateway(
+                    eng,
+                    sess,
+                    profile_dict.get("transport_mode"),
+                    payload,
+                    headers,
                 )
                 resp_text = getattr(resp, "text", "") or ""
                 resp_headers = getattr(resp, "headers", None) or {}
@@ -1254,8 +1331,8 @@ class XiaoCanClient:
         city_code: int = 0
     ) -> Dict[str, Any]:
         """获取用户霸王餐订单列表 (Silkworm.SilkwormService.GetPromotionOrderList)"""
-        # 官方真实状态集：0=待上传, 1=审核中, 2=已完成, 3=已驳回, 4=已取消, 15=待处理角标, 99=全部
-        if order_status in (0, 1, 2, 3, 4, 15, 99):
+        # 官方实测状态集：0/2=待上传（2=已下单待反馈）, 1=审核中, 3=已驳回, 4/5=已取消, 8=已完成, 15=待处理角标, 99=全部
+        if order_status in (0, 1, 2, 3, 4, 5, 8, 15, 99):
             body_st = int(order_status)
         else:
             body_st = 99

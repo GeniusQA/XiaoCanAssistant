@@ -51,7 +51,7 @@ class WeComNotifier(BaseNotifier):
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
         url = config.get("wecom_webhook") or db.get_setting("wecom_webhook", "")
         test_content = (
-            "### [XiaoCan Assistant] 通知连通性测试\n\n"
+            "### 【XiaoCan Assistant】 通知连通性测试\n\n"
             "这是一条来自XiaoCan Assistant的连通性测试消息。如果你在企业微信群中收到此卡片，"
             "说明企业微信群机器人通道已成功接入并正常工作。"
         )

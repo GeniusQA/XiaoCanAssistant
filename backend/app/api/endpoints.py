@@ -174,7 +174,7 @@ TASK_PARAM_DEFS = {
 
 
 def _location_required_msg(acc: Optional[Dict[str, Any]], fallback_key: str = "") -> str:
-    nick = (acc.get("nickname") if acc else "") or fallback_key or "当前账号"
+    nick = (acc.get("nick_name") if acc else "")
     return f"账号【{nick}】尚未绑定有效定位地址，请先绑定地址后再使用"
 
 
@@ -248,7 +248,7 @@ async def create_or_update_account(data: Dict[str, Any] = Body(...)):
         "ok": True,
         "account": saved,
         "is_updated": saved.get("is_updated", False),
-        "message": f"成功{action_desc}小蚕账号【{saved.get('nickname', '小蚕用户')}】！"
+        "message": f"成功{action_desc}小蚕账号【{saved.get('nick_name')}】！"
     }
 
 
@@ -369,7 +369,7 @@ async def get_account_detail_endpoint(key: str):
             "redpack_stats": {"num": 0},
             "redpacks": [],
             "user_info": {
-                "nickname": acc.get("nickname"),
+                "nick_name": acc.get("nick_name"),
                 "avatar": acc.get("avatar"),
             },
             "task_info": {}
@@ -390,7 +390,7 @@ async def get_account_detail_endpoint(key: str):
             "cooldown_seconds": cooldown,
             "account": acc,
             "user_info": {
-                "nickname": acc.get("nickname"),
+                "nick_name": acc.get("nick_name"),
                 "avatar": acc.get("avatar"),
             },
             "task_info": {},
@@ -408,7 +408,7 @@ async def get_account_detail_endpoint(key: str):
             "message": _location_required_msg(acc, key),
             "account": acc,
             "user_info": {
-                "nickname": acc.get("nickname"),
+                "nick_name": acc.get("nick_name"),
                 "avatar": acc.get("avatar"),
             },
             "task_info": {},
@@ -714,7 +714,7 @@ async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[Xi
             if not cached and cred.get("token"):
                 cached = db.find_account(token=str(cred["token"]))
             if cached:
-                logger.info(f"账号官方资料同步短窗口内重复触发，已跳过: {cached.get('nickname') or cached['key']}")
+                logger.info(f"账号官方资料同步短窗口内重复触发，已跳过: {cached.get('nick_name')}")
                 return cached
     if dedup_key:
         _enrich_recent_ts[dedup_key] = now_ts
@@ -856,8 +856,8 @@ async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[Xi
         client_mode = cred.get("client_mode") or "app"
         mode_text = "代理嗅探捕获" if client_mode == "proxy" else ("微信监听捕获" if client_mode == "wechat" else "账号录入更新")
         auth_steps = [
-            f"[{now_str}] 账号凭据成功入库: 【{saved.get('nickname', key)}】({mode_text})",
-            f"[{now_str}] 会员特权: {'SVIP' if saved.get('is_plus') else 'VIP'}{saved.get('vip_level', 1)} (成长值: {saved.get('vip_score', 0)})",
+            f"[{now_str}] 账号凭据成功入库: 【{saved.get('nick_name')}】({mode_text})",
+            f"[{now_str}] 会员特权: {'SVIP' if saved.get('is_plus') else 'VIP'}{saved.get('vip_level', 1)} (成长值: {int(saved.get('vip_score', 0) or 0) // 100})",
             f"[{now_str}] 资产现况: 蚕豆余额 {float(saved.get('silk', 0)):.2f} / 元宝 {int(saved.get('yb_point', 0)):,}",
             f"[{now_str}] 自动化调度: 默认任务已自动初始化并装载至调度中心"
         ]
@@ -895,7 +895,7 @@ async def sync_account_endpoint(key: str):
     job_id = f"job_sync_{key}_{time_service.now_int()}"
     now_str = time_service.format_now_ms()
     steps = [
-        f"[{now_str}] 启动账号官方资产同步: 【{acc.get('nickname', key)}】",
+        f"[{now_str}] 启动账号官方资产同步: 【{acc.get('nick_name')}】",
         f"[{now_str}] 贯通鉴权 Token: 凭据有效",
         f"[{now_str}] 向小蚕官方同步用户资料、VIP等级、蚕豆余额与元宝资产..."
     ]
@@ -910,7 +910,7 @@ async def sync_account_endpoint(key: str):
         return {
             "ok": True,
             "account": enriched,
-            "message": f"成功同步账号【{enriched.get('nickname')}】的最新官方资产与资料！"
+            "message": f"成功同步账号【{enriched.get('nick_name')}】的最新官方资产与资料！"
         }
     except Exception as e:
         t_err = time_service.format_now_ms()
@@ -1310,7 +1310,7 @@ async def get_flash_sale_shelf_endpoint(account_key: str = Query(...)):
         "ok": True,
         "account": {
             "key": account_key,
-            "nickname": acc.get("nickname", "未命名账号"),
+            "nick_name": acc.get("nick_name"),
             "is_plus": is_plus,
             "vip_level": vip_level,
             "yb_point": int(acc.get("yb_point", 0) or 0)
@@ -1350,7 +1350,7 @@ async def exchange_flash_sale_endpoint(data: Dict[str, Any] = Body(...)):
     now_str = time_service.format_now_ms()
     steps = [
         f"[{now_str}] 启动元宝秒杀直接兑换: 【{goods_name}】(商品ID #{exchange_id})",
-        f"[{now_str}] 账号核验: 【{acc.get('nickname', account_key)}】(当前可用元宝: {yb_point:,})",
+        f"[{now_str}] 账号核验: 【{acc.get('nick_name')}】(当前可用元宝: {yb_point:,})",
         f"[{now_str}] 计划消耗元宝: {cost_silk:,} 元宝"
     ]
     try:
@@ -1368,7 +1368,7 @@ async def exchange_flash_sale_endpoint(data: Dict[str, Any] = Body(...)):
         from ..core.notifier import send_system_notification, NotificationEvent, NotificationLevel
         await send_system_notification(
             title="元宝秒杀直接兑换成功",
-            content=f"账号【{acc.get('nickname', '主控账号')}】成功即时兑换【{goods_name}】(消耗: {cost_silk:,}元宝)！",
+            content=f"账号【{acc.get('nick_name')}】成功即时兑换【{goods_name}】(消耗: {cost_silk:,}元宝)！",
             account_key=account_key,
             event=NotificationEvent.SPIKE_SUCCESS,
             level=NotificationLevel.SUCCESS
@@ -1460,7 +1460,7 @@ async def batch_run_daily_tasks(data: Optional[Dict[str, Any]] = Body(None)):
     # 2. 串行/错峰执行小蚕账号打卡，并严格添加单任务 15s 超时熔断保护
     for acc in all_accounts:
         acc_key = acc.get("key")
-        nick = acc.get("nickname") or acc_key
+        nick = acc.get("nick_name") or ""
         acc_task_results = []
 
         cfg_list = db.get_task_configs(acc_key)
@@ -1609,7 +1609,7 @@ async def batch_run_daily_tasks(data: Optional[Dict[str, Any]] = Body(None)):
 
     all_ok = (total_tasks > 0) and (success_tasks == total_tasks)
     if specified_key:
-        summary_msg = f"当前账号【{all_accounts[0].get('nickname') or specified_key}】日常打卡完成！共执行 {total_tasks} 项日常，成功 {success_tasks} 项"
+        summary_msg = f"当前账号【{all_accounts[0].get('nick_name')}】日常打卡完成！共执行 {total_tasks} 项日常，成功 {success_tasks} 项"
     else:
         summary_msg = f"全账号日常任务打卡完成！共处理 {len(all_accounts)} 个小蚕账号、{len(meituan_results)} 个美团账号 (成功 {success_tasks}/{total_tasks})"
 
@@ -1789,6 +1789,19 @@ def _clean_emoji(text: Any) -> str:
     return cleaned.strip()
 
 
+def _normalize_store_match_name(text: Any) -> str:
+    """店名精确匹配归一化：去 Emoji、统一括号、忽略空格与分隔符。"""
+    value = _clean_emoji(text).lower()
+    value = value.replace("（", "(").replace("）", ")")
+    return re.sub(r"[\s·・\-—_]+", "", value)
+
+
+def _is_exact_store_name_query(keyword: Any) -> bool:
+    """包含分店括号的完整店名视为精确查询，普通品类/品牌关键词仍走模糊搜索。"""
+    value = str(keyword or "").strip()
+    return len(value) >= 4 and ("(" in value or "（" in value)
+
+
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> int:
     """计算两经纬度之间的球面大圆直线距离 (米)"""
     R = 6371000  # 地球半径（米）
@@ -1957,17 +1970,27 @@ def _format_time_pair(
 
 
 def _format_rebate_condition(condition: Any, default: str = "无需评价") -> str:
-    """将官方评价条件码统一成前端文案。官方未下发时默认无需评价。"""
+    """将满返活动官方评价条件码统一成前端文案。官方未下发时默认无需评价。"""
     if condition is None or condition == "":
         return default
     value = str(condition).strip()
-    if "无需" in value or value == "99":
+    if "无需" in value or value in ("99", "0"):
         return "无需评价"
-    if "随心" in value or value == "2":
+    if "随心" in value:
         return "随心好评"
-    if "图文" in value or "反馈" in value or value == "1":
+    if "图文" in value or "反馈" in value or value in ("1", "2", "图文反馈"):
         return "图文反馈"
     return value[:20]
+
+
+def _format_shangjin_condition(condition: Any) -> str:
+    """比例返活动使用 plan_activity_type：1=无需评价，2=图文反馈。"""
+    value = str(condition or "").strip()
+    if value == "1":
+        return "无需评价"
+    if value == "2":
+        return "图文反馈"
+    return _format_rebate_condition(condition)
 
 
 def _extract_activity_tags(raw: Any) -> List[str]:
@@ -2431,8 +2454,8 @@ def _normalize_shangjin_item(poi: Dict[str, Any], user_lat: Optional[float] = No
         cap_fmt = int(cap_val) if cap_val.is_integer() else round(cap_val, 1)
 
         rebate_desc = f"返{pct_fmt}% (最高¥{cap_fmt})" if cap_val > 0 else f"返{pct_fmt}%"
-        cond_code = plan.get("rebate_condition")
-        cond_str = _format_rebate_condition(cond_code)
+        cond_code = plan.get("plan_activity_type") or plan.get("rebate_condition")
+        cond_str = _format_shangjin_condition(cond_code)
         left_num = int(plan.get("inventory") or 0)
         pid = str(plan.get("poi_event_id") or f"{store_id}_p{idx}")
 
@@ -2514,10 +2537,74 @@ ACTIVITY_QUICK_FILTERS = {
     "specified_dish": 6,
     "repurchase": 8,
 }
+CONDITION_QUICK_FILTERS = {
+    "no_review": 3,
+}
 
 
 def _activity_quick_filter(activity_requirement: Optional[str]) -> List[int]:
     return [ACTIVITY_QUICK_FILTERS[activity_requirement]] if activity_requirement in ACTIVITY_QUICK_FILTERS else []
+
+
+def _condition_quick_filter(condition: Optional[str]) -> List[int]:
+    return [CONDITION_QUICK_FILTERS[condition]] if condition in CONDITION_QUICK_FILTERS else []
+
+
+def _matches_rebate_condition(promotion: Dict[str, Any], condition: Optional[str]) -> bool:
+    if not condition or condition == "all":
+        return True
+    text = str(promotion.get("condition") or "")
+    no_review = ("无需" in text) or ("免评" in text)
+    if condition == "no_review":
+        return no_review
+    if condition == "good_review":
+        return not no_review
+    return True
+
+
+def _promote_store_plan(store: Dict[str, Any], plan: Dict[str, Any]) -> None:
+    fields = (
+        "promotion_id", "order_money", "rebate_price", "rebate_gap", "rebate_rate",
+        "rebate_desc", "rebate_type", "rebate_type_text", "condition", "activity_tags",
+        "left_number", "start_time", "end_time", "start_date_timestamp",
+        "end_date_timestamp", "if_can_advance_order", "need_brand_coupon",
+        "brand_left_number", "is_vip_brand", "is_brand_store", "days_limit",
+        "days_order_limit", "same_group_id", "if_use_red_pack", "address",
+    )
+    for field in fields:
+        if field in plan:
+            store[field] = plan[field]
+
+
+def _promote_best_sort_plan(
+    store: Dict[str, Any],
+    sort_by: Optional[str],
+    condition: Optional[str],
+    rebate_type: Optional[str],
+) -> None:
+    """排序前切换到最优展示档位，保证排序值与卡片展示一致。"""
+    plans = [p for p in (store.get("promotions") or []) if _matches_rebate_condition(p, condition)]
+    if rebate_type in ("fixed", "amount"):
+        plans = [p for p in plans if p.get("rebate_type") == "fixed"]
+    elif rebate_type in ("percent", "ratio"):
+        plans = [p for p in plans if p.get("rebate_type") == "percent"]
+    elif sort_by == "rebate":
+        # “返利金额最高”只比较实付满返档位；比例返展示的是封顶金额，不属于固定返利金额。
+        plans = [p for p in plans if p.get("rebate_type") == "fixed"]
+    elif sort_by == "rate":
+        # “返利比例最高”只比较比例返档位，不能用实付满返反推出来的比例参与排序。
+        plans = [p for p in plans if p.get("rebate_type") == "percent"]
+    if not plans:
+        return
+    if sort_by == "rebate":
+        best = max(plans, key=lambda p: (float(p.get("rebate_price") or 0.0), float(p.get("rebate_rate") or 0.0)))
+    elif sort_by == "rate":
+        best = max(plans, key=lambda p: (float(p.get("rebate_rate") or 0.0), float(p.get("rebate_price") or 0.0)))
+    elif sort_by == "left":
+        best = max(plans, key=lambda p: float(p.get("left_number") or 0.0))
+    else:
+        return
+    _promote_store_plan(store, best)
 
 
 @router.get("/store/categories")
@@ -2559,6 +2646,55 @@ async def get_store_categories(account_key: Optional[str] = Query(None)):
         return {"ok": False, "categories": [], "message": "获取官方商家分类失败"}
 
 
+@router.get("/store/distance-ranges")
+async def get_store_distance_ranges(account_key: Optional[str] = Query(None)):
+    """读取官方 GetHomeQuickFilters 中的距离范围筛选项（scroll_filters.field == 2）。"""
+    account_key = _safe_val(account_key, None)
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {"ok": True, "distance_ranges": [], "message": "当前未登录或未托管小蚕账号"}
+    target_acc = db.get_account_by_key(account_key) if account_key else None
+    if not target_acc:
+        target_acc = accounts[0] if accounts else None
+    if not target_acc or not target_acc.get("token"):
+        return {"ok": True, "distance_ranges": [], "message": "当前账号凭据已失效或已退出"}
+
+    try:
+        res = await client.invoke_rpc(
+            server_name="SilkwormFusion",
+            method_name="FusionService.GetHomeQuickFilters",
+            body={"silk_id": int(target_acc.get("silk_id") or 0)},
+            city_code=int(target_acc["city_code"]),
+            token=target_acc["token"],
+            user_id=target_acc.get("user_id"),
+            silk_id=target_acc.get("silk_id"),
+        )
+        rows = []
+        for item in (res.get("scroll_filters") or []) if isinstance(res, dict) else []:
+            if not isinstance(item, dict) or item.get("visible") is False:
+                continue
+            if int(item.get("field") or 0) != 2:
+                continue
+            value = str(item.get("value") or "").strip()
+            match = re.search(r"(\d+(?:\.\d+)?)\s*km", value, re.IGNORECASE)
+            if not value or not match:
+                continue
+            rows.append((
+                int(item.get("sort") or 9999),
+                {
+                    "id": int(item.get("id") or 0),
+                    "value": value,
+                    "label": value,
+                    "km": float(match.group(1)),
+                },
+            ))
+        rows.sort(key=lambda item: item[1]["km"])
+        return {"ok": True, "distance_ranges": [value for _, value in rows]}
+    except Exception as e:
+        logger.warning(f"获取官方距离范围失败: {e}")
+        return {"ok": False, "distance_ranges": [], "message": "获取官方距离范围失败"}
+
+
 @router.get("/store/list")
 async def get_stores(
     city_code: Optional[int] = Query(None),
@@ -2590,6 +2726,8 @@ async def get_stores(
     condition = _safe_val(condition, "all")
     activity_requirement = _safe_val(activity_requirement, "all")
     activity_quick_filters = _activity_quick_filter(activity_requirement)
+    condition_quick_filters = _condition_quick_filter(condition)
+    feed_quick_filters = list(dict.fromkeys(activity_quick_filters + condition_quick_filters))
     rebate_type = _safe_val(rebate_type, "all")
     sort_by = _safe_val(sort_by, "default")
     offset = int(_safe_val(offset, 0))
@@ -2677,6 +2815,18 @@ async def get_stores(
     if keyword and keyword.strip():
         kw = keyword.strip()
         source = "hybrid_search"
+        strict_store_key = _normalize_store_match_name(kw) if _is_exact_store_name_query(kw) else ""
+        seen_exact_stores = set()
+
+        def _store_name_hit(item: Dict[str, Any]) -> bool:
+            if not strict_store_key:
+                return True
+            name_key = _normalize_store_match_name(item.get("name") or "")
+            if name_key != strict_store_key or name_key in seen_exact_stores:
+                return False
+            seen_exact_stores.add(name_key)
+            return True
+
         try:
             logger.info(f"发起 hybrid_search: kw={kw}, city={city_code}, lon={lon}, lat={lat}, silk={silk_id}, user={user_id}, offset={offset}, page_pv_id={current_pv_id}")
             search_offsets = [offset, offset + 20] if offset == 0 else [offset]
@@ -2718,7 +2868,7 @@ async def get_stores(
                     token=token,
                     silk_id=silk_id,
                     user_id=user_id,
-                    quick_filters=activity_quick_filters,
+                    quick_filters=feed_quick_filters,
                 )
                 for foff in feed_offsets
             ]
@@ -2746,7 +2896,7 @@ async def get_stores(
                         sj_items = _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name)
                         for item in sj_items:
                             dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
-                            if dedup_k not in seen_pids:
+                            if dedup_k not in seen_pids and _store_name_hit(item):
                                 seen_pids.add(dedup_k)
                                 stores.append(item)
 
@@ -2775,7 +2925,7 @@ async def get_stores(
                                 for poi in pois2:
                                     for item in _normalize_shangjin_item(poi, user_lat=lat, user_lon=lon, city_name=city_name):
                                         dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
-                                        if dedup_k not in seen_pids:
+                                        if dedup_k not in seen_pids and _store_name_hit(item):
                                             seen_pids.add(dedup_k)
                                             stores.append(item)
                         except Exception as e_sj2:
@@ -2795,7 +2945,7 @@ async def get_stores(
                         promos = _extract_all_promos_from_raw(p, is_search=True, only_meituan=False, user_lat=lat, user_lon=lon, city_name=city_name)
                         for item in promos:
                             dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
-                            if dedup_k not in seen_pids:
+                            if dedup_k not in seen_pids and _store_name_hit(item):
                                 seen_pids.add(dedup_k)
                                 stores.append(item)
                 elif isinstance(sr, Exception):
@@ -2825,7 +2975,7 @@ async def get_stores(
                                     ("大牌" in kw_lower and item.get("need_brand_coupon")) or
                                     ("免评" in kw_lower and item.get("condition") == "无需评价")
                                 )
-                                if is_match:
+                                if is_match and _store_name_hit(item):
                                     dedup_k = f"{item.get('platform')}_{item['store_id']}_{item['promotion_id']}"
                                     if dedup_k not in seen_pids:
                                         seen_pids.add(dedup_k)
@@ -2838,8 +2988,13 @@ async def get_stores(
                     elif isinstance(fr, Exception):
                         logger.warning(f"Feed检索批次异常: {fr}")
 
-            has_more = has_more_shangjin or has_more_search or (total_raw_count >= 10)
-            next_offset = offset + (20 * len(search_offsets) if search_offsets else 20)
+            has_more = bool(has_more_shangjin or has_more_search or (total_raw_count >= 10))
+            if strict_store_key:
+                # 完整店名只在首屏精确匹配，不再提示触底加载无关商户
+                has_more = False
+                next_offset = offset + len(stores)
+            else:
+                next_offset = offset + (20 * len(search_offsets) if search_offsets else 20)
             logger.info(f"混合实时搜索合并返回: keyword={kw}, offset={offset}, total={len(stores)}, has_more={has_more}, pv_id={current_pv_id}")
         except Exception as e:
             logger.error(f"小蚕官方实时搜索异常: {e}")
@@ -2847,6 +3002,7 @@ async def get_stores(
 
     # 分支二：常规商圈浏览
     else:
+        # 官方 GetFeedPromotions 只区分综合(0)与距离(1)；金额/比例/名额排序在合并后按最佳档位本地排序。
         official_sort = 1 if sort_by == "distance" else 0
         seen_promotions = set()
         total_raw_count = 0
@@ -2870,7 +3026,7 @@ async def get_stores(
                         user_id=user_id,
                         sort=official_sort,
                         meal_period=0,
-                        quick_filters=activity_quick_filters,
+                        quick_filters=feed_quick_filters,
                     )
                     for off in offsets
                 ]
@@ -2923,7 +3079,7 @@ async def get_stores(
                     silk_id=silk_id,
                     user_id=user_id,
                     sort=official_sort,
-                    quick_filters=activity_quick_filters,
+                    quick_filters=feed_quick_filters,
                 ) if offset == 0 else None
 
                 for b_idx in range(shangjin_batches):
@@ -3001,7 +3157,7 @@ async def get_stores(
                         silk_id=silk_id,
                         user_id=user_id,
                         sort=official_sort,
-                        quick_filters=activity_quick_filters,
+                        quick_filters=feed_quick_filters,
                     )
                     for off in offsets
                 ]
@@ -3112,7 +3268,7 @@ async def get_stores(
                         silk_id=silk_id,
                         user_id=user_id,
                         sort=official_sort,
-                        quick_filters=activity_quick_filters,
+                        quick_filters=feed_quick_filters,
                     )
                     for off in offsets
                 ]
@@ -3345,12 +3501,18 @@ async def get_stores(
         else:
             filtered_stores = [s for s in filtered_stores if s.get("platform") == platform]
 
-    # 评价条件过滤
+    # 评价条件过滤：切换到符合条件的活动档位，避免外层仍展示另一档位的评价标签
     if condition and condition != "all":
-        if condition == "no_review":
-            filtered_stores = [s for s in filtered_stores if any(p.get("condition") == "无需评价" for p in s.get("promotions", [])) or s.get("condition") == "无需评价"]
-        elif condition == "good_review":
-            filtered_stores = [s for s in filtered_stores if any(p.get("condition") != "无需评价" for p in s.get("promotions", [])) or s.get("condition") != "无需评价"]
+        condition_stores = []
+        for store in filtered_stores:
+            plans = [p for p in store.get("promotions", []) if _matches_rebate_condition(p, condition)]
+            if not plans and _matches_rebate_condition(store, condition):
+                plans = [store]
+            if not plans:
+                continue
+            _promote_store_plan(store, plans[0])
+            condition_stores.append(store)
+        filtered_stores = condition_stores
 
     # 返利模式过滤 (全部 / 实付满返 / 按比例返)
     if rebate_type and rebate_type != "all":
@@ -3359,38 +3521,33 @@ async def get_stores(
             # 若主展示方案不是满返方案，择优切换至首选满返方案
             for s in filtered_stores:
                 if s.get("rebate_type") != "fixed" and s.get("fixed_plans"):
-                    best_f = s["fixed_plans"][0]
-                    s["promotion_id"] = best_f["promotion_id"]
-                    s["order_money"] = best_f["order_money"]
-                    s["rebate_price"] = best_f["rebate_price"]
-                    s["rebate_gap"] = best_f.get("rebate_gap", 0.0)
-                    s["rebate_rate"] = best_f["rebate_rate"]
-                    s["rebate_desc"] = best_f["rebate_desc"]
-                    s["rebate_type"] = best_f["rebate_type"]
-                    s["rebate_type_text"] = best_f["rebate_type_text"]
-                    s["condition"] = best_f["condition"]
-                    s["activity_tags"] = best_f.get("activity_tags", [])
-                    s["left_number"] = best_f["left_number"]
-                    s["start_time"] = best_f["start_time"]
-                    s["end_time"] = best_f["end_time"]
+                    _promote_store_plan(s, s["fixed_plans"][0])
         elif rebate_type in ("percent", "ratio"):
             filtered_stores = [s for s in filtered_stores if len(s.get("percent_plans", [])) > 0 or s.get("rebate_type") == "percent"]
             # 若主展示方案不是比例方案，择优切换至首选比例方案
             for s in filtered_stores:
                 if s.get("rebate_type") != "percent" and s.get("percent_plans"):
-                    best_p = s["percent_plans"][0]
-                    s["promotion_id"] = best_p["promotion_id"]
-                    s["order_money"] = best_p["order_money"]
-                    s["rebate_price"] = best_p["rebate_price"]
-                    s["rebate_rate"] = best_p["rebate_rate"]
-                    s["rebate_desc"] = best_p["rebate_desc"]
-                    s["rebate_type"] = best_p["rebate_type"]
-                    s["rebate_type_text"] = best_p["rebate_type_text"]
-                    s["condition"] = best_p["condition"]
-                    s["activity_tags"] = best_p.get("activity_tags", [])
-                    s["left_number"] = best_p["left_number"]
-                    s["start_time"] = best_p["start_time"]
-                    s["end_time"] = best_p["end_time"]
+                    _promote_store_plan(s, s["percent_plans"][0])
+
+    # 排序维度未指定返利类型时，按排序语义限定档位类型，避免金额与比例混排。
+    if rebate_type == "all" and sort_by in ("rebate", "rate"):
+        target_key = "fixed_plans" if sort_by == "rebate" else "percent_plans"
+        target_type = "fixed" if sort_by == "rebate" else "percent"
+        filtered_stores = [s for s in filtered_stores if s.get(target_key)]
+        for s in filtered_stores:
+            target_plans = s.get(target_key) or []
+            best = max(
+                target_plans,
+                key=lambda p: (
+                    float(p.get("rebate_price") or 0.0),
+                    float(p.get("rebate_rate") or 0.0),
+                ) if sort_by == "rebate" else (
+                    float(p.get("rebate_rate") or 0.0),
+                    float(p.get("rebate_price") or 0.0),
+                ),
+            )
+            if s.get("rebate_type") != target_type:
+                _promote_store_plan(s, best)
 
     # 活动要求过滤：官方 quick_filters 已在数据源完成筛选，这里仅作非官方数据源的兜底
     if (
@@ -3411,6 +3568,9 @@ async def get_stores(
         filtered_stores = [s for s in filtered_stores if activity_requirement in _store_activity_tags(s)]
 
     # 排序处理 (注意：未知或全国通用距离按 9999999 排到最后，避免 0m 霸榜置顶)
+    if sort_by in ("rebate", "rate", "left"):
+        for store in filtered_stores:
+            _promote_best_sort_plan(store, sort_by, condition, rebate_type)
     if sort_by == "distance":
         filtered_stores.sort(key=lambda x: (x.get("distance", 0) if x.get("distance", 0) > 0 else 9999999))
     elif sort_by == "rebate":
@@ -3428,7 +3588,7 @@ async def get_stores(
         "total": len(merged_stores),
         "raw_total": len(stores),
         "source": source,
-        "quick_filters": activity_quick_filters,
+        "quick_filters": feed_quick_filters,
         "has_more": has_more,
         "next_offset": next_offset,
         "page_pv_id": current_pv_id,
@@ -4227,7 +4387,7 @@ async def scan_dual_rebate_stores(
 
     try:
         resolved_acc_key = str(target_acc.get("key") or account_key or "__system__")
-        acc_label = str(target_acc.get("nickname") or ("系统任务" if resolved_acc_key == "__system__" else resolved_acc_key))
+        acc_label = str(target_acc.get("nick_name") or "")
         log_lines = [
             f"[同店双返扫描] {'触发WAF风控提前终止' if waf_aborted else '扫描完成'} (耗时 {elapsed_sec}s)",
             f"账号: {acc_label} ({resolved_acc_key}) | 城市: {city_code} | 坐标: {lon},{lat}" + (f" | 关键词: {keyword.strip()}" if keyword and keyword.strip() else ""),
@@ -4362,7 +4522,7 @@ async def cancel_promotion_order(data: Dict[str, Any] = Body(...)):
     city_code = _require_account_location(account, account_key)
 
     job_id = f"job_cancel_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
-    nickname = account.get("nickname") or account_key
+    nickname = account.get("nick_name") or ""
     cancel_steps = []
     t_start = time_service.format_now_ms()
     cancel_steps.append(f"[{t_start}] 启动霸王餐取消名额流程 - 账号: 【{nickname}】, 官方订单号: #{order_id}")
@@ -4468,7 +4628,7 @@ async def create_appointment(data: Dict[str, Any] = Body(...)):
     log_tid = "store_monitor" if task_type == "monitor" else "store_appoint"
     job_id = f"job_create_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
     account = db.get_account_by_key(account_key)
-    nick = account.get("nickname") if account else account_key
+    nick = account.get("nick_name") if account else ""
     plat_str = "美团外卖" if data.get("platform") == "meituan" else ("饿了么" if data.get("platform") == "eleme" else "京东外卖")
     use_adv = bool(data.get("use_advance_card"))
     adv_note = "【使用超前券·提前30分钟开抢】" if use_adv else ""
@@ -4516,7 +4676,7 @@ async def create_stock_watch(data: Dict[str, Any] = Body(...)):
 
     job_id = f"job_watch_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
     account = db.get_account_by_key(account_key)
-    nick = account.get("nickname") if account else account_key
+    nick = account.get("nick_name") if account else ""
     store_title = data.get("store_name") or data.get("label") or "商户活动"
     s_log = (
         f"[{time_service.format_now_ms()}] 启动名额监控捡漏任务 - 调度引擎就绪\n"
@@ -4580,7 +4740,7 @@ async def create_keyword_watch(data: Dict[str, Any] = Body(...)):
 
     job_id = f"job_kw_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
     account = db.get_account_by_key(account_key)
-    nick = account.get("nickname") if account else account_key
+    nick = account.get("nick_name") if account else ""
     s_log = (
         f"[{time_service.format_now_ms()}] 创建商户定时搜索捡漏任务 - 调度引擎就绪\n"
         f"[{time_service.format_now_ms()}] 搜索关键词: 「{keyword}」 (平台: {plat})\n"
@@ -4674,11 +4834,39 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     raw_timeout = data.get("timeout_sec")
     timeout_sec = int(raw_timeout) if raw_timeout is not None else 7200
     poll_sec = max(5, int(data.get("check_interval") or data.get("poll_sec") or 10))
+    distance_range = str(data.get("distance_range") or "").strip()
+    max_distance_km = 0.0
+    if distance_range:
+        distance_match = re.search(r"(\d+(?:\.\d+)?)\s*km", distance_range, re.IGNORECASE)
+        if distance_match:
+            max_distance_km = float(distance_match.group(1))
+        elif data.get("max_distance_km"):
+            max_distance_km = float(data.get("max_distance_km"))
+    elif data.get("max_distance_km"):
+        max_distance_km = float(data.get("max_distance_km"))
+        distance_range = f"附近{max_distance_km:g}km"
 
     now = time_service.now_dt()
-    start_at = data.get("start_time") or now.strftime("%H:%M")
+    start_at = str(data.get("start_time") or now.strftime("%H:%M")).strip()
+    schedule_dt = None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?", start_at):
+        try:
+            schedule_dt = datetime.strptime(start_at, "%Y-%m-%d %H:%M:%S") if len(start_at) == 19 else datetime.strptime(start_at, "%Y-%m-%d %H:%M")
+            schedule_dt = schedule_dt.replace(tzinfo=TZ_BJ)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="抢单开始时间格式无效")
+        if schedule_dt.timestamp() <= now.timestamp():
+            raise HTTPException(status_code=400, detail="抢单开始时间必须晚于当前时间")
+        if schedule_dt.minute % 15 != 0 or schedule_dt.second != 0:
+            raise HTTPException(status_code=400, detail="抢单开始时间必须为 15 分钟粒度")
+
     if data.get("until_time"):
-        until_str = data.get("until_time")
+        until_str = str(data.get("until_time")).strip()
+    elif schedule_dt:
+        if timeout_sec > 0:
+            until_str = (schedule_dt + timedelta(seconds=timeout_sec)).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            until_str = schedule_dt.strftime("%Y-%m-%d") + " 23:59:00"
     elif timeout_sec > 0:
         until_dt = now + timedelta(seconds=timeout_sec)
         until_str = until_dt.strftime("%H:%M")
@@ -4686,7 +4874,7 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         until_str = "23:59"
 
     job_id = f"job_namemon_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
-    nick = account.get("nickname") or account_key
+    nick = account.get("nick_name") or ""
     loc_label = f"{account.get('city_name', '')} {account.get('address_name', '')}".strip()
     loc_coords = f"({account.get('longitude', '')}, {account.get('latitude', '')})"
 
@@ -4708,13 +4896,15 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     if min_rebate_price > 0:
         req_parts.append(f"最低返利 ¥{min_rebate_price:.1f}")
     if min_rebate_gap > 0:
-        req_parts.append(f"满返差额≤¥{min_rebate_gap:.2f} (与最低返利满足其一)")
+        req_parts.append(f"满返差额≤¥{min_rebate_gap:.2f} (与高返利/最低返利满足其一)")
     if min_rebate_rate > 0:
         req_parts.append(f"最低比例 {min_rebate_rate:.0f}%")
     if high_rebate_only:
         req_parts.append("高返利")
     if store_category:
         req_parts.append(f"商家分类 {store_category}")
+    if max_distance_km > 0:
+        req_parts.append(f"距离范围 {distance_range}")
     if max_order_money > 0:
         req_parts.append(f"门槛≤¥{max_order_money:.1f}")
     req_str = "、".join(req_parts) if req_parts else "不设额外门槛"
@@ -4756,6 +4946,8 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "min_rebate_rate": min_rebate_rate,
         "high_rebate_only": high_rebate_only,
         "store_category": store_category,
+        "distance_range": distance_range,
+        "max_distance_km": max_distance_km,
         "max_order_money": max_order_money,
         "auto_stop_on_success": auto_stop_on_success,
         "use_advance_card": use_advance_card,
@@ -4926,8 +5118,9 @@ async def list_orders(
     status: Optional[str] = Query(None),
     platform: Optional[str] = Query(None),
     keyword: Optional[str] = Query(None),
-    limit: int = Query(50),
-    offset: int = Query(0)
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    sync: bool = Query(True)
 ):
     """获取真实霸王餐订单列表 (自动同步真实历史与进行中订单，100% 真实数据)"""
     account_key = _safe_val(account_key, None)
@@ -4935,11 +5128,19 @@ async def list_orders(
     platform = _safe_val(platform, None)
     keyword = _safe_val(keyword, None)
     limit = int(_safe_val(limit, 50))
-    offset = int(_safe_val(offset, 0))
+    offset = max(0, int(_safe_val(offset, 0)))
+    limit = max(1, min(500, limit))
+    sync = bool(_safe_val(sync, True))
+
+    def local_page():
+        orders = db.get_orders(account_key, status, platform, keyword, limit, offset)
+        total = db.count_orders(account_key, status, platform, keyword)
+        next_offset = offset + len(orders)
+        return {"ok": True, "orders": orders, "total": total, "has_more": next_offset < total, "next_offset": next_offset}
 
     accounts = db.get_all_accounts()
     if not accounts and not account_key:
-        return {"ok": True, "orders": [], "total": 0, "message": "当前未登录或未托管小蚕账号"}
+        return {"ok": True, "orders": [], "total": 0, "has_more": False, "next_offset": 0, "message": "当前未登录或未托管小蚕账号"}
 
     acc = None
     if account_key:
@@ -4949,61 +5150,43 @@ async def list_orders(
         account_key = acc.get("key")
 
     if not acc:
-        return {"ok": True, "orders": [], "total": 0, "message": "当前账号已退出"}
+        return {"ok": True, "orders": [], "total": 0, "has_more": False, "next_offset": 0, "message": "当前账号已退出"}
 
     token = acc.get("token")
     if not token:
-        return {"ok": True, "orders": [], "total": 0, "message": "当前账号凭据已失效或已退出"}
+        return {"ok": True, "orders": [], "total": 0, "has_more": False, "next_offset": 0, "message": "当前账号凭据已失效或已退出"}
 
     silk_id = acc.get("silk_id")
     user_id = acc.get("user_id")
     if not db.has_valid_location(acc):
-        orders = db.get_orders(
-            account_key=account_key,
-            status=status,
-            platform=platform,
-            keyword=keyword,
-            limit=limit,
-            offset=offset
-        )
         return {
-            "ok": True,
+            **local_page(),
             "location_required": True,
             "code": "LOCATION_REQUIRED",
             "message": _location_required_msg(acc, account_key or ""),
-            "orders": orders,
-            "total": len(orders)
         }
+    if not sync:
+        return local_page()
     city_code = int(acc["city_code"])
 
-    # 转换前端状态过滤参数为官方 RPC order_status
-    # 官方真实状态集：0=待上传, 1=审核中, 2=已完成, 3=已驳回, 4=已取消, 99=全部
-    query_st = 99
-    if status == "pending":
-        query_st = 0
-    elif status == "auditing":
-        query_st = 1
-    elif status == "completed":
-        query_st = 2
-    elif status == "rejected":
-        query_st = 3
-    elif status == "cancelled":
-        query_st = 4
-    else:
-        query_st = 99
-
-    # 尝试从小蚕官方 RPC 同步最新真实订单 (固定同步全部 order_status=99，保证单号与最新状态全量校准)
+    # 官方订单列表按页同步，固定拉取全部状态，确保单号与最新状态全量校准。
+    # 注意：当前账号实测官方状态为 0/2=待上传（2=已下单待反馈）、1=审核中、3=已驳回、4/5=已取消、8=已完成。
+    raw_orders = []
     try:
-        rpc_res = await client.get_order_list(
-            token=token,
-            silk_id=silk_id,
-            user_id=user_id,
-            order_status=99,
-            offset=0,
-            number=50,
-            city_code=city_code
-        )
-        raw_orders = rpc_res.get("order_list") or rpc_res.get("orders") or []
+        for sync_offset in range(0, 250, 50):
+            rpc_res = await client.get_order_list(
+                token=token,
+                silk_id=silk_id,
+                user_id=user_id,
+                order_status=99,
+                offset=sync_offset,
+                number=50,
+                city_code=city_code
+            )
+            batch = rpc_res.get("order_list") or rpc_res.get("orders") or []
+            raw_orders.extend(batch)
+            if len(batch) < 50:
+                break
         for o in raw_orders:
             order_sn = str(o.get("order_id_str") or o.get("promotion_order_id") or "")
             if not order_sn:
@@ -5097,8 +5280,8 @@ async def list_orders(
             else:
                 order_platform = "meituan"
 
-            # 官方状态枚举校准 (严格遵循官方小蚕 APK 逆向与服务端真实业务):
-            # 0=待上传/待绑定, 1=审核中, 2=已完成/已返现, 3=已驳回, 4=用户主动取消, 5=超时取消/订单关闭
+            # 官方状态枚举（按当前账号真实响应校准）:
+            # 0/2=待上传（2=已下单待反馈）, 1=审核中, 3=已驳回, 4/5=已取消, 8=已完成
             raw_st = int(o.get("order_status", 0) or 0)
             cancel_time = int(o.get("cancel_time") or 0)
             timeout_time_val = int(o.get("timeout_time") or 0)
@@ -5115,15 +5298,25 @@ async def list_orders(
 
             if cancel_time > 0 or raw_st in (4, 5):
                 status_str = "cancelled"
-            elif raw_st == 2:
+            elif raw_st == 8:
                 status_str = "completed"
             elif raw_st == 1:
                 status_str = "auditing"
             elif raw_st == 3:
                 status_str = "rejected"
+            elif raw_st == 2:
+                # 官方 status=2 表示已上传/已审核阶段，不能仅按数值判为待上传。
+                # 有 reviewed_time 即审核完成；仅 upload_time 则还在审核中；两者都没有才是待反馈。
+                reviewed_ts = int(o.get("reviewed_time") or 0)
+                upload_ts = int(o.get("upload_time") or 0)
+                if reviewed_ts > 0:
+                    status_str = "completed"
+                elif upload_ts > 0:
+                    status_str = "auditing"
+                else:
+                    status_str = "pending"
             elif raw_st == 0:
-                # 待上传 / 待提交
-                # 若未绑定外卖单号且已过 timeout_time，则判定为超时取消关闭
+                # 已下单但尚未上传凭证；超时未绑定单号则自动关闭
                 if not platform_order_id and timeout_time_val > 0 and timeout_time_val < now_ts:
                     status_str = "cancelled"
                 else:
@@ -5221,15 +5414,7 @@ async def list_orders(
     except Exception as e:
         logger.info(f"官方 RPC 同步订单异常 (将直接返回本地数据库记录): {e}")
 
-    orders = db.get_orders(
-        account_key=account_key,
-        status=status,
-        platform=platform,
-        keyword=keyword,
-        limit=limit,
-        offset=offset
-    )
-    return {"ok": True, "orders": orders, "total": len(orders)}
+    return local_page()
 
 
 @router.get("/orders/stats")
@@ -5471,6 +5656,50 @@ async def bulk_delete_orders_local(data: Dict[str, Any] = Body(...)):
     }
 
 
+@router.post("/orders/restore-local")
+async def restore_orders_local(data: Dict[str, Any] = Body(...)):
+    """恢复被本地批量删除的官方订单：清除删除墓碑，后续同步即可重新入库。"""
+    account_key = _safe_val(data.get("account_key"), None)
+    acc = db.get_account_by_key(account_key) if account_key else None
+    if not acc or not acc.get("token"):
+        raise HTTPException(status_code=400, detail="未找到有效账号")
+    raw_orders = []
+    try:
+        for sync_offset in range(0, 250, 50):
+            rpc_res = await client.get_order_list(
+                token=acc["token"],
+                silk_id=acc.get("silk_id"),
+                user_id=acc.get("user_id"),
+                order_status=99,
+                offset=sync_offset,
+                number=50,
+                city_code=int(acc["city_code"]),
+            )
+            batch = rpc_res.get("order_list") or rpc_res.get("orders") or []
+            raw_orders.extend(batch)
+            if len(batch) < 50:
+                break
+    except Exception as e:
+        logger.warning(f"恢复订单时读取官方列表失败: {e}")
+        raise HTTPException(status_code=502, detail="读取官方订单失败，请稍后重试")
+
+    order_sns = []
+    promotion_ids = []
+    for item in raw_orders:
+        sn = str(item.get("order_id_str") or item.get("promotion_order_id") or "").strip()
+        if sn:
+            order_sns.append(sn)
+        if item.get("promotion_order_id"):
+            promotion_ids.append(int(item.get("promotion_order_id")))
+    removed = db.clear_order_tombstones(order_sns, promotion_ids)
+    return {
+        "ok": True,
+        "removed": removed,
+        "official_total": len(raw_orders),
+        "message": f"已清除 {removed} 条删除标记，请点击刷新订单重新同步",
+    }
+
+
 @router.delete("/orders/{order_id}")
 async def remove_order(order_id: int):
     """删除订单记录 (针对已完成/已取消订单，同步删除官方记录与本地数据库)"""
@@ -5588,7 +5817,7 @@ async def delay_order_voucher(order_id: int):
     task_type = 3 if "ele" in plat else 4
 
     store_name = target_order.get("store_name") or "霸王餐店铺"
-    acc_name = acc.get("nickname") or account_key or "当前账号"
+    acc_name = acc.get("nick_name") or ""
     job_id = f"delay_voucher_{order_id}_{time_service.now_int()}"
     now_str = time_service.format_now_ms()
     steps = [
@@ -5775,7 +6004,7 @@ async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(defaul
         raise HTTPException(status_code=400, detail="该订单缺少官方活动订单号 promotion_order_id，无法使用延时券")
 
     store_name = target_order.get("store_name") or "霸王餐店铺"
-    acc_name = acc.get("nickname") or account_key or "当前账号"
+    acc_name = acc.get("nick_name") or ""
     job_id = f"delay_card_{order_id}_{time_service.now_int()}"
     now_str = time_service.format_now_ms()
     steps = [
@@ -5914,10 +6143,18 @@ async def use_order_free_card(order_id: int, data: Dict[str, Any] = Body(default
 # ---------------- 5. 运行日志与统计 ---------------- #
 
 @router.get("/jobs")
-async def list_jobs(account_key: Optional[str] = Query(None), limit: int = Query(50)):
-    """获取执行历史日志"""
-    logs = db.get_job_logs(account_key, limit)
-    return {"ok": True, "jobs": logs}
+async def list_jobs(
+    account_key: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    status: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+):
+    """按账号、状态和分类分页查询完整执行历史。"""
+    logs = db.get_job_logs(account_key, limit, offset, status, category)
+    total = db.count_job_logs(account_key, status, category)
+    next_offset = offset + len(logs)
+    return {"ok": True, "jobs": logs, "total": total, "has_more": next_offset < total, "next_offset": next_offset}
 
 
 @router.delete("/jobs")
@@ -6954,8 +7191,8 @@ async def get_ip_location():
 async def get_messages(
     account_key: Optional[str] = None,
     channel_id: Optional[int] = None,
-    page: int = 1,
-    page_size: int = 20
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100)
 ):
     """获取小蚕官方消息中心频道与通知列表"""
     acc = None
@@ -6972,7 +7209,11 @@ async def get_messages(
             "channels": [],
             "messages": [],
             "unread_total": 0,
-            "message": "未接入小蚕账号"
+            "message": "未接入小蚕账号",
+            "has_more": False,
+            "next_page": None,
+            "page": page,
+            "page_size": page_size,
         }
 
     token = acc.get("token")
@@ -6997,6 +7238,12 @@ async def get_messages(
             return_exceptions=True
         )
 
+        if isinstance(msgs_res, BaseException):
+            raise msgs_res
+        if isinstance(channels_res, BaseException):
+            raise channels_res
+        if not isinstance(msgs_res, dict):
+            raise ValueError("消息列表响应格式错误")
         channels = []
         if isinstance(channels_res, dict) and channels_res.get("list_channel"):
             channels = channels_res["list_channel"]
@@ -7006,12 +7253,22 @@ async def get_messages(
             messages = msgs_res["list"]
 
         unread_total = sum(c.get("unread", 0) for c in channels)
+        if "has_more" in msgs_res:
+            has_more = msgs_res["has_more"] in (True, 1, "1", "true")
+        elif "total" in msgs_res or "total_count" in msgs_res:
+            has_more = page * page_size < int(msgs_res.get("total", msgs_res.get("total_count", 0)) or 0)
+        else:
+            has_more = len(messages) >= page_size
 
         return {
             "ok": True,
             "channels": channels,
             "messages": messages,
-            "unread_total": unread_total
+            "unread_total": unread_total,
+            "has_more": has_more,
+            "next_page": page + 1 if has_more else None,
+            "page": page,
+            "page_size": page_size
         }
     except Exception as e:
         logger.error(f"获取小蚕消息中心失败: {e}")

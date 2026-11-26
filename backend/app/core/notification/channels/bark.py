@@ -33,7 +33,7 @@ class BarkNotifier(BaseNotifier):
         endpoint = endpoint.rstrip("/")
 
         payload: Dict[str, Any] = {
-            "title": f"[XiaoCan Assistant] {title}",
+            "title": f"【XiaoCan Assistant】 {title}",
             "body": body,
             "group": (group or "XiaoCan Assistant").strip(),
             "level": "timeSensitive"

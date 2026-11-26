@@ -37,7 +37,7 @@ class GotifyNotifier(BaseNotifier):
             "Content-Type": "application/json"
         }
         payload = {
-            "title": f"[XiaoCan Assistant] {title}",
+            "title": f"【XiaoCan Assistant】 {title}",
             "message": message,
             "priority": max(1, min(10, priority or 5))
         }

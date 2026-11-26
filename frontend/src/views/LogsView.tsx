@@ -31,6 +31,8 @@ import { useOnActivated } from '../utils/useOnActivated';
 import { useGSAP, gsap } from '../utils/animations';
 import { ORDER_PRIVILEGE_TASK_KEYS, STORE_TASK_KEYS, getTaskLabel } from '../constants/taskLabels';
 import { getLogAccountDisplay } from '../utils/logAccount';
+import { useMobileLayout } from '../utils/useListPagination';
+import { ListFooter } from '../components/ListFooter';
 import type { JobLog } from '../types';
 
 const { Title, Text } = Typography;
@@ -43,6 +45,12 @@ export const LogsView: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [loading, setLoading] = useState<boolean>(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const isMobile = useMobileLayout();
+  const activeTab = useAppStore(s => s.activeTab);
   const [clearing, setClearing] = useState<boolean>(false);
 
   // 表格与视口自适应高度
@@ -60,6 +68,7 @@ export const LogsView: React.FC = () => {
 
   // 纯净视口高度自适应：杜绝 DOM querySelector 与强制同步重排
   useEffect(() => {
+    if (isMobile) return;
     const updateHeight = () => {
       if (!tableContainerRef.current) return;
       const ch = tableContainerRef.current.clientHeight;
@@ -84,35 +93,47 @@ export const LogsView: React.FC = () => {
       window.removeEventListener('resize', updateHeight);
       ro?.disconnect();
     };
-  }, []);
+  }, [isMobile]);
 
-  const lastLogsSignatureRef = useRef<string>('');
-  const inFlightLogsRef = useRef<boolean>(false);
+  const lastLogsSignatureRef = useRef('');
+  const inFlightLogsRef = useRef('');
+  const logsRequestRef = useRef(0);
 
-  const fetchLogs = async (silent = false, force = false) => {
-    const queryKey = filterAccount || 'all';
-    if (!silent && !force && lastLogsSignatureRef.current === queryKey) {
-      return;
-    }
-    if (inFlightLogsRef.current) return;
-    inFlightLogsRef.current = true;
-    if (!silent) {
-      setLoading(true);
-      lastLogsSignatureRef.current = queryKey;
-    }
+  const fetchLogs = async (silent = false, force = false, page = currentPage, append = false) => {
+    const queryKey = JSON.stringify([filterAccount, filterStatus, filterCategory, pageSize, page]);
+    if ((!silent && !force && lastLogsSignatureRef.current === queryKey) || inFlightLogsRef.current === queryKey) return;
+    const requestId = ++logsRequestRef.current;
+    inFlightLogsRef.current = queryKey;
+    setLoadError('');
+    setLoadingMore(append);
+    if (!silent && !append) setLoading(true);
     try {
-      const res = await api.getJobs(filterAccount || undefined, 300);
-      if (res.ok) {
-        setLogs(res.jobs || []);
+      const res = await api.getJobs(filterAccount || undefined, pageSize, (page - 1) * pageSize, filterStatus, filterCategory);
+      if (requestId !== logsRequestRef.current) return;
+      if (!res.ok) throw new Error('拉取日志失败');
+      const rows = res.jobs || [];
+      if (!append && page > 1 && !rows.length && res.total > 0) {
+        void fetchLogs(false, true, Math.max(1, Math.ceil(res.total / pageSize)));
+        return;
       }
-    } catch (e) {
+      setLogs(prev => append ? [...prev, ...rows.filter(row => !prev.some(item => item.id === row.id))] : rows);
+      setTotal(res.total);
+      setHasMore(res.has_more);
+      setCurrentPage(page);
+      lastLogsSignatureRef.current = queryKey;
+    } catch {
+      if (requestId !== logsRequestRef.current) return;
       if (!silent) {
         lastLogsSignatureRef.current = '';
+        setLoadError('加载日志失败，请重试');
         Toast.error('拉取日志失败');
       }
     } finally {
-      inFlightLogsRef.current = false;
-      if (!silent) setLoading(false);
+      if (requestId === logsRequestRef.current) {
+        inFlightLogsRef.current = '';
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
   };
 
@@ -122,7 +143,16 @@ export const LogsView: React.FC = () => {
       const res = await api.clearJobs(filterAccount || undefined);
       if (res.ok) {
         Toast.success('运行日志已清空');
+        logsRequestRef.current += 1;
+        inFlightLogsRef.current = '';
+        lastLogsSignatureRef.current = '';
         setLogs([]);
+        setTotal(0);
+        setCurrentPage(1);
+        setHasMore(false);
+        setLoadError('');
+        setLoading(false);
+        setLoadingMore(false);
       }
     } catch (e) {
       Toast.error('清空日志失败');
@@ -132,8 +162,11 @@ export const LogsView: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchLogs();
-  }, [filterAccount]);
+    setLogs([]);
+    setTotal(0);
+    setCurrentPage(1);
+    void fetchLogs(false, true, 1);
+  }, [filterAccount, filterStatus, filterCategory, pageSize, isMobile]);
 
   // 页面切入激活时自动拉取最新运行日志
   useOnActivated('logs', () => {
@@ -174,58 +207,16 @@ export const LogsView: React.FC = () => {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [hasRunning, filterAccount]);
+  }, [hasRunning, filterAccount, filterStatus, filterCategory, currentPage, pageSize, isMobile]);
 
   const handleOpenDetail = useCallback((log: JobLog) => {
     setActiveLog(log);
     setDetailModalVisible(true);
   }, []);
 
-  const filteredLogs = useMemo(() => {
-    return logs.filter(item => {
-      if (filterStatus !== 'all' && item.status !== filterStatus) {
-        return false;
-      }
-      if (filterCategory === 'store') {
-        return STORE_TASK_KEYS.has(item.task_id);
-      }
-      if (filterCategory === 'daily') {
-        return !STORE_TASK_KEYS.has(item.task_id);
-      }
-      return true;
-    });
-  }, [logs, filterStatus, filterCategory]);
-
-  // 当用户主动更改筛选条件时，重置回第 1 页
   useEffect(() => {
-    setCurrentPage(1);
-  }, [filterAccount, filterStatus, filterCategory]);
-
-  // 边界保护：若筛选后数据量缩减导致当前页超出最大页数，自动收敛
-  const totalPages = Math.ceil(filteredLogs.length / pageSize) || 1;
-  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
-
-  useEffect(() => {
-    if (currentPage > totalPages) {
-      setCurrentPage(totalPages);
-    }
-  }, [totalPages, currentPage]);
-
-  // 切割当前页需要展示的数据切片 (受控模式下 Semi Table 默认不切片，必须传入当前页切片数据)
-  const pagedLogs = useMemo(() => {
-    const startIndex = (safeCurrentPage - 1) * pageSize;
-    return filteredLogs.slice(startIndex, startIndex + pageSize);
-  }, [filteredLogs, safeCurrentPage, pageSize]);
-
-  // 翻页时平滑回滚表格滚动区域至顶部，提升阅读浏览体验
-  useEffect(() => {
-    if (tableContainerRef.current) {
-      const tableBody = tableContainerRef.current.querySelector('.semi-table-body');
-      if (tableBody) {
-        tableBody.scrollTop = 0;
-      }
-    }
-  }, [safeCurrentPage]);
+    if (!isMobile) tableContainerRef.current?.querySelector('.semi-table-body')?.scrollTo({ top: 0 });
+  }, [currentPage, isMobile]);
 
   const columns = useMemo(() => [
     {
@@ -483,7 +474,7 @@ export const LogsView: React.FC = () => {
         <div>
           <div className="flex items-center gap-2">
             <Title heading={3} className="m-0">系统运行日志</Title>
-            <Tag color="blue" size="small" shape="circle">共 {filteredLogs.length} 条记录</Tag>
+            <Tag color="blue" size="small" shape="circle">共 {total} 条记录</Tag>
           </div>
           <Text type="secondary" size="small" className="mt-1 block">
             全流程追踪即时抢单、预约毫秒秒杀、实时捡漏监听、日常打卡及资产提现高精步骤流水
@@ -523,9 +514,9 @@ export const LogsView: React.FC = () => {
               return (
                 <div className="flex items-center gap-1.5 text-xs truncate">
                   <Avatar size="extra-extra-small" src={acc?.avatar || undefined} style={isMt ? { backgroundColor: '#ffc300', color: '#222' } : undefined} color="orange">
-                    {isMt ? '美' : (acc?.nickname?.[0] || '蚕')}
+                    {isMt ? '美' : (acc?.nick_name?.[0] || '')}
                   </Avatar>
-                  <span className="truncate">{acc?.nickname || val}</span>
+                  <span className="truncate">{isMt ? val : acc?.nick_name}</span>
                 </div>
               );
             }}
@@ -542,9 +533,9 @@ export const LogsView: React.FC = () => {
                 <Select.Option key={a.key} value={a.key}>
                   <div className="flex items-center gap-2 py-0.5">
                     <Avatar size="extra-extra-small" src={a.avatar || undefined} style={isMt ? { backgroundColor: '#ffc300', color: '#222' } : undefined} color="orange">
-                      {isMt ? '美' : (a.nickname?.[0] || '蚕')}
+                      {isMt ? '美' : (a.nick_name?.[0] || '')}
                     </Avatar>
-                    <span className="truncate flex-1 text-xs">{a.nickname}</span>
+                    <span className="truncate flex-1 text-xs">{a.nick_name}</span>
                     {isMt && (
                       <Tag size="small" color="amber" shape="circle" style={{ transform: 'scale(0.85)' }}>
                         美团
@@ -613,37 +604,19 @@ export const LogsView: React.FC = () => {
           <Table
             rowKey="id"
             columns={columns}
-            dataSource={pagedLogs}
+            dataSource={logs}
             loading={loading}
-            pagination={{
-              currentPage: safeCurrentPage,
+            pagination={isMobile ? false : {
+              currentPage,
               pageSize,
-              total: filteredLogs.length,
+              total,
+              showTotal: true,
               showSizeChanger: true,
               pageSizeOpts: [10, 20, 50, 100],
-              formatPageText: (pageInfo?: { currentStart?: number; currentEnd?: number; total?: number }) => {
-                const total = pageInfo?.total ?? filteredLogs.length;
-                const start = pageInfo?.currentStart ?? (filteredLogs.length > 0 ? (safeCurrentPage - 1) * pageSize + 1 : 0);
-                const end = pageInfo?.currentEnd ?? Math.min(safeCurrentPage * pageSize, total);
-                return `第 ${start}-${end} 条，共 ${total} 条`;
-              },
-              onPageChange: (page: number) => {
-                setCurrentPage(page);
-              },
-              onPageSizeChange: (newPageSize: number) => {
-                setPageSize(newPageSize);
-                setCurrentPage(1);
-              },
+              onPageChange: page => { void fetchLogs(false, true, page); },
+              onPageSizeChange: size => setPageSize(size),
             }}
-            onChange={(changeInfo) => {
-              if (changeInfo?.pagination?.currentPage) {
-                setCurrentPage(changeInfo.pagination.currentPage);
-              }
-              if (changeInfo?.pagination?.pageSize) {
-                setPageSize(changeInfo.pagination.pageSize);
-              }
-            }}
-            scroll={{ y: tableScrollY, x: 1200 }}
+            scroll={isMobile ? { x: 1200 } : { y: tableScrollY, x: 1200 }}
             size="middle"
             empty={
               loading ? (
@@ -655,13 +628,14 @@ export const LogsView: React.FC = () => {
               ) : (
                 <div className="py-16 text-center flex flex-col items-center justify-center m-auto">
                   <Empty
-                    title="暂无运行日志记录"
+                    title={loadError || '暂无运行日志记录'}
                     description="系统在执行店铺抢单、倒计时预约、实时名额监听、自动提现或每日任务时，将实时记录详细步骤流水"
                   />
                 </div>
               )
             }
           />
+          {(isMobile || loadError) && <ListFooter count={logs.length} total={total} hasMore={hasMore} loading={loading || loadingMore} error={loadError} active={activeTab === 'logs'} onLoadMore={() => { void fetchLogs(false, true, logs.length ? currentPage + 1 : 1, logs.length > 0); }} />}
         </div>
       </Card>
 

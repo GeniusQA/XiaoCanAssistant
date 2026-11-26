@@ -131,7 +131,7 @@ export const FlashSaleDrawerConfig: React.FC<FlashSaleDrawerConfigProps> = ({
   const isPlus = accountInfo ? Boolean(accountInfo.is_plus) : Boolean(currentAccount?.is_plus);
   const vipLevel = accountInfo?.vip_level ?? currentAccount?.vip_level ?? 1;
   const ybPoint = accountInfo?.yb_point ?? currentAccount?.yb_point ?? 0;
-  const nickname = accountInfo?.nickname || currentAccount?.nickname || '主控账号';
+  const nickname = accountInfo?.nick_name || currentAccount?.nick_name || '';
 
   // 固定的 3 个场次定义
   const roundsList = shelfData?.rounds || [

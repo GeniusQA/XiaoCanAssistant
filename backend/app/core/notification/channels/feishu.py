@@ -30,7 +30,7 @@ class FeishuNotifier(BaseNotifier):
             "content": {
                 "post": {
                     "zh_cn": {
-                        "title": f"[XiaoCan Assistant] {title}",
+                        "title": f"【XiaoCan Assistant】 {title}",
                         "content": [
                           [{"tag": "text", "text": content}]
                         ]

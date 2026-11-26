@@ -191,7 +191,7 @@ class QqBotNotifier(BaseNotifier):
 
         test_title = "通知连通性测试"
         test_content = (
-            f"[XiaoCan Assistant] {test_title}\n"
+            f"【XiaoCan Assistant】 {test_title}\n"
             "这是一条来自XiaoCan Assistant的连通性测试消息。如果你收到此消息，说明 OneBot V11 协议端已成功接入并正常工作。"
         )
         return await self._do_send(api_url, target_type, group_id, user_id, token, test_content)

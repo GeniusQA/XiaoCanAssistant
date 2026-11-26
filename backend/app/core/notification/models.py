@@ -18,6 +18,7 @@ class NotificationEvent(str, Enum):
     COUPON_EXPIRE = "coupon_expire"        # 卡券即将到期预警
     TASK_FAIL = "task_fail"                # 抢单失败/名额售罄/异常中断
     CLAW_SESSION_RENEWAL = "claw_session_renewal"  # 微信 ClawBot 会话/额度续期预警
+    CLAW_SESSION_EXPIRED = "claw_session_expired"  # 微信 ClawBot 会话已过期，需手动激活
     SYSTEM_TEST = "system_test"            # 通道连通性测试消息
 
 
@@ -43,7 +44,7 @@ class NotificationData:
 
     def format_plain_text(self) -> str:
         """生成通用的纯文本格式（无 Emoji，严谨清晰）"""
-        lines = [f"[XiaoCan Assistant] {self.title}"]
+        lines = [f"【XiaoCan Assistant】 {self.title}"]
         if self.account_name:
             lines.append(f"账号: {self.account_name}")
         lines.append(self.content)
@@ -52,7 +53,7 @@ class NotificationData:
     def format_markdown(self) -> str:
         """生成支持 Markdown 排版的通道文本（加粗、引用与分块）"""
         level_tag = f"[{self.level.value.upper()}]"
-        lines = [f"### [XiaoCan Assistant] {self.title} {level_tag}"]
+        lines = [f"### 【XiaoCan Assistant】 {self.title} {level_tag}"]
         if self.account_name:
             lines.append(f"- **执行账号**: {self.account_name}")
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp))

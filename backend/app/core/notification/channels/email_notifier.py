@@ -123,7 +123,7 @@ class EmailNotifier(BaseNotifier):
         from_addr = db.get_setting("email_from", "")
         to_addr = db.get_setting("email_to", "")
 
-        subject = f"[XiaoCan Assistant] {data.title}"
+        subject = f"【XiaoCan Assistant】 {data.title}"
         return await self._do_send(host, port, use_ssl, user, password, from_addr, to_addr, subject, data.format_plain_text())
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,7 +135,7 @@ class EmailNotifier(BaseNotifier):
         from_addr = config.get("email_from") or db.get_setting("email_from", "")
         to_addr = config.get("email_to") or db.get_setting("email_to", "")
 
-        test_subject = "[XiaoCan Assistant] 通知连通性测试邮件"
+        test_subject = "【XiaoCan Assistant】 通知连通性测试邮件"
         test_content = (
             "这是一封来自XiaoCan Assistant的连通性测试邮件。\n\n"
             "如果你收到此邮件，说明 SMTP 邮件通道已正确配置，"

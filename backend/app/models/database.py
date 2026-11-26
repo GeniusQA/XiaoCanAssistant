@@ -498,6 +498,10 @@ def init_db():
         c.execute("ALTER TABLE store_appointments ADD COLUMN auto_stop_on_success INTEGER DEFAULT 1")
     if "max_order_money" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN max_order_money REAL DEFAULT 0")
+    if "distance_range" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN distance_range TEXT DEFAULT ''")
+    if "max_distance_km" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN max_distance_km REAL DEFAULT 0")
 
     # 自动自愈 store_appointments 中缺失 store_icon 的记录 (从 orders 表或同店名同ID回填)
     try:
@@ -1341,14 +1345,63 @@ def auto_clean_stale_running_jobs():
         pass
 
 
-def get_job_logs(account_key: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+_JOB_STORE_TASK_IDS = (
+    "store_grab", "store_appoint", "store_monitor", "store_keyword",
+    "store_search", "store_cancel", "dual_rebate_scan", "dual_rebate_monitor",
+)
+
+
+def _build_job_log_filters(
+    account_key: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+) -> Tuple[str, List[Any]]:
+    clauses: List[str] = []
+    params: List[Any] = []
+    if account_key:
+        clauses.append("account_key = ?")
+        params.append(account_key)
+    if status and status != "all":
+        clauses.append("status = ?")
+        params.append(status)
+    if category == "store":
+        placeholders = ",".join("?" for _ in _JOB_STORE_TASK_IDS)
+        clauses.append(f"task_id IN ({placeholders})")
+        params.extend(_JOB_STORE_TASK_IDS)
+    elif category == "daily":
+        placeholders = ",".join("?" for _ in _JOB_STORE_TASK_IDS)
+        clauses.append(f"task_id NOT IN ({placeholders})")
+        params.extend(_JOB_STORE_TASK_IDS)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+def get_job_logs(
+    account_key: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     auto_clean_stale_running_jobs()
+    where, params = _build_job_log_filters(account_key, status, category)
     with get_conn() as conn:
-        if account_key:
-            rows = conn.execute("SELECT * FROM job_logs WHERE account_key = ? ORDER BY id DESC LIMIT ?", (account_key, limit)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM job_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(
+            f"SELECT * FROM job_logs{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
         return [dict(r) for r in rows]
+
+
+def count_job_logs(
+    account_key: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+) -> int:
+    where, params = _build_job_log_filters(account_key, status, category)
+    with get_conn() as conn:
+        row = conn.execute(f"SELECT COUNT(*) FROM job_logs{where}", tuple(params)).fetchone()
+        return int(row[0] if row else 0)
 
 
 def clear_job_logs(account_key: Optional[str] = None):
@@ -1411,9 +1464,10 @@ def add_appointment(data: Dict[str, Any]) -> int:
             check_interval, platform, order_money, rebate_price, rebate_desc, rebate_type, log_id,
             use_advance_card, redpack_id, redpack_name, auto_use_best_vip_card, min_rebate_gap,
             high_rebate_only, store_category,
-            keyword, match_mode, listen_mode, activity_requirement, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money
+            keyword, match_mode, listen_mode, activity_requirement, min_rebate_price, min_rebate_rate, rebate_mode_filter, auto_stop_on_success, max_order_money,
+            distance_range, max_distance_km
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["account_key"],
             str(data.get("store_id", "")),
@@ -1454,7 +1508,9 @@ def add_appointment(data: Dict[str, Any]) -> int:
             float(data.get("min_rebate_rate") or 0.0),
             str(data.get("rebate_mode_filter") or "all"),
             int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1),
-            float(data.get("max_order_money") or 0.0)
+            float(data.get("max_order_money") or 0.0),
+            str(data.get("distance_range") or ""),
+            float(data.get("max_distance_km") or 0.0)
         ))
         conn.commit()
         return cur.lastrowid
@@ -1790,6 +1846,36 @@ def get_orders(
         return [dict(r) for r in rows]
 
 
+def count_orders(
+    account_key: Optional[str] = None,
+    status: Optional[str] = None,
+    platform: Optional[str] = None,
+    keyword: Optional[str] = None,
+) -> int:
+    sql = "SELECT COUNT(*) FROM orders WHERE 1=1"
+    params: Dict[str, Any] = {}
+    if account_key:
+        sql += " AND account_key = :account_key"
+        params["account_key"] = account_key
+    if status and status != "all":
+        sql += " AND status = :status"
+        params["status"] = status
+    if platform and platform != "all":
+        if platform in ("jingdong", "jd"):
+            sql += " AND platform IN ('jingdong', 'jd')"
+        elif platform in ("eleme", "taobao"):
+            sql += " AND platform IN ('eleme', 'taobao')"
+        else:
+            sql += " AND platform = :platform"
+            params["platform"] = platform
+    if keyword:
+        sql += " AND (store_name LIKE :kw OR order_sn LIKE :kw OR platform_order_id LIKE :kw)"
+        params["kw"] = f"%{keyword}%"
+    with get_conn() as conn:
+        row = conn.execute(sql, params).fetchone()
+        return int(row[0] if row else 0)
+
+
 def get_order_by_id(order_id: int) -> Optional[Dict[str, Any]]:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
@@ -2036,6 +2122,29 @@ def is_order_deleted(order_sn: str) -> bool:
         return conn.execute(
             "SELECT 1 FROM deleted_orders WHERE order_sn = ? LIMIT 1", (order_sn,)
         ).fetchone() is not None
+
+
+def clear_order_tombstones(order_sns: List[str], promotion_ids: List[int]) -> int:
+    """清除指定官方订单的本地删除标记，使后续同步可以重新入库。"""
+    keys = [str(sn).strip() for sn in order_sns if str(sn).strip()]
+    keys.extend(f"promo:{int(pid)}" for pid in promotion_ids if int(pid or 0) > 0)
+    keys = list(dict.fromkeys(keys))
+    if not keys:
+        return 0
+    with get_conn() as conn:
+        placeholders = ",".join("?" for _ in keys)
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM deleted_orders WHERE order_sn IN ({placeholders})",
+            keys,
+        ).fetchone()
+        removed = int(row[0] if row else 0)
+        if removed:
+            conn.execute(
+                f"DELETE FROM deleted_orders WHERE order_sn IN ({placeholders})",
+                keys,
+            )
+            conn.commit()
+        return removed
 
 
 def delete_order(order_id: int) -> bool:

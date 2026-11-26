@@ -66,10 +66,10 @@ export const HeaderNav: React.FC = () => {
                   return (
                     <Space align="center">
                       <Avatar size="extra-small" src={acc?.avatar || undefined} color="orange">
-                        {acc?.nickname?.[0] || '蚕'}
+                        {acc?.nick_name?.[0] || ''}
                       </Avatar>
                       <span className="max-w-[100px] truncate">
-                        {acc?.nickname}
+                        {acc?.nick_name}
                       </span>
                     </Space>
                   );
@@ -79,9 +79,9 @@ export const HeaderNav: React.FC = () => {
                   <Select.Option key={a.key} value={a.key}>
                     <Space align="center">
                       <Avatar size="extra-small" src={a.avatar || undefined} color="orange">
-                        {a.nickname?.[0] || '蚕'}
+                        {a.nick_name?.[0] || ''}
                       </Avatar>
-                      <span>{a.nickname}</span>
+                      <span>{a.nick_name}</span>
                       <Tag size="small" color={a.is_plus ? "amber" : "blue"}>
                         {a.is_plus ? `SVIP${a.vip_level || 1}` : `VIP${a.vip_level || 1}`}
                       </Tag>

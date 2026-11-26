@@ -368,8 +368,8 @@ const TaskCard: React.FC<TaskCardProps> = React.memo(({
                   key={acc.key}
                   content={
                     isAccToggling
-                      ? `${acc.nickname} · 正在更新状态...`
-                      : `${acc.nickname} · ${isAccEnabled ? '点击关闭此账号' : '点击开启此账号'}${isCurrent ? ' · 当前主控' : ''}`
+                      ? `${acc.nick_name} · 正在更新状态...`
+                      : `${acc.nick_name} · ${isAccEnabled ? '点击关闭此账号' : '点击开启此账号'}${isCurrent ? ' · 当前主控' : ''}`
                   }
                 >
                   <Tag
@@ -419,7 +419,7 @@ const TaskCard: React.FC<TaskCardProps> = React.memo(({
                         }}
                       />
                     )}
-                    {acc.nickname || '未命名'}
+                    {acc.nick_name || '未命名'}
                     {isCurrent ? ' · 主控' : ''}
                   </Tag>
                 </Tooltip>
@@ -551,7 +551,7 @@ export const Automation: React.FC = () => {
 
     const acc = accounts.find((a) => a.key === accountKey);
     if (enabled && !hasValidAccountLocation(acc)) {
-      Toast.warning(`账号【${acc?.nickname || accountKey}】未绑定抢单地址，请先绑定地址后再开启自动化任务`);
+      Toast.warning(`账号【${acc?.nick_name}】未绑定抢单地址，请先绑定地址后再开启自动化任务`);
       openLocationModal(accountKey);
       return;
     }
@@ -575,7 +575,7 @@ export const Automation: React.FC = () => {
       });
 
       const acc = accounts.find((a) => a.key === accountKey);
-      Toast.success(`${acc?.nickname || '账号'} 任务已${enabled ? '开启' : '暂停'}`);
+      Toast.success(`${acc?.nick_name} 任务已${enabled ? '开启' : '暂停'}`);
     } catch (e: any) {
       const errMsg = e?.response?.data?.detail || e?.message || '更新任务状态失败';
       Toast.error(errMsg);
@@ -595,7 +595,7 @@ export const Automation: React.FC = () => {
     if (enabled) {
       const unbound = accounts.filter((a) => !hasValidAccountLocation(a));
       if (unbound.length > 0) {
-        Toast.warning(`账号【${unbound[0].nickname || unbound[0].key}】等 ${unbound.length} 个账号未绑定地址，请先绑定后再批量开启`);
+        Toast.warning(`账号【${unbound[0].nick_name}】等 ${unbound.length} 个账号未绑定地址，请先绑定后再批量开启`);
         openLocationModal(unbound[0].key);
         return;
       }
@@ -639,7 +639,7 @@ export const Automation: React.FC = () => {
     const targetKey = accountKey || currentAccountKey;
     const targetAcc = accounts.find((a) => a.key === targetKey);
     if (!hasValidAccountLocation(targetAcc)) {
-      Toast.warning(`账号【${targetAcc?.nickname || targetKey}】尚未绑定地址，请先绑定地址后再执行`);
+      Toast.warning(`账号【${targetAcc?.nick_name}】尚未绑定地址，请先绑定地址后再执行`);
       openLocationModal(targetKey);
       return;
     }
@@ -854,7 +854,7 @@ export const Automation: React.FC = () => {
   const handleBatchToggleCategory = async (category: string, enable: boolean) => {
     if (batchCategoryToggling !== null) return;
     if (enable && !hasValidAccountLocation(currentAccount)) {
-      Toast.warning(`当前账号【${currentAccount?.nickname || currentAccountKey}】未绑定地址，请先绑定地址后再开启任务`);
+      Toast.warning(`当前账号【${currentAccount?.nick_name}】未绑定地址，请先绑定地址后再开启任务`);
       openLocationModal(currentAccountKey);
       return;
     }
@@ -1019,7 +1019,7 @@ export const Automation: React.FC = () => {
               自动化任务
             </Title>
             <Tag color="blue" size="large" shape="circle">
-              当前主控: {currentAccount?.nickname || '未命名'}
+              当前主控: {currentAccount?.nick_name}
               {currentAccount?.is_plus
                 ? ` (SVIP${currentAccount.vip_level || 1})`
                 : ` (VIP${currentAccount?.vip_level || 1})`}
@@ -1063,7 +1063,7 @@ export const Automation: React.FC = () => {
           type="warning"
           closeIcon={null}
           icon={<IconMapPin />}
-          title={`当前账号【${currentAccount.nickname || currentAccount.key}】尚未绑定位置地址`}
+          title={`当前账号【${currentAccount.nick_name}】尚未绑定位置地址`}
           description={
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <span>为避免误用默认城市坐标导致任务或监听异常，请先为当前账号绑定真实所在城市与位置后再开启/执行自动化任务。</span>

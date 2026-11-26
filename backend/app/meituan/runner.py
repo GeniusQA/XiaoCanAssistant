@@ -407,7 +407,7 @@ class MeituanAuthManager:
             
             # 记录授权启动流水日志
             target_acc = db.get_account_by_key(account_key) if account_key else None
-            acc_name = target_acc.get("nickname") if target_acc else (account_key or "未指定账号")
+            acc_name = target_acc.get("nick_name") if target_acc else ""
             job_id = f"job_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
             now_str = time_service.format_now()
             log_lines = [
@@ -564,7 +564,7 @@ class MeituanAuthManager:
 
                 if account_key:
                     target_acc = get_account_by_key(account_key)
-                    acc_nick = target_acc.get("nickname") if target_acc else account_key
+                    acc_nick = target_acc.get("nick_name") if target_acc else ""
                     if custom_nickname and str(custom_nickname).strip():
                         nickname = str(custom_nickname).strip()
                     else:

@@ -50,7 +50,22 @@ import { useGSAP } from '@gsap/react';
 import { api } from '../api';
 import { useOnActivated } from '../utils/useOnActivated';
 import { useAppStore } from '../store/useAppStore';
+import { getWxUserPage, mergeUniquePage } from '../utils/secondaryPagination';
 import type { SystemSettings, ClawBotStatus } from '../types';
+
+interface WxUserQueryState {
+  appToken: string;
+  users: Array<{ uid: string; nickname: string }>;
+  total: number | null;
+  nextPage: number | null;
+  failedPage: number | null;
+  status: 'idle' | 'loading' | 'loaded' | 'error';
+  error: string;
+}
+
+const createWxUserQuery = (appToken = ''): WxUserQueryState => ({
+  appToken, users: [], total: null, nextPage: 1, failedPage: null, status: 'idle', error: '',
+});
 
 const { Title, Text } = Typography;
 
@@ -608,8 +623,20 @@ export const SettingsView: React.FC = () => {
   const formApiRef = useRef<any>(null);
   const [loading, setLoading] = useState(false);
   const [testingChannel, setTestingChannel] = useState<string | null>(null);
-  const [loadingWxUsers, setLoadingWxUsers] = useState(false);
-  const [wxUsers, setWxUsers] = useState<Array<{ uid: string; nickname: string }>>([]);
+  const [wxUserQuery, setWxUserQuery] = useState<WxUserQueryState>(createWxUserQuery);
+  const wxUserQueryRef = useRef(wxUserQuery);
+  const wxUserRequestRef = useRef(0);
+  const setWxUserQueryState = (state: WxUserQueryState) => {
+    wxUserQueryRef.current = state;
+    setWxUserQuery(state);
+  };
+  const resetWxUserQuery = (appToken: string, force = false) => {
+    const token = appToken.trim();
+    if (!force && wxUserQueryRef.current.appToken === token) return;
+    wxUserRequestRef.current += 1;
+    setWxUserQueryState(createWxUserQuery(token));
+  };
+  useEffect(() => () => { wxUserRequestRef.current += 1; }, []);
   const [loadingTgChats, setLoadingTgChats] = useState(false);
   const [tgChats, setTgChats] = useState<Array<{ id: string; name: string; type: string; typeName: string; username?: string }>>([]);
   const [tgChatHint, setTgChatHint] = useState<string>('');
@@ -781,12 +808,9 @@ export const SettingsView: React.FC = () => {
         formApiRef.current.setValues(res);
       }
       // 已配置 appToken 时自动刷新关注用户列表，避免保存/重进页面后已勾选用户看不到
-      const savedToken = String((res as any).wxpusher_app_token || '').trim();
-      if (savedToken) {
-        void fetchWxUsers(savedToken, true);
-      } else {
-        setWxUsers([]);
-      }
+      const savedToken = String(res.wxpusher_app_token || '').trim();
+      resetWxUserQuery(savedToken, true);
+      if (savedToken) void fetchWxUsers(savedToken, true);
       const savedTgToken = String((res as any).tg_bot_token || '').trim();
       if (savedTgToken) {
         void fetchTgChats(true);
@@ -926,27 +950,40 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const fetchWxUsers = async (appToken: string, silent = false) => {
-    setLoadingWxUsers(true);
+  const fetchWxUsers = async (appToken: string, silent = false, page = 1) => {
+    const token = appToken.trim();
+    if (!token) return;
+    if (wxUserQueryRef.current.appToken !== token) resetWxUserQuery(token);
+    if (wxUserQueryRef.current.status === 'loading') return;
+    const requestId = ++wxUserRequestRef.current;
+    const isCurrent = () => wxUserRequestRef.current === requestId
+      && wxUserQueryRef.current.appToken === token
+      && String(formApiRef.current?.getValue('wxpusher_app_token') ?? token).trim() === token;
+    setWxUserQueryState({ ...wxUserQueryRef.current, status: 'loading', error: '', failedPage: null });
     try {
-      const res = await api.getWxPusherUsers(appToken);
-      if (!res.ok) {
-        if (!silent) Toast.error(`[失败] ${res.message || '获取用户列表失败'}`);
-        return;
-      }
-      const users = res.users || [];
-      setWxUsers(users.map((u) => ({ uid: u.uid, nickname: u.nickname })));
+      const res = await api.getWxPusherUsers(token, page, 100);
+      if (!isCurrent()) return;
+      if (!res.ok) throw new Error(res.message || '获取用户列表失败');
+      if (!Array.isArray(res.users)) throw new Error('关注用户列表返回异常，请重试');
+      const pagination = getWxUserPage(res, page, 100, res.users.length);
+      const users = res.users.map((user) => ({ uid: String(user.uid || '').trim(), nickname: user.nickname || '' }));
+      if (users.some((user) => !user.uid)) throw new Error('关注用户 UID 缺失，请重试');
+      const merged = mergeUniquePage(page === 1 ? [] : wxUserQueryRef.current.users, users, (user) => user.uid);
+      setWxUserQueryState({
+        appToken: token, users: merged, ...pagination, status: 'loaded', error: '', failedPage: null,
+      });
       if (!silent) {
-        if (users.length === 0) {
+        if (pagination.total === 0) {
           Toast.warning('该应用暂无关注用户，请先用应用二维码让目标微信用户扫码关注');
         } else {
-          Toast.success(`已获取 ${users.length} 个用户，点击用户可勾选/取消`);
+          Toast.success(`已获取 ${merged.length} / ${pagination.total} 个用户，点击用户可勾选/取消`);
         }
       }
-    } catch (e: any) {
-      if (!silent) Toast.error(`获取用户列表异常: ${e?.response?.data?.detail || e.message || '未知错误'}`);
-    } finally {
-      setLoadingWxUsers(false);
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
+      const message = error instanceof Error ? error.message : '获取关注用户异常，请重试';
+      setWxUserQueryState({ ...wxUserQueryRef.current, status: 'error', error: message, failedPage: page });
+      if (!silent) Toast.error(message);
     }
   };
 
@@ -958,6 +995,14 @@ export const SettingsView: React.FC = () => {
       return;
     }
     void fetchWxUsers(appToken);
+  };
+
+  const handleLoadMoreWxUsers = () => {
+    const appToken = String(formApiRef.current?.getValue('wxpusher_app_token') || '').trim();
+    const query = wxUserQueryRef.current;
+    if (!appToken || query.status === 'loading') return;
+    const page = query.appToken === appToken ? query.failedPage ?? query.nextPage : 1;
+    if (page !== null) void fetchWxUsers(appToken, false, page);
   };
 
   const fetchTgChats = async (silent = false) => {
@@ -1199,9 +1244,13 @@ export const SettingsView: React.FC = () => {
       >
         {({ values }) => {
           const subscribedCount = STRATEGIES.filter((s) => Boolean(values?.[s.field])).length;
-          const selectedWxUids: string[] = String(values?.wxpusher_uids || '')
+          const wxAppToken = String(values?.wxpusher_app_token || '').trim();
+          const wxQuery = wxUserQuery.appToken === wxAppToken ? wxUserQuery : createWxUserQuery(wxAppToken);
+          const wxUsers = wxQuery.users;
+          const loadingWxUsers = wxQuery.status === 'loading';
+          const selectedWxUids = [...new Set(String(values?.wxpusher_uids || '')
             .split(/[,，\n\r\s]+/)
-            .filter(Boolean);
+            .filter(Boolean))];
           const selectedUidSet = new Set(selectedWxUids);
           const wxUserSet = new Set(wxUsers.map((u) => u.uid));
           const displayWxUsers = [
@@ -1539,6 +1588,7 @@ export const SettingsView: React.FC = () => {
                                         label="应用 Token (appToken)"
                                         placeholder="AT_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
                                         helpText="在 wxpusher.zjiecode.com 创建应用后获取"
+                                        onChange={(value) => resetWxUserQuery(String(value))}
                                       />
                                       <div className="flex flex-wrap items-center gap-2">
                                         <Button
@@ -1595,11 +1645,28 @@ export const SettingsView: React.FC = () => {
                                               );
                                             })}
                                           </div>
-                                        ) : (
-                                          <div className="px-3 py-4 rounded-lg bg-semi-color-fill-0 border border-semi-color-border text-center">
-                                            <Text type="tertiary" size="small">请先填入 appToken 并点击「获取关注用户」</Text>
-                                          </div>
-                                        )}
+                                        ) : null}
+                                        <div role="status" aria-live="polite" className="mt-2 flex flex-wrap items-center gap-2">
+                                          {wxQuery.status === 'loading' ? (
+                                            <><Spin size="small" /><Text type="tertiary" size="small">正在加载关注用户{wxUsers.length > 0 ? `，已获取 ${wxUsers.length} / ${wxQuery.total ?? 0} 人` : '...'}</Text></>
+                                          ) : wxQuery.status === 'error' ? (
+                                            <>
+                                              <Text type="danger" size="small">{wxQuery.error}</Text>
+                                              <Button size="small" theme="borderless" onClick={handleLoadMoreWxUsers}>重试获取关注用户</Button>
+                                            </>
+                                          ) : wxQuery.status === 'idle' ? (
+                                            <Text type="tertiary" size="small">尚未查询当前应用的关注用户，请填入 appToken 并点击「获取关注用户」</Text>
+                                          ) : wxQuery.total === 0 ? (
+                                            <Text type="tertiary" size="small">该应用暂无关注用户，请先让目标微信用户扫描应用二维码关注</Text>
+                                          ) : wxQuery.nextPage !== null ? (
+                                            <>
+                                              <Text type="tertiary" size="small">已获取 {wxUsers.length} / {wxQuery.total} 位关注用户</Text>
+                                              <Button size="small" theme="borderless" onClick={handleLoadMoreWxUsers}>加载更多关注用户</Button>
+                                            </>
+                                          ) : (
+                                            <Text type="tertiary" size="small">已展示全部 {wxUsers.length} 位关注用户</Text>
+                                          )}
+                                        </div>
                                         <div className="mt-1.5">
                                           <Text type="tertiary" size="small">
                                             点击用户即可勾选/取消，保存后仅向已勾选 UID 推送。若后台显示送达但微信无提醒：在 WxPusher 公众号右上角「… &gt; 设置 &gt; 通知消息管理」打开全部开关，并到微信「服务通知」里查看；同时关闭消息免打扰。

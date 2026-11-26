@@ -218,7 +218,7 @@ class TelegramNotifier(BaseNotifier):
         api_base_url = config.get("tg_api_base_url") or db.get_setting("tg_api_base_url", "")
         test_title = "通知连通性测试"
         test_text = (
-            f"*[XiaoCan Assistant] {test_title}*\n\n"
+            f"*【XiaoCan Assistant】 {test_title}*\n\n"
             "这是一条来自XiaoCan Assistant的连通性测试消息。如果你收到此消息，"
             "说明 Telegram 机器人通道已成功连通并正常工作。"
         )

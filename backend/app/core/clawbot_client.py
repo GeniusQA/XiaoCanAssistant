@@ -605,7 +605,7 @@ async def send_message(
     if not token or not user_id:
         return {"ok": False, "channel": "clawbot", "message": "ClawBot 凭证缺少 token 或 userId"}
 
-    text = f"【小蚕助手】{title}\n\n{content}"
+    text = f"【XiaoCan Assistant】{title}\n\n{content}"
     client_id = f"openclaw-weixin-{uuid.uuid4().hex}"
 
     msg_body: Dict[str, Any] = {

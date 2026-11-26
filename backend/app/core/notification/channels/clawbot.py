@@ -5,11 +5,17 @@
 import logging
 from typing import Dict, Any
 from .base import BaseNotifier
-from ..models import NotificationData
+from ..models import NotificationData, NotificationEvent
 from ... import clawbot_client
 from ....models import database as db
 
 logger = logging.getLogger("xiaocan.notifier.clawbot")
+
+# 会话过期/续期提醒属于关键运维消息，允许使用每日额度的最后一条预留名额。
+RESERVED_QUOTA_EVENTS = {
+    NotificationEvent.CLAW_SESSION_RENEWAL,
+    NotificationEvent.CLAW_SESSION_EXPIRED,
+}
 
 
 class ClawBotNotifier(BaseNotifier):
@@ -20,6 +26,22 @@ class ClawBotNotifier(BaseNotifier):
         """向已绑定的微信 ClawBot 会话推送消息"""
         if not db.get_setting("clawbot_enabled", True):
             return {"ok": False, "channel": self.name, "skipped": True, "message": "微信 ClawBot 通道已关闭"}
+
+        try:
+            daily_limit = int(db.get_setting("clawbot_daily_limit", 10) or 10)
+        except (TypeError, ValueError):
+            daily_limit = 10
+        if (
+            daily_limit > 0
+            and data.event not in RESERVED_QUOTA_EVENTS
+            and clawbot_client.get_daily_send_count() >= max(0, daily_limit - 1)
+        ):
+            return {
+                "ok": False,
+                "channel": self.name,
+                "skipped": True,
+                "message": "今日 ClawBot 推送额度已预留 1 条用于会话过期提醒，普通通知已跳过",
+            }
 
         auth_path = db.get_setting("clawbot_auth_path", "")
         auth_json = db.get_setting("clawbot_auth_json", "")

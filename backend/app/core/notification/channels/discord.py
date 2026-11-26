@@ -39,7 +39,7 @@ class DiscordNotifier(BaseNotifier):
             "username": (username or "XiaoCan Assistant").strip(),
             "embeds": [
                 {
-                    "title": f"[XiaoCan Assistant] {title}",
+                    "title": f"【XiaoCan Assistant】 {title}",
                     "description": content,
                     "color": color_map.get(level, 0x3498DB)
                 }

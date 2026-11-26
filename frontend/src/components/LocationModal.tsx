@@ -479,7 +479,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose, 
     try {
       await bindAccountLocation(targetAccount.key, newLoc);
       addLocationHistory(newLoc);
-      Toast.success(`账号【${targetAccount.nickname}】已绑定定位：${newLoc.cityName} · ${newLoc.addressName}`);
+      Toast.success(`账号【${targetAccount.nick_name}】已绑定定位：${newLoc.cityName} · ${newLoc.addressName}`);
       onClose();
     } catch (err: any) {
       Toast.error(err?.response?.data?.detail || err?.message || '保存账号定位失败，请重试');
@@ -507,7 +507,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose, 
             <Space spacing="tight">
               <IconUser className="text-semi-color-primary" />
               <Typography.Text size="small">当前绑定账号：</Typography.Text>
-              <Typography.Text strong size="small">{targetAccount.nickname}</Typography.Text>
+              <Typography.Text strong size="small">{targetAccount.nick_name}</Typography.Text>
             </Space>
             <Tag size="small" color={targetAccountLoc ? 'green' : 'amber'}>
               {targetAccountLoc ? `已绑: ${targetAccountLoc.cityName}` : '尚未绑定地址'}

@@ -531,6 +531,20 @@ html, body, #root {
   display: none !important;
 }
 
+/* 顶栏右侧：始终横向排列，主题切换位于账号头像左侧 */
+.header-user-actions {
+  display: flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  margin-left: auto !important;
+  flex-shrink: 0 !important;
+  flex-wrap: nowrap !important;
+}
+.header-user-actions .header-divider-before-theme { order: 1; }
+.header-user-actions .header-theme-control { order: 2; display: inline-flex !important; align-items: center !important; }
+.header-user-actions .header-divider-after-theme { order: 3; }
+.header-user-actions .header-account-trigger { order: 4; display: inline-flex !important; align-items: center !important; }
+
 @media (max-width: 767px) {
   html, body, #root {
     height: 100%;
@@ -570,21 +584,45 @@ html, body, #root {
     justify-content: flex-start !important;
   }
 
-  /* 移动端主题切换改由侧边抽屉承载，顶栏仅保留业务信息 */
-  .header-theme-toggle {
-    display: none !important;
+  /* 移动端顶栏保留主题切换，紧凑排列在头像左侧 */
+  .header-theme-control {
+    display: inline-flex !important;
+    align-items: center !important;
+  }
+  .app-header .header-theme-toggle {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 32px !important;
+    height: 32px !important;
+    min-width: 32px !important;
+    padding: 0 !important;
+  }
+  .header-theme-toggle svg {
+    width: 20px !important;
+    height: 20px !important;
+  }
+  .app-header .header-account-trigger {
+    width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+  }
+  .app-header .header-account-trigger .semi-avatar {
+    width: 32px !important;
+    height: 32px !important;
   }
   .side-theme-toggle {
-    display: flex !important;
+    display: none !important;
   }
 
   /* 主题切换与头像固定右对齐 */
   .header-user-actions {
     display: flex !important;
     align-items: center !important;
-    gap: 4px !important;
+    gap: 2px !important;
     margin-left: auto !important;
     flex-shrink: 0 !important;
+    flex-wrap: nowrap !important;
   }
 
   /* 顶部栏所有信息仍展示，只压缩留白与可截断文本宽度 */

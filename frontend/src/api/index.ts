@@ -137,6 +137,14 @@ export const api = {
     client.get<{ ok: boolean; categories: string[]; message?: string }>('/store/categories', {
       params: accountKey ? { account_key: accountKey } : undefined,
     }).then(r => r.data),
+  getStoreDistanceRanges: (accountKey?: string) =>
+    client.get<{
+      ok: boolean;
+      distance_ranges: Array<{ id: number; value: string; label: string; km: number }>;
+      message?: string;
+    }>('/store/distance-ranges', {
+      params: accountKey ? { account_key: accountKey } : undefined,
+    }).then(r => r.data),
   scanDualRebateStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; platform?: string; keyword?: string; max_stores?: number; max_fixed_stores?: number; max_percent_stores?: number; delay_min?: number; delay_max?: number; page_delay?: number }) =>
     client.get<{
       ok: boolean;
@@ -179,7 +187,7 @@ export const api = {
     client.get<{ ok: boolean; timestamp: number; beijing_time: string; server: string; synced: boolean; offset: number }>('/time', { params: { force } }).then(r => r.data),
 
   // 霸王餐订单管理
-  getOrders: (params?: { account_key?: string; status?: string; platform?: string; keyword?: string; limit?: number; offset?: number }) => 
+  getOrders: (params?: { account_key?: string; status?: string; platform?: string; keyword?: string; limit?: number; offset?: number; sync?: boolean }) => 
     client.get<{ ok: boolean; orders: Order[]; total: number }>('/orders', { params }).then(r => r.data),
   getOrderStats: (accountKey?: string) => 
     client.get<{ ok: boolean; stats: OrderStats }>(`/orders/stats`, { params: { account_key: accountKey } }).then(r => r.data),
@@ -208,10 +216,23 @@ export const api = {
       account_key: accountKey,
       statuses: statuses || ['completed', 'cancelled'],
     }).then(r => r.data),
+  restoreOrdersLocal: (accountKey?: string) =>
+    client.post<{ ok: boolean; removed: number; official_total: number; message: string }>('/orders/restore-local', {
+      account_key: accountKey,
+    }).then(r => r.data),
 
 
   // 日志与监控
-  getJobs: (accountKey?: string, limit: number = 50) => client.get<{ ok: boolean; jobs: JobLog[] }>('/jobs', { params: { account_key: accountKey, limit } }).then(r => r.data),
+  getJobs: (accountKey?: string, limit: number = 20, offset: number = 0, status?: string, category?: string) =>
+    client.get<{ ok: boolean; jobs: JobLog[]; total: number; has_more: boolean; next_offset: number }>('/jobs', {
+      params: {
+        account_key: accountKey,
+        limit,
+        offset,
+        status: status && status !== 'all' ? status : undefined,
+        category: category && category !== 'all' ? category : undefined,
+      },
+    }).then(r => r.data),
   clearJobs: (accountKey?: string) => client.delete<{ ok: boolean; message: string }>('/jobs', { params: { account_key: accountKey } }).then(r => r.data),
   
   // 用户中心 (免付费状态)

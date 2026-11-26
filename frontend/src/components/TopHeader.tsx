@@ -116,7 +116,7 @@ export const TopHeader: React.FC = () => {
     if (!currentAccount) return;
     Modal.confirm({
       title: '退出账号确认',
-      content: `确定要退出并移除账号「${cleanEmoji(currentAccount.nickname) || '当前账号'}」吗？退出后本地将清除该账号凭据。`,
+      content: `确定要退出并移除账号「${cleanEmoji(currentAccount.nick_name) || '当前账号'}」吗？退出后本地将清除该账号凭据。`,
       okText: '确定退出',
       cancelText: '取消',
       okButtonProps: { type: 'danger' },
@@ -213,20 +213,22 @@ export const TopHeader: React.FC = () => {
         </Tooltip>
 
         <div className="header-user-actions">
-        <Divider layout="vertical" margin="2px" className="header-theme-divider" />
+        <Divider layout="vertical" margin="2px" className="header-theme-divider header-divider-before-theme" />
 
-        {/* 3. PC端主题模式切换：保持顶栏原位置；移动端由侧边抽屉承载 */}
-        <Tooltip content={isDarkMode ? "切换为亮色主题" : "切换为暗黑主题"} position="bottom">
-          <Button
-            theme="borderless"
-            icon={isDarkMode ? <IconSun size="large" /> : <IconMoon size="large" />}
-            onClick={() => setDarkMode(!isDarkMode)}
-            className="header-theme-toggle text-semi-color-text-2 hover:bg-semi-color-fill-0 transition-colors"
-            aria-label={isDarkMode ? '切换为亮色主题' : '切换为暗黑主题'}
-          />
-        </Tooltip>
+        {/* 3. PC端主题模式切换：固定在账号头像左侧；移动端由侧边抽屉承载 */}
+        <div className="header-theme-control">
+          <Tooltip content={isDarkMode ? "切换为亮色主题" : "切换为暗黑主题"} position="bottom">
+            <Button
+              theme="borderless"
+              icon={isDarkMode ? <IconSun size="large" /> : <IconMoon size="large" />}
+              onClick={() => setDarkMode(!isDarkMode)}
+              className="header-theme-toggle text-semi-color-text-2 hover:bg-semi-color-fill-0 transition-colors"
+              aria-label={isDarkMode ? '切换为亮色主题' : '切换为暗黑主题'}
+            />
+          </Tooltip>
+        </div>
 
-        <Divider layout="vertical" margin="2px" className="header-theme-divider" />
+        <Divider layout="vertical" margin="2px" className="header-theme-divider header-divider-after-theme" />
 
         {/* 4. 最右侧账号头像区域：只显示头像，鼠标移入出现切换账号与退出账号 */}
         <Dropdown
@@ -240,15 +242,15 @@ export const TopHeader: React.FC = () => {
                   <Avatar
                     size="small"
                     src={currentAccount?.avatar}
-                    alt={currentAccount?.nickname}
+                    alt={currentAccount?.nick_name}
                     style={{ backgroundColor: 'var(--semi-color-primary)', flexShrink: 0 }}
                   >
-                    {currentAccount?.nickname ? cleanEmoji(currentAccount.nickname)[0] : <IconUser />}
+                    {currentAccount?.nick_name ? cleanEmoji(currentAccount.nick_name)[0] : <IconUser />}
                   </Avatar>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-semibold text-xs text-semi-color-text-0 truncate max-w-[130px]">
-                        {cleanEmoji(currentAccount?.nickname) || (accounts.length === 0 ? '未配置账号' : '当前主账号')}
+                        {cleanEmoji(currentAccount?.nick_name)}
                       </span>
                       {getVipBadgeText(currentAccount) ? (
                         <Tag
@@ -287,7 +289,7 @@ export const TopHeader: React.FC = () => {
                             onClick={() => {
                               if (!isCurrent) {
                                 setCurrentAccountKey(acc.key);
-                                Toast.success(`已切换账号: ${cleanEmoji(acc.nickname) || acc.phone || '已选账号'}`);
+                                Toast.success(`已切换账号: ${cleanEmoji(acc.nick_name)}`);
                               }
                             }}
                           >
@@ -298,10 +300,10 @@ export const TopHeader: React.FC = () => {
                                   src={acc.avatar}
                                   style={{ backgroundColor: 'var(--semi-color-primary)', flexShrink: 0 }}
                                 >
-                                  {(cleanEmoji(acc.nickname) || acc.phone || '')[0] || <IconUser />}
+                                  {cleanEmoji(acc.nick_name)[0] || <IconUser />}
                                 </Avatar>
                                 <span className="truncate text-xs text-semi-color-text-0 max-w-[110px]">
-                                  {cleanEmoji(acc.nickname) || acc.phone || '未命名'}
+                                  {cleanEmoji(acc.nick_name)}
                                 </span>
                                 {vipLabel ? (
                                   <Tag
@@ -349,14 +351,14 @@ export const TopHeader: React.FC = () => {
             </Dropdown.Menu>
           }
         >
-          <div className="cursor-pointer flex items-center justify-center p-0.5 rounded-full hover:ring-2 hover:ring-semi-color-primary/60 transition-all select-none">
+          <div className="header-account-trigger cursor-pointer flex items-center justify-center p-0.5 rounded-full hover:ring-2 hover:ring-semi-color-primary/60 transition-all select-none">
             <Avatar
               size="small"
               src={currentAccount?.avatar}
-              alt={currentAccount?.nickname}
+              alt={currentAccount?.nick_name}
               style={{ backgroundColor: 'var(--semi-color-primary)' }}
             >
-              {currentAccount?.nickname ? cleanEmoji(currentAccount.nickname)[0] : <IconUser />}
+              {currentAccount?.nick_name ? cleanEmoji(currentAccount.nick_name)[0] : <IconUser />}
             </Avatar>
           </div>
         </Dropdown>

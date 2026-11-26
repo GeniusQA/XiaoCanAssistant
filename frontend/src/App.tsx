@@ -60,6 +60,24 @@ export const App: React.FC = () => {
   const pageContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!mobileNavOpen) return;
+    let armed = false;
+    const armTimer = window.setTimeout(() => { armed = true; }, 0);
+    const handleOutsidePointer = (event: PointerEvent) => {
+      if (!armed) return;
+      const target = event.target as HTMLElement | null;
+      if (!target || target.closest('.mobile-sider-trigger')) return;
+      const drawer = document.querySelector('.mobile-nav-drawer') || document.querySelector('.semi-sidesheet');
+      if (!drawer || !drawer.contains(target)) setMobileNavOpen(false);
+    };
+    document.addEventListener('pointerdown', handleOutsidePointer, true);
+    return () => {
+      window.clearTimeout(armTimer);
+      document.removeEventListener('pointerdown', handleOutsidePointer, true);
+    };
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
     sessionStorage.removeItem('chunk_retry_reloaded');
 
     // 手机本地 origin 一次性接管 PC 快照：必须先于设备凭证校验和账户加载。
@@ -306,6 +324,7 @@ export const App: React.FC = () => {
         className="mobile-nav-drawer"
         footer={null}
         closable={false}
+        mask
         maskClosable
         onCancel={() => setMobileNavOpen(false)}
       >
