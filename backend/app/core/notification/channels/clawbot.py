@@ -15,6 +15,7 @@ logger = logging.getLogger("xiaocan.notifier.clawbot")
 RESERVED_QUOTA_EVENTS = {
     NotificationEvent.CLAW_SESSION_RENEWAL,
     NotificationEvent.CLAW_SESSION_EXPIRED,
+    NotificationEvent.SYSTEM_TEST,
 }
 
 
@@ -45,11 +46,13 @@ class ClawBotNotifier(BaseNotifier):
 
         auth_path = db.get_setting("clawbot_auth_path", "")
         auth_json = db.get_setting("clawbot_auth_json", "")
+        count_quota = data.event != NotificationEvent.SYSTEM_TEST
         return await clawbot_client.send_message(
             title=data.title,
             content=data.content,
             custom_path=auth_path,
-            auth_json_str=auth_json
+            auth_json_str=auth_json,
+            count_quota=count_quota
         )
 
     async def test(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -62,5 +65,6 @@ class ClawBotNotifier(BaseNotifier):
             title=test_title,
             content=test_content,
             custom_path=custom_path,
-            auth_json_str=auth_json
+            auth_json_str=auth_json,
+            count_quota=False
         )

@@ -502,6 +502,8 @@ def init_db():
         c.execute("ALTER TABLE store_appointments ADD COLUMN distance_range TEXT DEFAULT ''")
     if "max_distance_km" not in apt_cols:
         c.execute("ALTER TABLE store_appointments ADD COLUMN max_distance_km REAL DEFAULT 0")
+    if "is_saved" not in apt_cols:
+        c.execute("ALTER TABLE store_appointments ADD COLUMN is_saved INTEGER DEFAULT 0")
 
     # 自动自愈 store_appointments 中缺失 store_icon 的记录 (从 orders 表或同店名同ID回填)
     try:
@@ -1433,6 +1435,7 @@ def get_active_appointments() -> List[Dict[str, Any]]:
         rows = conn.execute("""
         SELECT * FROM store_appointments 
         WHERE status IN ('pending', 'scheduled', 'primed', 'monitoring')
+          AND COALESCE(is_saved, 0) = 0
         ORDER BY id ASC
         """).fetchall()
         return [dict(r) for r in rows]

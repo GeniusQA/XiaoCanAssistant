@@ -328,7 +328,7 @@ export interface StoreAppointment {
   store_icon?: string;
   icon?: string;
   promotion_id: string;
-  status: 'pending' | 'scheduled' | 'primed' | 'monitoring' | 'success' | 'failed' | 'cancelled' | 'expired' | string;
+  status: 'pending' | 'ready' | 'scheduled' | 'primed' | 'monitoring' | 'success' | 'completed' | 'failed' | 'error' | 'cancelled' | 'expired' | string;
   early_ms: number;
   task_type?: 'countdown' | 'monitor' | 'name_monitor' | 'keyword' | string;
   start_time?: string;
@@ -365,6 +365,7 @@ export interface StoreAppointment {
   max_order_money?: number;
   log_id?: number;
   outcome?: string;
+  is_saved?: number;
   created_at: string;
 }
 
@@ -397,6 +398,8 @@ export interface NameMonitorPayload {
   auto_use_best_vip_card?: boolean;
   use_advance_card?: number | boolean;
   store_icon?: string;
+  is_saved_only?: boolean;
+  start_now?: boolean;
 }
 
 export interface JobLog {
@@ -934,10 +937,15 @@ export interface DelayCardInfo {
   promotion_order_id?: number;
   has_completed_reward_delay: boolean;
   available_delay_cards: number;
+  half_hour_cards: number;
+  one_hour_cards: number;
   timeout_time: number;
   expire_time: string;
   allowed_hours_to_6am: number;
+  allowed_half_hours_to_6am: number;
   max_usable_count: number;
+  max_one_hour_count: number;
+  max_half_hour_count: number;
   delay_card_used_count: number;
   next_6am_str: string;
 }

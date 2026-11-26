@@ -414,6 +414,21 @@ def register_shangjin_poi_dict(poi: Dict[str, Any], meituan_pv_id: str = "") -> 
             register_shangjin_event_meta(plan.get("poi_event_id"), wid, pvid, sname)
 
 
+def normalize_meal_ticket_error(code: Optional[int], msg: Any) -> str:
+    """将官方「卡券/饭票不足」类错误统一成业务可识别文案。"""
+    text = str(msg or "")
+    if (
+        code == 61
+        or "卡券不足" in text
+        or "没有足够" in text
+        or "饭票不足" in text
+        or "饭票/卡券不足" in text
+        or ("饭票" in text and "不足" in text)
+    ):
+        return "饭票/卡券不足，无法抢单"
+    return text
+
+
 class XiaoCanRPCError(Exception):
     def __init__(self, code: int, msg: str, raw: Optional[Dict[str, Any]] = None):
         super().__init__(f"XiaoCan RPC Error [{code}]: {msg}")
@@ -2537,6 +2552,60 @@ class XiaoCanClient:
             city_code=city_code
         )
 
+    async def get_exchange(
+        self,
+        exchange_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0
+    ) -> Dict[str, Any]:
+        """获取元宝商城商品信息/面值 (SilkwormCommunity.SilkwormMobileCommunityService.GetExchange)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "exchange_id": int(exchange_id),
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormCommunity",
+            method_name="SilkwormMobileCommunityService.GetExchange",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
+    async def get_exchange_cost(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0,
+        new_level: int = 0,
+        is_plus: bool = False,
+        ingot: int = 0,
+        exchange_cost_type: int = 0
+    ) -> Dict[str, Any]:
+        """查询元宝商城当前实际兑换成本 (SilkwormCommunity.SilkwormMobileCommunityService.ExchangeCost)"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "new_level": int(new_level),
+            "is_plus": bool(is_plus),
+            "exchange_cost_type": int(exchange_cost_type),
+            "ingot": int(ingot),
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormCommunity",
+            method_name="SilkwormMobileCommunityService.ExchangeCost",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            platform="app"
+        )
+
     async def exchange_goods_v2(
         self,
         exchange_id: int,
@@ -2545,7 +2614,7 @@ class XiaoCanClient:
         user_id: Optional[str] = None,
         city_code: int = 0
     ) -> Dict[str, Any]:
-        """元宝商城限量秒杀兑换商品 (SilkwormCommunity.SilkwormMobileCommunityService.ExchangeGoodsV2)"""
+        """元宝商城兑换商品 (SilkwormCommunity.SilkwormMobileCommunityService.ExchangeGoodsV2)"""
         body = {
             "silk_id": int(silk_id) if silk_id else 0,
             "exchange_id": int(exchange_id)
@@ -3193,6 +3262,22 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    async def exchange_meal_ticket(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0
+    ) -> Dict[str, Any]:
+        """元宝兑换饭票 (SilkwormLottery.SilkwormLotteryMobile.Lottery, prize_type=1)"""
+        return await self.do_lottery_spin(
+            token=token,
+            prize_type=1,
+            silk_id=silk_id,
+            user_id=user_id,
+            city_code=city_code,
+        )
+
     async def draw_page_gift(
         self,
         page_gift_type: int,
@@ -3317,11 +3402,13 @@ class XiaoCanClient:
         使用延时券延长活动订单有效期 (遵循官方 APK 逆向)
         微服务: Silkworm.SilkwormService.DelayPromotionQuota
         """
+        # 数量 0 是合法值（半小时券时不消耗 1 小时券），
+        # 不能用 `or 1` / `or 0` 兜底，否则传 0 会被错误替换成 1，导致半小时券按 1 小时核销。
         body: dict = {
             "silk_id": int(silk_id) if silk_id else 0,
             "promotion_order_id": int(promotion_order_id or 0),
-            "hh_delay_card_number": int(hh_delay_card_number or 0),
-            "delay_card_number": int(delay_card_number or 1)
+            "hh_delay_card_number": int(hh_delay_card_number) if hh_delay_card_number is not None else 0,
+            "delay_card_number": int(delay_card_number) if delay_card_number is not None else 1
         }
         return await self.invoke_rpc(
             server_name="Silkworm",

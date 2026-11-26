@@ -1137,7 +1137,7 @@ export const Dashboard: React.FC = () => {
               />
             </div>
             <Text type="tertiary" size="small" className="text-xs block truncate">
-              审核中 <NumberAnimation to={orderStats.pending_orders} precision={0} refreshKey={dashboardRefreshKey} className="text-semi-color-text-1 font-medium" /> 单 · 预计2~24h
+              待上传 <NumberAnimation to={orderStats.pending_orders} precision={0} refreshKey={dashboardRefreshKey} className="text-semi-color-text-1 font-medium" /> 单 · 预计2~24h
             </Text>
           </Card>
         </div>
@@ -1404,7 +1404,7 @@ export const Dashboard: React.FC = () => {
                               type="light"
                               className="shrink-0 text-xs font-medium !py-0.5"
                             >
-                              待送达反馈
+                              审核中
                             </Tag>
                           ) : (
                             <Tag
@@ -1413,7 +1413,7 @@ export const Dashboard: React.FC = () => {
                               type="light"
                               className="shrink-0 text-xs font-medium !py-0.5"
                             >
-                              待APP填单
+                              待上传
                             </Tag>
                           )}
                         </div>

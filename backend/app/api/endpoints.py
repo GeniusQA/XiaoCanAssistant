@@ -49,6 +49,7 @@ from ..protocol.client import (
     get_waf_block_detail,
     get_waf_cooldown_seconds,
     is_waf_blocked,
+    normalize_meal_ticket_error,
     register_shangjin_poi_dict,
 )
 
@@ -1403,6 +1404,81 @@ async def exchange_flash_sale_endpoint(data: Dict[str, Any] = Body(...)):
         except Exception:
             pass
         return {"ok": False, "message": f"兑换网络异常: {str(e)}"}
+
+
+@router.get("/store/meal-ticket-exchange-info")
+async def get_meal_ticket_exchange_info(account_key: str):
+    """获取官方元宝商城饭票商品面值/兑换所需元宝"""
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="请先选择已登录的小蚕账号")
+    city_code = _require_account_location(account, account_key)
+    exchange_id = 141  # 官方元宝商城饭票商品 ID (300 元宝/张)
+    try:
+        res = await client.get_exchange(
+            exchange_id=exchange_id,
+            token=account["token"],
+            silk_id=account.get("silk_id"),
+            user_id=account.get("user_id"),
+            city_code=city_code,
+        )
+        info = res.get("info") or {}
+        return {
+            "ok": True,
+            "exchange_id": exchange_id,
+            "goods_name": info.get("goods_name") or "饭票",
+            "cost_silk": int(info.get("community_silk") or 300),
+            "daily_limit": int(info.get("user_quota_number") or 0),
+            "stock": int(info.get("stock") or 0),
+        }
+    except XiaoCanRPCError as e:
+        return {"ok": False, "message": e.msg, "code": e.code}
+    except Exception as e:
+        return {"ok": False, "message": f"获取饭票兑换信息异常: {e}"}
+
+
+@router.post("/store/exchange-meal-ticket")
+async def exchange_meal_ticket_endpoint(data: Dict[str, Any] = Body(...)):
+    """使用元宝兑换饭票：调用官方元宝商城 ExchangeGoodsV2 接口"""
+    account_key = data.get("account_key")
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="请先选择已登录的小蚕账号")
+    city_code = _require_account_location(account, account_key)
+    exchange_id = int(data.get("exchange_id") or 141)
+    silk_id = account.get("silk_id")
+    token = account["token"]
+    user_id = account.get("user_id")
+    try:
+        info_res = await client.get_exchange(
+            exchange_id=exchange_id, token=token, silk_id=silk_id,
+            user_id=user_id, city_code=city_code,
+        )
+        info = info_res.get("info") or {}
+        goods_name = info.get("goods_name") or "饭票"
+        cost_silk = int(info.get("community_silk") or 300)
+
+        available_silk = int(account.get("yb_point") or 0)
+        if available_silk and available_silk < cost_silk:
+            return {"ok": False, "message": f"元宝不足，兑换饭票需要 {cost_silk} 元宝"}
+
+        res = await client.exchange_goods_v2(
+            exchange_id=exchange_id, token=token, silk_id=silk_id,
+            user_id=user_id, city_code=city_code,
+        )
+        if available_silk:
+            db.update_account_profile(account_key, {"yb_point": max(0, available_silk - cost_silk)})
+        return {
+            "ok": True,
+            "message": f"兑换成功：{goods_name}（消耗 {cost_silk} 元宝）",
+            "goods_name": goods_name,
+            "cost_silk": cost_silk,
+            "raw": res,
+        }
+    except XiaoCanRPCError as e:
+        return {"ok": False, "message": e.msg, "code": e.code}
+    except Exception as e:
+        return {"ok": False, "message": f"元宝兑换异常: {e}"}
 
 
 @router.post("/tasks/run")
@@ -4496,15 +4572,152 @@ async def grab_store_now(data: Dict[str, Any] = Body(...)):
         }
     else:
         err_code = res.get("code")
-        err_msg = res.get("message") or "抢单未成功"
+        err_msg = normalize_meal_ticket_error(err_code, res.get("message") or "抢单未成功")
+        need_meal_ticket = err_msg == "饭票/卡券不足，无法抢单"
         # 仅当官方提示无名额/开仓已被抢光时才推荐开启名额监听；若为卡券不足(61)、未登录、风控等，不应弹出名额抢空模态框
-        can_monitor = err_code in (40003, 40004, 40037, 40038, 40039, 40040) or "名额" in err_msg or "抢完" in err_msg or "已满" in err_msg
+        can_monitor = not need_meal_ticket and (
+            err_code in (40003, 40004, 40037, 40038, 40039, 40040) or "名额" in err_msg or "抢完" in err_msg or "已满" in err_msg
+        )
         return {
             "ok": False,
             "code": err_code,
             "can_monitor": can_monitor,
+            "need_meal_ticket": need_meal_ticket,
             "message": err_msg
         }
+
+
+@router.post("/orders/{order_id}/grab-now")
+async def grab_order_now(order_id: int):
+    """
+    从历史订单直接抢单：按订单店铺名与平台实时检索官方活动，
+    命中可抢名额后直接调用官方抢单接口，无需跳转到活动抢单页。
+    """
+    order = db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="订单记录不存在")
+
+    account_key = order.get("account_key") or ""
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account or not account.get("token"):
+        all_accs = db.get_all_accounts()
+        valid_accs = [a for a in all_accs if a.get("token")]
+        account = valid_accs[0] if valid_accs else None
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="当前账号已退出或凭据失效")
+
+    city_code = _require_account_location(account, account_key)
+    lon = str(account.get("longitude") or "")
+    lat = str(account.get("latitude") or "")
+    token = account["token"]
+    silk_id = account.get("silk_id")
+    user_id = account.get("user_id")
+
+    store_name = str(order.get("store_name") or "").strip()
+    if not store_name:
+        raise HTTPException(status_code=400, detail="该订单缺少店铺名称，无法定位活动")
+    platform = str(order.get("platform") or "all").strip()
+    platform_aliases = {
+        "美团": "meituan", "美团外卖": "meituan", "饿了么": "eleme",
+        "京东": "jingdong", "京东外卖": "jingdong", "jd": "jingdong",
+    }
+    platform = platform_aliases.get(platform, platform)
+    if platform not in ("meituan", "eleme", "jingdong"):
+        platform = "all"
+    order_store_id = str(order.get("store_id") or "").strip()
+
+    search_tasks = [
+        client.search_stores(
+            keyword=store_name, city_code=city_code, longitude=lon, latitude=lat,
+            offset=offset, limit=20, token=token, silk_id=silk_id, user_id=user_id
+        )
+        for offset in (0, 20, 40)
+    ]
+    if platform in ("all", "meituan"):
+        search_tasks.append(
+            client.search_shangjin_stores(
+                keyword=store_name, latitude=float(lat or 0), longitude=float(lon or 0),
+                token=token, silk_id=silk_id, user_id=user_id, city_code=city_code, sort_type=3
+            )
+        )
+
+    results = await asyncio.gather(*search_tasks, return_exceptions=True)
+    candidates: List[Dict[str, Any]] = []
+    for idx, res in enumerate(results):
+        if not isinstance(res, dict):
+            continue
+        if idx < 3:
+            raw_proms = res.get("promotions") or res.get("promotion_list") or res.get("feed_items") or []
+            for p in raw_proms:
+                candidates.extend(_extract_all_promos_from_raw(p, is_search=True, user_lat=float(lat or 0), user_lon=float(lon or 0)))
+        else:
+            for poi in (res.get("poi_list") or []):
+                candidates.extend(_normalize_shangjin_item(poi, user_lat=float(lat or 0), user_lon=float(lon or 0)))
+
+    store_key = _normalize_store_match_name(store_name) if _is_exact_store_name_query(store_name) else ""
+    store_lower = store_name.lower()
+    matched: List[Dict[str, Any]] = []
+    seen = set()
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        c_name = str(c.get("name") or "").strip()
+        if not c_name:
+            continue
+        if store_key:
+            if _normalize_store_match_name(c_name) != store_key:
+                continue
+        elif store_lower not in c_name.lower():
+            continue
+        if platform != "all" and str(c.get("platform") or "") != platform:
+            continue
+        c_store_id = str(c.get("store_id") or "").strip()
+        if order_store_id and c_store_id and c_store_id != order_store_id:
+            continue
+        if int(c.get("left_number") or 0) <= 0:
+            continue
+        dedup_key = (
+            str(c.get("platform") or ""),
+            c_store_id,
+            str(c.get("promotion_id") or "")
+        )
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        matched.append(c)
+
+    if not matched:
+        return {
+            "ok": False,
+            "can_monitor": True,
+            "message": "未找到该店铺当前可抢的官方活动名额，可开启名额监听等待补仓"
+        }
+
+    matched.sort(
+        key=lambda x: (float(x.get("rebate_price") or 0.0), float(x.get("rebate_rate") or 0.0)),
+        reverse=True
+    )
+    best = matched[0]
+    payload = {
+        "account_key": account_key,
+        "store_id": str(best.get("store_id") or order.get("store_id") or ""),
+        "store_name": str(best.get("name") or store_name),
+        "store_icon": str(best.get("icon") or order.get("store_icon") or ""),
+        "promotion_id": str(best.get("promotion_id") or ""),
+        "platform": str(best.get("platform") or platform),
+        "store_platform": int(best.get("store_platform") or (1 if str(best.get("platform") or platform) == "meituan" else 2)),
+        "order_money": float(best.get("order_money") or order.get("order_money") or 0.0),
+        "rebate_price": float(best.get("rebate_price") or order.get("rebate_money") or 0.0),
+        "rebate_desc": str(best.get("rebate_desc") or ""),
+        "rebate_type": str(best.get("rebate_type") or ""),
+        "wm_poi_id": str(best.get("wm_poi_id") or ""),
+        "redpack_mode": 0,
+        "auto_use_best_vip_card": True,
+        "advance": False,
+    }
+    if not payload["promotion_id"]:
+        return {"ok": False, "can_monitor": True, "message": "官方活动缺少 promotion_id，无法直接抢单"}
+    return await grab_store_now(payload)
 
 
 @router.post("/store/cancel-promotion-order")
@@ -4846,10 +5059,12 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         max_distance_km = float(data.get("max_distance_km"))
         distance_range = f"附近{max_distance_km:g}km"
 
+    is_saved_only = bool(data.get("is_saved_only"))
     now = time_service.now_dt()
     start_at = str(data.get("start_time") or now.strftime("%H:%M")).strip()
+    # 仅保存的任务不校验开始时间，允许先留存配置稍后再启动
     schedule_dt = None
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?", start_at):
+    if not is_saved_only and re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?", start_at):
         try:
             schedule_dt = datetime.strptime(start_at, "%Y-%m-%d %H:%M:%S") if len(start_at) == 19 else datetime.strptime(start_at, "%Y-%m-%d %H:%M")
             schedule_dt = schedule_dt.replace(tzinfo=TZ_BJ)
@@ -4958,6 +5173,9 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "rebate_card_name": str(data.get("rebate_card_name") or ""),
         "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
         "rebate_desc": f"{listen_desc} ({plat_desc})",
+        "is_saved": 1 if is_saved_only else 0,
+        "status": "pending" if is_saved_only else "monitoring",
+        "outcome": "配置已保存，尚未启动" if is_saved_only else "",
         "log_id": log_id
     }
     aid = db.add_appointment(apt_data)
@@ -5076,6 +5294,61 @@ async def stop_appointment(aid: int):
     from ..core.appointment_worker import invalidate_worker_cache
     invalidate_worker_cache()
     return {"ok": True, "message": "已主动停止该名额监听任务"}
+
+
+@router.put("/store/appointments/{aid}")
+async def update_appointment_endpoint(aid: int, data: Dict[str, Any] = Body(...)):
+    """保存已存在的抢单监听配置，但不启动任务"""
+    apt = db.get_appointment_by_id(aid)
+    if not apt:
+        raise HTTPException(status_code=404, detail="未找到对应的监听任务")
+    allowed_keys = {
+        "account_key", "store_id", "store_name", "store_icon", "promotion_id", "task_type",
+        "keyword", "listen_mode", "activity_requirement", "match_mode", "platform",
+        "rebate_mode_filter", "min_rebate_price", "min_rebate_gap", "min_rebate_rate",
+        "high_rebate_only", "store_category", "distance_range", "max_distance_km",
+        "max_order_money", "auto_stop_on_success", "start_time", "until_time",
+        "check_interval", "redpack_mode", "redpack_id", "redpack_name",
+        "rebate_card_id", "rebate_card_name", "auto_use_best_vip_card", "use_advance_card",
+    }
+    fields = {k: v for k, v in data.items() if k in allowed_keys}
+    fields.update({
+        "is_saved": 1,
+        "status": "pending",
+        "outcome": "配置已保存，尚未启动",
+        "last_checked_at": "",
+        "notified_31m": 0,
+        "notified_1m": 0,
+    })
+    db.update_appointment(aid, fields)
+    from ..core.appointment_worker import invalidate_worker_cache
+    invalidate_worker_cache()
+    return {"ok": True, "appointment_id": aid, "message": "抢单监听配置已保存"}
+
+
+@router.post("/store/appointments/{aid}/start")
+async def start_appointment(aid: int):
+    """启动已保存的抢单监听任务"""
+    apt = db.get_appointment_by_id(aid)
+    if not apt:
+        raise HTTPException(status_code=404, detail="未找到对应的监听任务")
+    account_key = apt.get("account_key") or ""
+    account = db.get_account_by_key(account_key) if account_key else None
+    if not account or not account.get("token"):
+        raise HTTPException(status_code=400, detail="该任务绑定的账号凭据已失效，无法启动")
+    _require_account_location(account, account_key)
+
+    db.update_appointment(aid, {
+        "is_saved": 0,
+        "status": "monitoring",
+        "outcome": "",
+        "last_checked_at": "",
+        "notified_31m": 0,
+        "notified_1m": 0,
+    })
+    from ..core.appointment_worker import invalidate_worker_cache
+    invalidate_worker_cache()
+    return {"ok": True, "message": "抢单监听任务已启动"}
 
 
 @router.delete("/store/appointments/{aid}")
@@ -5742,8 +6015,8 @@ async def cancel_order(order_id: int):
         raise HTTPException(status_code=400, detail="已绑定外卖单号的订单无法取消报名")
 
     st = (target_order.get("status") or "").lower()
-    if st != "pending":
-        raise HTTPException(status_code=400, detail="仅待上传状态且未下单的订单支持取消报名")
+    if st not in ("pending", "auditing"):
+        raise HTTPException(status_code=400, detail="仅待上传或审核中且未下单的订单支持取消报名")
 
     account_key = target_order.get("account_key")
     acc = db.get_account_by_key(account_key) if account_key else None
@@ -5887,6 +6160,28 @@ async def delay_order_voucher(order_id: int):
 
 
 
+def _count_delay_cards(card_items: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+    """统计卡包中的延时券：返回 (半小时券, 1小时券, 合计)。"""
+    half_hour_count = 0
+    one_hour_count = 0
+    for c in card_items or []:
+        if not isinstance(c, dict):
+            continue
+        card_obj = c.get("card") if isinstance(c.get("card"), dict) else {}
+        ctype = int(c.get("card_type") or c.get("type") or card_obj.get("card_type") or card_obj.get("type") or 0)
+        cname = str(c.get("card_name") or c.get("name") or card_obj.get("name") or card_obj.get("title") or "")
+        cdesc = str(c.get("desc") or card_obj.get("desc") or "")
+        amount = int(c.get("count") or c.get("number") or 1)
+        if ctype == 4 or "半小时" in cdesc or "0.5小时" in cdesc:
+            half_hour_count += amount
+        elif ctype == 2 or "1小时" in cdesc or "一小时" in cdesc:
+            one_hour_count += amount
+        elif "延时" in cname or "延时" in cdesc:
+            # 未知延时券按官方默认 1 小时处理，避免数量丢失
+            one_hour_count += amount
+    return half_hour_count, one_hour_count, half_hour_count + one_hour_count
+
+
 @router.get("/orders/{order_id}/delay-card-info")
 async def get_order_delay_card_info(order_id: int):
     """
@@ -5910,7 +6205,9 @@ async def get_order_delay_card_info(order_id: int):
         else:
             raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
 
-    # 获取用户卡包中可用的延时券数量 (status: 0 未使用)
+    # 获取用户卡包中可用的延时券数量 (status: 0 未使用)，按官方 card_type 区分时长
+    half_hour_cards = 0
+    one_hour_cards = 0
     available_cards = 0
     try:
         cards_res = await client.get_user_card_list(
@@ -5922,14 +6219,11 @@ async def get_order_delay_card_info(order_id: int):
             number=100
         )
         card_items = cards_res.get("list") or cards_res.get("cards") or []
-        for c in card_items:
-            card_obj = c.get("card") if isinstance(c.get("card"), dict) else {}
-            ctype = int(c.get("card_type") or c.get("type") or card_obj.get("card_type") or card_obj.get("type") or 0)
-            cname = str(c.get("card_name") or c.get("name") or card_obj.get("name") or card_obj.get("title") or "")
-            cdesc = str(c.get("desc") or card_obj.get("desc") or "")
-            if ctype == 2 or "延时" in cname or "延时" in cdesc:
-                available_cards += int(c.get("count") or c.get("number") or 1)
-        logger.info(f"订单 #{order_id} 延时券检测: 查得卡券共 {len(card_items)} 张，识别可用延时券 {available_cards} 张")
+        half_hour_cards, one_hour_cards, available_cards = _count_delay_cards(card_items)
+        logger.info(
+            f"订单 #{order_id} 延时券检测: 查得卡券共 {len(card_items)} 张，"
+            f"半小时券 {half_hour_cards} 张，1小时券 {one_hour_cards} 张"
+        )
     except Exception as e:
         logger.warning(f"获取卡包延时券数量失败: {e}")
     timeout_time = int(target_order.get("timeout_time") or 0)
@@ -5946,8 +6240,11 @@ async def get_order_delay_card_info(order_id: int):
         limit_dt = (dt_base + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
     limit_ts = int(limit_dt.timestamp())
     remaining_sec = max(0, limit_ts - timeout_time)
-    allowed_hours = remaining_sec // 3600
+    allowed_half_hours = remaining_sec // 1800
+    allowed_hours = allowed_half_hours // 2
     max_usable = min(available_cards, allowed_hours)
+    max_one_hour_count = min(one_hour_cards, allowed_hours)
+    max_half_hour_count = min(half_hour_cards, allowed_half_hours)
     next_6am_str = limit_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     promo_order_id = target_order.get("promotion_order_id") or 0
@@ -5957,10 +6254,15 @@ async def get_order_delay_card_info(order_id: int):
         "promotion_order_id": promo_order_id,
         "has_completed_reward_delay": int(target_order.get("delay_count") or 0) > 0,
         "available_delay_cards": available_cards,
+        "half_hour_cards": half_hour_cards,
+        "one_hour_cards": one_hour_cards,
         "timeout_time": timeout_time,
         "expire_time": target_order.get("expire_time") or "",
         "allowed_hours_to_6am": allowed_hours,
+        "allowed_half_hours_to_6am": allowed_half_hours,
         "max_usable_count": max(0, max_usable),
+        "max_one_hour_count": max(0, max_one_hour_count),
+        "max_half_hour_count": max(0, max_half_hour_count),
         "delay_card_used_count": int(target_order.get("delay_card_used_count") or 0),
         "next_6am_str": next_6am_str
     }
@@ -5969,7 +6271,8 @@ async def get_order_delay_card_info(order_id: int):
 @router.post("/orders/{order_id}/use-delay-card")
 async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(default={})):
     """
-    使用延时券延长活动订单有效期 (每张延长 1 小时，最晚延至次日 06:00)
+    使用延时券延长活动订单有效期。
+    card_type=2 为 1 小时券 (delay_card_number)，card_type=4 为半小时券 (hh_delay_card_number)。
     微服务: Silkworm.SilkwormService.DelayPromotionQuota
     """
     target_order = db.get_order_by_id(order_id)
@@ -5982,6 +6285,14 @@ async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(defaul
     count = int(data.get("count") or 1)
     if count < 1:
         raise HTTPException(status_code=400, detail="延时券使用数量必须大于等于 1")
+    card_type = int(data.get("card_type") or 2)
+    if card_type not in (2, 4):
+        raise HTTPException(status_code=400, detail="不支持的延时券类型")
+    is_half_hour = card_type == 4
+    delay_card_number = 0 if is_half_hour else count
+    hh_delay_card_number = count if is_half_hour else 0
+    extended_hours = count * 0.5 if is_half_hour else float(count)
+    card_label = "半小时延时券" if is_half_hour else "1小时延时券"
 
     account_key = target_order.get("account_key")
     acc = db.get_account_by_key(account_key) if account_key else None
@@ -5992,6 +6303,41 @@ async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(defaul
             acc = valid_accs[0]
         else:
             raise HTTPException(status_code=400, detail="对应小蚕账号凭据已失效或未登录")
+
+    loc_city_code = _require_account_location(acc, account_key or "")
+    try:
+        cards_res = await client.get_user_card_list(
+            token=acc["token"],
+            silk_id=acc.get("silk_id"),
+            user_id=acc.get("user_id"),
+            city_code=loc_city_code,
+            status=0,
+            number=100
+        )
+        half_hour_cards, one_hour_cards, _ = _count_delay_cards(cards_res.get("list") or cards_res.get("cards") or [])
+        owned = half_hour_cards if is_half_hour else one_hour_cards
+        if count > owned:
+            raise HTTPException(status_code=400, detail=f"卡包内{card_label}仅剩 {owned} 张，无法使用 {count} 张")
+
+        timeout_time = int(target_order.get("timeout_time") or 0)
+        if timeout_time <= 0 and target_order.get("order_time"):
+            timeout_time = int(target_order["order_time"]) + 7200
+        now_ts = time_service.now_int()
+        base_ts = max(timeout_time, now_ts)
+        dt_base = datetime.fromtimestamp(base_ts)
+        if dt_base.hour < 6:
+            limit_dt = dt_base.replace(hour=6, minute=0, second=0, microsecond=0)
+        else:
+            limit_dt = (dt_base + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+        allowed_half_hours = max(0, int(limit_dt.timestamp()) - timeout_time) // 1800
+        if is_half_hour and count > allowed_half_hours:
+            raise HTTPException(status_code=400, detail="使用数量超过次日 06:00 前可延长的时长")
+        if not is_half_hour and count * 2 > allowed_half_hours:
+            raise HTTPException(status_code=400, detail="使用数量超过次日 06:00 前可延长的时长")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"使用延时券前置校验失败: {e}")
 
     promo_order_id = target_order.get("promotion_order_id") or 0
     if not promo_order_id:
@@ -6008,23 +6354,23 @@ async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(defaul
     job_id = f"delay_card_{order_id}_{time_service.now_int()}"
     now_str = time_service.format_now_ms()
     steps = [
-        f"[{now_str}] 启动使用延时券: 店铺【{store_name}】(官方订单 #{promo_order_id}, 申请使用 {count} 张延时券)",
+        f"[{now_str}] 启动使用延时券: 店铺【{store_name}】(官方订单 #{promo_order_id}, 申请使用 {count} 张{card_label})",
         f"[{now_str}] 账号核验: 账号【{acc_name}】",
-        f"[{now_str}] 发起官方延时 RPC: Silkworm.SilkwormService.DelayPromotionQuota (delay_card_number={count})"
+        f"[{now_str}] 发起官方延时 RPC: Silkworm.SilkwormService.DelayPromotionQuota (delay_card_number={delay_card_number}, hh_delay_card_number={hh_delay_card_number})"
     ]
 
-    loc_city_code = _require_account_location(acc, account_key or "")
     try:
         res = await client.delay_promotion_quota(
             token=acc["token"],
             silk_id=acc.get("silk_id"),
             user_id=acc.get("user_id"),
             promotion_order_id=promo_order_id,
-            delay_card_number=count,
+            delay_card_number=delay_card_number,
+            hh_delay_card_number=hh_delay_card_number,
             city_code=loc_city_code
         )
         curr_tt = int(target_order.get("timeout_time") or 0)
-        new_tt = curr_tt + count * 3600
+        new_tt = curr_tt + int(extended_hours * 3600)
         new_exp = time_service.format_ts(new_tt, "%Y-%m-%d %H:%M:%S") if new_tt > 0 else ""
         used_count = int(target_order.get("delay_card_used_count") or 0) + count
         db.update_order(order_id, {
@@ -6034,7 +6380,7 @@ async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(defaul
         })
 
         t_end = time_service.format_now_ms()
-        steps.append(f"[{t_end}] 官方延时成功: 凭证有效期已延长 {count} 小时，最新截止时间: {new_exp}")
+        steps.append(f"[{t_end}] 官方延时成功: 凭证有效期已延长 {extended_hours:g} 小时，最新截止时间: {new_exp}")
         steps.append(f"[{t_end}] 流程完成 - 订单状态与卡包延时券记录已更新")
         try:
             db.add_job_log(job_id, account_key, "delay_card", "success", "\n".join(steps))
@@ -6043,10 +6389,11 @@ async def use_order_delay_card(order_id: int, data: Dict[str, Any] = Body(defaul
 
         return {
             "ok": True,
-            "message": f"成功使用 {count} 张延时券，订单提交有效期已顺延 {count} 小时",
+            "message": f"成功使用 {count} 张{card_label}，订单提交有效期已顺延 {extended_hours:g} 小时",
             "timeout_time": new_tt,
             "expire_time": new_exp,
             "delay_card_used_count": used_count,
+            "extended_hours": extended_hours,
             "raw": res
         }
     except XiaoCanRPCError as e:

@@ -167,12 +167,18 @@ export const api = {
     }>('/store/dual-rebate-scan', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, timeout: 120000 }).then(r => r.data),
   grabStoreNow: (data: { account_key: string; store_id?: string; store_name?: string; store_icon?: string; promotion_id: string; platform?: string; order_money?: number; rebate_price?: number; rebate_desc?: string; rebate_type?: string; advance?: boolean; redpack_id?: string; redpack_name?: string; redpack_mode?: number; auto_use_best_vip_card?: boolean; vip_promotion_card_id?: number; vip_extra_silk_card_id?: number }) =>
     client.post<{ ok: boolean; order_id?: number; can_monitor?: boolean; message: string }>('/store/grab-now', data).then(r => r.data),
+  grabOrderNow: (orderId: number) =>
+    client.post<{ ok: boolean; order_id?: number; can_monitor?: boolean; message: string }>(`/orders/${orderId}/grab-now`).then(r => r.data),
   createAppointment: (data: Partial<StoreAppointment>) => client.post<{ ok: boolean; appointment_id: number; message: string }>('/store/appoint', data).then(r => r.data),
   createNameMonitor: (data: NameMonitorPayload) =>
     client.post<{ ok: boolean; appointment_id: number; message: string }>('/store/name-monitor', data).then(r => r.data),
+  updateNameMonitor: (id: number, data: Partial<NameMonitorPayload>) =>
+    client.put<{ ok: boolean; appointment_id: number; message: string }>(`/store/appointments/${id}`, data).then(r => r.data),
   getAppointments: (accountKey?: string) => client.get<{ ok: boolean; appointments: StoreAppointment[]; total: number }>('/store/appointments', { params: { account_key: accountKey } }).then(r => r.data),
   stopAppointment: (id: number) => client.post<{ ok: boolean; message: string }>(`/store/appointments/${id}/stop`).then(r => r.data),
   cancelAppointment: (id: number) => client.delete<{ ok: boolean; message: string }>(`/store/appointments/${id}`).then(r => r.data),
+  startAppointment: (id: number) => client.post<{ ok: boolean; message: string }>(`/store/appointments/${id}/start`).then(r => r.data),
+  exchangeMealTicket: (accountKey: string) => client.post<{ ok: boolean; message: string }>('/store/exchange-meal-ticket', { account_key: accountKey }).then(r => r.data),
 
   // 设备定位与逆地理编码
   searchLocation: (keyword: string, city?: string) =>
@@ -206,7 +212,7 @@ export const api = {
   delayOrderVoucher: (id: number) =>
     client.post<{ ok: boolean; is_delayed: boolean; delay_time: number; message: string }>(`/orders/${id}/delay-voucher`).then(r => r.data),
   getDelayCardInfo: (id: number) => client.get<DelayCardInfo>(`/orders/${id}/delay-card-info`).then(r => r.data),
-  useDelayCard: (id: number, count: number) => client.post<{ ok: boolean; message: string; timeout_time: number; expire_time: string; delay_card_used_count: number }>(`/orders/${id}/use-delay-card`, { count }).then(r => r.data),
+  useDelayCard: (id: number, count: number, cardType: number = 2) => client.post<{ ok: boolean; message: string; timeout_time: number; expire_time: string; delay_card_used_count: number; extended_hours?: number }>(`/orders/${id}/use-delay-card`, { count, card_type: cardType }).then(r => r.data),
   cancelOrder: (id: number) =>
     client.post<{ ok: boolean; message: string; raw?: any }>(`/orders/${id}/cancel`).then(r => r.data),
   deleteOrder: (id: number) => 
@@ -215,10 +221,6 @@ export const api = {
     client.post<{ ok: boolean; deleted: number; message: string }>('/orders/bulk-delete-local', {
       account_key: accountKey,
       statuses: statuses || ['completed', 'cancelled'],
-    }).then(r => r.data),
-  restoreOrdersLocal: (accountKey?: string) =>
-    client.post<{ ok: boolean; removed: number; official_total: number; message: string }>('/orders/restore-local', {
-      account_key: accountKey,
     }).then(r => r.data),
 
 

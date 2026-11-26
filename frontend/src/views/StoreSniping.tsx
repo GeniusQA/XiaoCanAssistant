@@ -52,7 +52,7 @@ import { getNtpNowMs } from '../utils/ntpTime';
 import { useOnActivated } from '../utils/useOnActivated';
 import { useMobileLayout, useListPagination } from '../utils/useListPagination';
 import { ListFooter } from '../components/ListFooter';
-import type { StoreItem, StorePromotion, StoreAppointment, AccountDetailData } from '../types';
+import type { StoreItem, StorePromotion, StoreAppointment, AccountDetailData, NameMonitorPayload } from '../types';
 
 
 gsap.registerPlugin(useGSAP);
@@ -80,7 +80,13 @@ interface RebateCouponOption {
   name: string;
   desc: string;
   source: 'order' | 'owned';
+  ratio: number;
 }
+
+const getRebateRatio = (text: string): number => {
+  const matched = String(text || '').match(/(\d+(?:\.\d+)?)\s*%/);
+  return matched ? Number(matched[1]) : 0;
+};
 
 const getRebateCouponOptions = (detail: AccountDetailData | null): RebateCouponOption[] => {
   const options: RebateCouponOption[] = [];
@@ -94,7 +100,8 @@ const getRebateCouponOptions = (detail: AccountDetailData | null): RebateCouponO
       id: cId,
       name: cleanEmoji(name || '会员返利券'),
       desc: cleanEmoji(info || '当前活动可用返利券'),
-      source: 'order'
+      source: 'order',
+      ratio: getRebateRatio(`${name}${info}`)
     });
   }
   for (const item of detail?.cards || []) {
@@ -102,18 +109,31 @@ const getRebateCouponOptions = (detail: AccountDetailData | null): RebateCouponO
     const cardItem = item as any;
     const cId = String(cardItem.id || cardItem.user_card_id || '');
     if (options.some(o => o.id === cId)) continue;
+    const couponName = String(cardItem.card?.name || cardItem.name || '返利券');
+    const couponDesc = String(cardItem.card?.desc || cardItem.desc || '');
     options.push({
       id: cId,
-      name: cleanEmoji(cardItem.card?.name || cardItem.name || '返利券'),
-      desc: cleanEmoji(cardItem.card?.desc || cardItem.desc || ''),
-      source: 'owned'
+      name: cleanEmoji(couponName),
+      desc: cleanEmoji(couponDesc),
+      source: 'owned',
+      ratio: getRebateRatio(`${couponName}${couponDesc}`)
     });
   }
-  return options;
+  return options.sort((a, b) => b.ratio - a.ratio);
 };
 
 const getSelectableRedpacks = (detail: AccountDetailData | null) =>
   (detail?.order_redpacks?.length ? detail.order_redpacks : (detail?.redpacks || []));
+
+const getRedpackAmountFen = (rp: any): number => {
+  if (rp?.value_num !== undefined) return Number(rp.value_num) || 0;
+  if (rp?.reward_num !== undefined) return Number(rp.reward_num) || 0;
+  if (rp?.money !== undefined) return (Number(rp.money) || 0) * 100;
+  return 0;
+};
+
+const getSortedRedpacks = (detail: AccountDetailData | null) =>
+  [...getSelectableRedpacks(detail)].sort((a, b) => getRedpackAmountFen(b) - getRedpackAmountFen(a));
 
 interface StoreNameCellProps {
   name?: string;
@@ -659,6 +679,8 @@ export const StoreSniping: React.FC = () => {
   // 抢单监听弹窗状态
   const [nameMonitorVisible, setNameMonitorVisible] = useState(false);
   const [nameMonitorSubmitting, setNameMonitorSubmitting] = useState(false);
+  const [nameMonitorSaveMode, setNameMonitorSaveMode] = useState(false);
+  const [startingMonitorId, setStartingMonitorId] = useState<number | null>(null);
   const [nameMonitorInitialKeyword, setNameMonitorInitialKeyword] = useState('');
   const [nameMonitorInitialIcon, setNameMonitorInitialIcon] = useState('');
   const [editingMonitorId, setEditingMonitorId] = useState<number | null>(null);
@@ -780,6 +802,8 @@ export const StoreSniping: React.FC = () => {
   const [appointModalMode, setAppointModalMode] = useState<'countdown' | 'monitor'>('countdown');
   const [selectedPromo, setSelectedPromo] = useState<StorePromotion | StoreItem | null>(null);
   const [grabbingId, setGrabbingId] = useState<string | null>(null);
+  const [mealTicketModalVisible, setMealTicketModalVisible] = useState(false);
+  const [mealTicketExchanging, setMealTicketExchanging] = useState(false);
 
   // 同店双返利/多活动即时过滤 (使用 useDeferredValue 避免输入卡顿)
   const deferredDualKeyword = React.useDeferredValue(dualSearchKeyword);
@@ -1598,21 +1622,25 @@ export const StoreSniping: React.FC = () => {
         fetchStores(undefined, true);
         fetchAppointments(true);
         fetchAccountAssets(currentAccountKey, true);
+      } else if (
+        (res as any).need_meal_ticket
+        || (res.message || '').includes('饭票/卡券不足')
+        || (res.message || '').includes('饭票不足')
+      ) {
+        setMealTicketModalVisible(true);
+      } else if (res.can_monitor) {
+        Modal.confirm({
+          title: '当前名额已抢空',
+          content: '首轮名额已抢完，是否立即为此店铺开启「名额监听」？有退单或补仓时将自动尝试抢单。',
+          okText: '开启名额监听',
+          cancelText: '取消',
+          centered: true,
+          onOk: () => {
+            handleOpenAppoint(store, targetPromo, 'monitor');
+          }
+        });
       } else {
-        if (res.can_monitor) {
-          Modal.confirm({
-            title: '当前名额已抢空',
-            content: '首轮名额已抢完，是否立即为此店铺开启「名额监听」？有退单或补仓时将自动尝试抢单。',
-            okText: '开启名额监听',
-            cancelText: '取消',
-            centered: true,
-            onOk: () => {
-              handleOpenAppoint(store, targetPromo, 'monitor');
-            }
-          });
-        } else {
-          Toast.warning(res.message || '抢单未成功');
-        }
+        Toast.warning(res.message || '抢单未成功');
       }
     } catch (e: any) {
       Toast.error('抢单请求失败: ' + (e?.message || '网络异常'));
@@ -1697,6 +1725,7 @@ export const StoreSniping: React.FC = () => {
     }
     setEditingMonitorId(null);
     setNameMonitorInitialValues(null);
+    setNameMonitorSaveMode(false);
     setNameMonitorInitialKeyword(kw || searchKeyword || '');
     setNameMonitorInitialIcon(icon || '');
     void api.getStoreCategories(currentAccountKey).then((res) => {
@@ -1822,6 +1851,7 @@ export const StoreSniping: React.FC = () => {
       .map((item) => item.trim())
       .filter(Boolean);
     setEditingMonitorId(row.id);
+    setNameMonitorSaveMode(true);
     setNameMonitorInitialValues({
       listen_mode: row.listen_mode || 'store',
       activity_requirement: row.activity_requirement || 'all',
@@ -1857,19 +1887,9 @@ export const StoreSniping: React.FC = () => {
     setNameMonitorVisible(true);
   }, [currentAccountKey]);
 
-  const handleSubmitNameMonitor = async (values: any) => {
-    if (!currentAccountKey) return;
-    if (!activeLocation) {
-      Toast.warning('当前账号未绑定抢单地址，请先绑定地址后再创建监听');
-      openLocationModal(currentAccountKey);
-      return;
-    }
+  const buildNameMonitorPayload = (values: any) => {
     const listenMode = values.listen_mode === 'general' ? 'general' : 'store';
     const kw = listenMode === 'store' ? (values.keyword || '').trim() : '';
-    if (listenMode === 'store' && !kw) {
-      Toast.warning('抢单监听需要输入商户名称或搜索关键词');
-      return;
-    }
     const modeLabel = listenMode === 'general' ? '常规监听' : `抢单监听「${kw}」`;
     const rebateFilter = values.rebate_mode_filter || 'all';
     const minPrice = rebateFilter === 'percent' ? 0 : Number(values.min_rebate_price || 0);
@@ -1886,7 +1906,96 @@ export const StoreSniping: React.FC = () => {
       ? Number(matchedDistance?.km || distanceKmMatch?.[1] || 0)
       : 0;
     const scheduledStart = normalizeScheduleTime(values.start_time);
-    if (scheduledStart) {
+    const timeoutSec = values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200;
+    const keepOriginalUntil = Boolean(
+      editingMonitorId &&
+      nameMonitorInitialValues?.until_time &&
+      Number(nameMonitorInitialValues.timeout_sec) === timeoutSec &&
+      scheduledStart === normalizeScheduleTime(nameMonitorInitialValues?.start_time)
+    );
+    let untilTime: string | undefined = keepOriginalUntil
+      ? String(nameMonitorInitialValues?.until_time)
+      : undefined;
+    if (!untilTime && scheduledStart) {
+      const startMs = new Date(scheduledStart.replace(' ', 'T')).getTime();
+      if (timeoutSec === 0) {
+        const dayEnd = new Date(startMs);
+        dayEnd.setHours(23, 59, 0, 0);
+        untilTime = formatScheduleTime(dayEnd);
+      } else {
+        untilTime = formatScheduleTime(new Date(startMs + timeoutSec * 1000));
+      }
+    }
+    const rpMode = values.redpack_mode ?? 0;
+    let chosenRpId = '';
+    let chosenRpName = '';
+    let chosenCardId = '';
+    let chosenCardName = '';
+    if (rpMode === 1) {
+      if (values.redpack_id) {
+        chosenRpId = String(values.redpack_id);
+        const found = getSelectableRedpacks(assetDetail).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
+        if (found) chosenRpName = found.name || (found as any).title || '';
+      }
+      if (values.rebate_card_id) {
+        chosenCardId = String(values.rebate_card_id);
+        const foundOption = getRebateCouponOptions(assetDetail).find(o => o.id === chosenCardId);
+        if (foundOption) chosenCardName = foundOption.name;
+      }
+      if (!chosenRpId && !chosenCardId) throw new Error('请选择指定红包或返利券');
+    }
+    const payload: NameMonitorPayload = {
+      account_key: currentAccountKey,
+      keyword: kw,
+      store_icon: values.store_icon || '',
+      listen_mode: listenMode,
+      activity_requirement: activityRequirement,
+      match_mode: values.match_mode || 'contains',
+      platform: monitorPlatform,
+      rebate_mode_filter: rebateFilter,
+      min_rebate_price: minPrice,
+      min_rebate_gap: minGap,
+      min_rebate_rate: minRate,
+      high_rebate_only: Boolean(values.high_rebate_only),
+      store_category: Array.isArray(values.store_category)
+        ? values.store_category.map((item: any) => String(item).trim()).filter(Boolean).join(',')
+        : String(values.store_category || '').trim(),
+      distance_range: distanceRange,
+      max_distance_km: maxDistanceKm,
+      max_order_money: 0,
+      auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
+      timeout_sec: timeoutSec,
+      start_time: scheduledStart || undefined,
+      until_time: untilTime,
+      check_interval: Number(values.check_interval ?? 10),
+      redpack_mode: rpMode,
+      redpack_id: chosenRpId,
+      redpack_name: chosenRpName,
+      rebate_card_id: chosenCardId,
+      rebate_card_name: chosenCardName,
+      auto_use_best_vip_card: rpMode !== 2,
+      use_advance_card: values.use_advance_card ? 1 : 0,
+      is_saved_only: nameMonitorSaveMode,
+      start_now: !nameMonitorSaveMode,
+    };
+    return { payload, modeLabel };
+  };
+
+  const handleSubmitNameMonitor = async (values: any) => {
+    if (!currentAccountKey) return;
+    if (!activeLocation) {
+      Toast.warning('当前账号未绑定抢单地址，请先绑定地址后再创建监听');
+      openLocationModal(currentAccountKey);
+      return;
+    }
+    const listenMode = values.listen_mode === 'general' ? 'general' : 'store';
+    const kw = listenMode === 'store' ? (values.keyword || '').trim() : '';
+    if (listenMode === 'store' && !kw) {
+      Toast.warning('抢单监听需要输入商户名称或搜索关键词');
+      return;
+    }
+    const scheduledStart = normalizeScheduleTime(values.start_time);
+    if (scheduledStart && !nameMonitorSaveMode) {
       const startMs = new Date(scheduledStart.replace(' ', 'T')).getTime();
       if (!Number.isFinite(startMs) || startMs <= Date.now()) {
         Toast.warning('抢单开始时间必须晚于当前时间，请重新选择');
@@ -1900,101 +2009,42 @@ export const StoreSniping: React.FC = () => {
     }
     setNameMonitorSubmitting(true);
     try {
-      const rpMode = values.redpack_mode ?? 0;
-      let chosenRpId = '';
-      let chosenRpName = '';
-      let chosenCardId = '';
-      let chosenCardName = '';
-      if (rpMode === 1) {
-        if (values.redpack_id) {
-          chosenRpId = String(values.redpack_id);
-          const found = getSelectableRedpacks(assetDetail).find((r: any) => String(r.user_red_pack_id || r.id || '') === chosenRpId);
-          if (found) chosenRpName = found.name || (found as any).title || '';
-        }
-        if (values.rebate_card_id) {
-          chosenCardId = String(values.rebate_card_id);
-          const foundOption = getRebateCouponOptions(assetDetail).find(o => o.id === chosenCardId);
-          if (foundOption) chosenCardName = foundOption.name;
-        }
-        if (!chosenRpId && !chosenCardId) throw new Error('请选择指定红包或返利券');
-      }
-
-      const timeoutSec = values.timeout_sec !== undefined && values.timeout_sec !== null ? Number(values.timeout_sec) : 7200;
-      const keepOriginalUntil = Boolean(
-        editingMonitorId &&
-        nameMonitorInitialValues?.until_time &&
-        Number(nameMonitorInitialValues.timeout_sec) === timeoutSec &&
-        scheduledStart === normalizeScheduleTime(nameMonitorInitialValues?.start_time)
-      );
-      let untilTime: string | undefined = keepOriginalUntil
-        ? String(nameMonitorInitialValues?.until_time)
-        : undefined;
-      if (!untilTime && scheduledStart) {
-        const startMs = new Date(scheduledStart.replace(' ', 'T')).getTime();
-        if (timeoutSec === 0) {
-          const dayEnd = new Date(startMs);
-          dayEnd.setHours(23, 59, 0, 0);
-          untilTime = formatScheduleTime(dayEnd);
-        } else {
-          untilTime = formatScheduleTime(new Date(startMs + timeoutSec * 1000));
-        }
-      }
-
-      const res = await api.createNameMonitor({
-        account_key: currentAccountKey,
-        keyword: kw,
-        store_icon: values.store_icon || '',
-        listen_mode: listenMode,
-        activity_requirement: activityRequirement,
-        match_mode: values.match_mode || 'contains',
-        platform: monitorPlatform,
-        rebate_mode_filter: rebateFilter,
-        min_rebate_price: minPrice,
-        min_rebate_gap: minGap,
-        min_rebate_rate: minRate,
-        high_rebate_only: Boolean(values.high_rebate_only),
-        store_category: Array.isArray(values.store_category)
-          ? values.store_category.map((item: any) => String(item).trim()).filter(Boolean).join(',')
-          : String(values.store_category || '').trim(),
-        distance_range: distanceRange,
-        max_distance_km: maxDistanceKm,
-        max_order_money: 0,
-        auto_stop_on_success: values.auto_stop_on_success !== false ? 1 : 0,
-        timeout_sec: timeoutSec,
-        start_time: scheduledStart || undefined,
-        until_time: untilTime,
-        check_interval: Number(values.check_interval ?? 10),
-        redpack_mode: rpMode,
-        redpack_id: chosenRpId,
-        redpack_name: chosenRpName,
-        rebate_card_id: chosenCardId,
-        rebate_card_name: chosenCardName,
-        auto_use_best_vip_card: rpMode !== 2,
-        use_advance_card: values.use_advance_card ? 1 : 0
-      });
-
-      if (res.ok) {
-        if (editingMonitorId) {
-          try {
-            await api.cancelAppointment(editingMonitorId);
-          } catch { /* 旧任务已停止，删除失败不影响新任务运行 */ }
-          Toast.success(`已启动${modeLabel}`);
-        } else {
-          Toast.success(res.message || `已启动${modeLabel}抢单监听`);
-        }
-        setNameMonitorVisible(false);
-        setEditingMonitorId(null);
-        setNameMonitorInitialValues(null);
-        await fetchAppointments(true);
+      const { payload, modeLabel } = buildNameMonitorPayload(values);
+      let res: { ok: boolean; message?: string; appointment_id?: number };
+      if (editingMonitorId) {
+        res = await api.updateNameMonitor(editingMonitorId, payload);
       } else {
-        Toast.warning(res.message || '创建监听任务失败');
+        res = await api.createNameMonitor(payload);
       }
+      if (!res.ok) throw new Error(res.message || '保存监听任务失败');
+      Toast.success(nameMonitorSaveMode
+        ? `${modeLabel}配置已保存，可稍后在任务列表点击「启动」`
+        : (res.message || `已启动${modeLabel}抢单监听`));
+      setNameMonitorVisible(false);
+      setEditingMonitorId(null);
+      setNameMonitorInitialValues(null);
+      setNameMonitorSaveMode(false);
+      await fetchAppointments(true);
     } catch (err: any) {
-      Toast.error('创建抢单监听任务失败: ' + (err?.message || '网络异常'));
+      Toast.error(err?.message || '保存抢单监听配置失败');
     } finally {
       setNameMonitorSubmitting(false);
     }
   };
+
+  const handleStartMonitor = useCallback(async (row: StoreAppointment) => {
+    setStartingMonitorId(row.id);
+    try {
+      const res = await api.startAppointment(row.id);
+      if (!res.ok) throw new Error(res.message || '启动失败');
+      Toast.success(res.message || `已启动抢单监听「${row.keyword || row.store_name || row.id}」`);
+      await fetchAppointments(true);
+    } catch (err: any) {
+      Toast.error(err?.message || '启动抢单监听失败');
+    } finally {
+      setStartingMonitorId(null);
+    }
+  }, [fetchAppointments]);
 
   const handleStopAppoint = useCallback(async (aid: number) => {
     // 乐观更新：立即将该任务标记为已停止
@@ -2899,25 +2949,31 @@ export const StoreSniping: React.FC = () => {
         if (!row) return null;
         if (row.task_type === 'name_monitor' || row.task_type === 'keyword') {
           return (
-            <div className="text-xs space-y-0.5">
-              <div>监听时段: <span className="font-mono font-semibold">{row.start_time || '即刻'} ~ {row.until_time || '23:59'}</span></div>
+            <div className="text-xs space-y-0.5 whitespace-normal break-words min-w-0 max-w-full">
+              <div className="flex flex-wrap items-baseline gap-x-1 gap-y-0.5">
+                <span className="text-semi-color-text-2 shrink-0">监听时段:</span>
+                <span className="font-mono font-semibold break-all">{row.start_time || '即刻'} ~ {row.until_time || '23:59'}</span>
+              </div>
               <div className="text-semi-color-text-2">嗅探频率: 每 {row.check_interval || 10} 秒</div>
             </div>
           );
         }
         if (row.task_type === 'monitor') {
           return (
-            <div className="text-xs space-y-0.5">
-              <div>监听截止: <span className="font-mono font-semibold">{row.until_time || '活动结束'}</span></div>
+            <div className="text-xs space-y-0.5 whitespace-normal break-words min-w-0 max-w-full">
+              <div className="flex flex-wrap items-baseline gap-x-1 gap-y-0.5">
+                <span className="text-semi-color-text-2 shrink-0">监听截止:</span>
+                <span className="font-mono font-semibold break-all">{row.until_time || '活动结束'}</span>
+              </div>
               <div className="text-semi-color-text-2">检测频率: 每 {row.check_interval || 5} 秒</div>
             </div>
           );
         }
         const hasAdvance = Boolean(row.use_advance_card);
         return (
-          <div className="text-xs space-y-0.5">
-            <div>
-              开抢时间:{' '}
+          <div className="text-xs space-y-0.5 whitespace-normal break-words min-w-0 max-w-full">
+            <div className="flex flex-wrap items-baseline gap-x-1 gap-y-0.5">
+              <span className="text-semi-color-text-2 shrink-0">开抢时间:</span>
               {hasAdvance ? (
                 <span>
                   <span className="font-mono line-through text-semi-color-text-2">{row.start_time || '准点'}</span>{' '}
@@ -2975,13 +3031,21 @@ export const StoreSniping: React.FC = () => {
       render: (st: string, row?: StoreAppointment) => {
         let tagColor = 'blue';
         let text = '就绪中';
-        if (st === 'scheduled') { tagColor = 'blue'; text = '等待开抢'; }
+        const outcome = row?.outcome || '';
+        if (row?.is_saved === 1) { tagColor = 'grey'; text = '已保存'; }
+        else if (st === 'scheduled') { tagColor = 'blue'; text = '等待开抢'; }
         else if (st === 'primed') { tagColor = 'cyan'; text = '准备就绪'; }
         else if (st === 'monitoring') { tagColor = 'orange'; text = '正在监听'; }
-        else if (st === 'success') { tagColor = 'green'; text = '抢单成功'; }
-        else if (st === 'failed') { tagColor = 'red'; text = '未抢到'; }
+        else if (st === 'success' || st === 'completed') {
+          const isSuccess = st === 'success' || /抢单成功|成功锁定|已成功/.test(outcome);
+          tagColor = isSuccess ? 'green' : 'red';
+          text = isSuccess ? '抢单成功' : '抢单失败';
+        }
+        else if (st === 'failed' || st === 'error') { tagColor = 'red'; text = '抢单失败'; }
         else if (st === 'expired') { tagColor = 'grey'; text = '监听结束'; }
         else if (st === 'cancelled') { tagColor = 'grey'; text = '已停止'; }
+        else if (/抢单成功|成功锁定/.test(outcome)) { tagColor = 'green'; text = '抢单成功'; }
+        else if (/失败|未抢到|名额被抢占|鉴权失效|风控/.test(outcome)) { tagColor = 'red'; text = '抢单失败'; }
 
         return (
           <div className="space-y-1">
@@ -3009,6 +3073,34 @@ export const StoreSniping: React.FC = () => {
       fixed: 'right',
       render: (_: any, row?: StoreAppointment) => {
         if (!row) return null;
+        if (row.is_saved === 1) {
+          return (
+            <div className="flex items-center gap-1 flex-wrap">
+              <Button
+                theme="solid"
+                type="primary"
+                size="small"
+                loading={startingMonitorId === row.id}
+                onClick={() => handleStartMonitor(row)}
+              >
+                启动
+              </Button>
+              {row.task_type === 'name_monitor' && (
+                <Button
+                  theme="light"
+                  type="primary"
+                  size="small"
+                  onClick={() => handleEditMonitor(row)}
+                >
+                  编辑
+                </Button>
+              )}
+              <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
+                <Button theme="borderless" type="tertiary" size="small">删除</Button>
+              </Popconfirm>
+            </div>
+          );
+        }
         const isActive = ['monitoring', 'scheduled', 'primed', 'pending'].includes(row.status);
         if (isActive) {
           if (row.status === 'monitoring') {
@@ -3052,7 +3144,7 @@ export const StoreSniping: React.FC = () => {
         );
       },
     },
-  ], [handleStopAppoint, handleCancelAppoint, handleEditMonitor, storeIconMap, calcAdvanceTime]);
+  ], [handleStopAppoint, handleCancelAppoint, handleEditMonitor, handleStartMonitor, startingMonitorId, storeIconMap, calcAdvanceTime]);
 
 
 
@@ -3906,7 +3998,7 @@ export const StoreSniping: React.FC = () => {
                 dataSource={appointmentPages.dataSource}
                 loading={appointmentsLoading}
                 pagination={appointmentPages.pagination}
-                scroll={isMobile ? { x: 1000 } : { y: tabScrollHeights.appointments || 480, x: 1000 }}
+                scroll={isMobile ? { x: 1200 } : { y: tabScrollHeights.appointments || 480, x: 1000 }}
                 empty={
                   appointmentsLoading ? (
                     <div className="py-24" />
@@ -4172,7 +4264,7 @@ export const StoreSniping: React.FC = () => {
                     helpText="可为空；若选择，失效时自动替换为最优红包"
                     className="w-full"
                   >
-                    {getSelectableRedpacks(assetDetail).map((rp: any) => {
+                    {getSortedRedpacks(assetDetail).map((rp: any) => {
                       const rId = String(rp.user_red_pack_id || rp.id || '');
                       const rName = rp.name || rp.title || '外卖满返红包';
                       const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
@@ -4210,6 +4302,7 @@ export const StoreSniping: React.FC = () => {
                             <div className="font-medium text-semi-color-text-0 truncate">{option.name}</div>
                           </div>
                           <span className="text-[11px] text-semi-color-text-2 shrink-0">
+                            {option.ratio > 0 && <span className="font-bold text-semi-color-danger mr-1">{option.ratio}%</span>}
                             {option.source === 'order' ? '订单可用' : '已持有'}
                           </span>
                         </div>
@@ -4466,6 +4559,56 @@ export const StoreSniping: React.FC = () => {
 
       
 
+      <Modal
+        title={null}
+        footer={null}
+        visible={mealTicketModalVisible}
+        onCancel={() => setMealTicketModalVisible(false)}
+        centered
+        width={420}
+        bodyStyle={{ padding: '28px 24px 24px' }}
+      >
+        <div className="flex flex-col items-center text-center">
+          <div className="w-12 h-12 rounded-full bg-red-50 text-red-500 flex items-center justify-center text-2xl font-bold mb-3">!</div>
+          <div className="text-base font-semibold text-semi-color-text-0">您没有饭票，抢单失败</div>
+          <div className="text-xs text-semi-color-text-2 mt-2 leading-relaxed">
+            您可以通过参加 <span className="text-semi-color-primary">【免费抽奖】</span> 活动获得，更有机会获得更多权益好礼哦～
+          </div>
+          <div className="flex items-center gap-2 w-full mt-5">
+            <Button
+              theme="light"
+              type="tertiary"
+              className="flex-1"
+              onClick={() => setMealTicketModalVisible(false)}
+            >
+              取消
+            </Button>
+            <Button
+              theme="solid"
+              type="warning"
+              className="flex-1"
+              loading={mealTicketExchanging}
+              onClick={async () => {
+                setMealTicketExchanging(true);
+                try {
+                  const res = await api.exchangeMealTicket(currentAccountKey);
+                  if (!res.ok) throw new Error(res.message || '兑换失败');
+                  Toast.success(res.message || '兑换成功');
+                  setMealTicketModalVisible(false);
+                  await fetchAccountAssets(currentAccountKey, true);
+                } catch (e: any) {
+                  Toast.error(e?.message || '元宝兑换失败');
+                } finally {
+                  setMealTicketExchanging(false);
+                }
+              }}
+            >
+              300元宝兑换
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
       {/* 抢单监听配置弹窗 */}
       <Modal
         title={editingMonitorId ? '编辑抢单监听' : '抢单监听'}
@@ -4474,6 +4617,7 @@ export const StoreSniping: React.FC = () => {
           setNameMonitorVisible(false);
           setEditingMonitorId(null);
           setNameMonitorInitialValues(null);
+          setNameMonitorSaveMode(false);
         }}
         width={640}
         style={{ maxWidth: '94vw' }}
@@ -4494,6 +4638,7 @@ export const StoreSniping: React.FC = () => {
                 setNameMonitorVisible(false);
                 setEditingMonitorId(null);
                 setNameMonitorInitialValues(null);
+                setNameMonitorSaveMode(false);
               }}
             >
               取消
@@ -4506,7 +4651,7 @@ export const StoreSniping: React.FC = () => {
               onClick={() => nameMonitorFormApiRef.current?.submitForm()}
               className="px-5 font-medium"
             >
-              {editingMonitorId ? '启动' : '确定'}
+              {editingMonitorId ? '保存' : '确定'}
             </Button>
           </div>
         }
@@ -4636,7 +4781,7 @@ export const StoreSniping: React.FC = () => {
                     helpText="可为空；若选择，失效时自动替换为最优红包"
                     className="w-full"
                   >
-                    {getSelectableRedpacks(assetDetail).map((rp: any) => {
+                    {getSortedRedpacks(assetDetail).map((rp: any) => {
                       const rId = String(rp.user_red_pack_id || rp.id || '');
                       const rName = rp.name || rp.title || '外卖满返红包';
                       const rawVal = rp.value_num !== undefined ? rp.value_num : (rp.reward_num !== undefined ? rp.reward_num : (rp.money !== undefined ? rp.money * 100 : 0));
@@ -4674,6 +4819,7 @@ export const StoreSniping: React.FC = () => {
                             <div className="font-medium text-semi-color-text-0 truncate">{option.name}</div>
                           </div>
                           <span className="text-[11px] text-semi-color-text-2 shrink-0">
+                            {option.ratio > 0 && <span className="font-bold text-semi-color-danger mr-1">{option.ratio}%</span>}
                             {option.source === 'order' ? '订单可用' : '已持有'}
                           </span>
                         </div>

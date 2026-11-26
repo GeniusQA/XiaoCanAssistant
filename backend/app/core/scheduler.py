@@ -997,7 +997,15 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
 
                 if pools:
                     p0 = pools[0]
-                    pool_type = p0.get("type", 99)
+                    # 官方券种来自 pools[].type 或 pools[].card_type；99 只是旧版兜底值。
+                    # 直接沿用 99 会触发 10001「请求参数错误」，必须按账号等级取真实券种。
+                    raw_pool_type = p0.get("type")
+                    if raw_pool_type is None:
+                        raw_pool_type = p0.get("card_type") or p0.get("cardType")
+                    try:
+                        pool_type = int(raw_pool_type)
+                    except (TypeError, ValueError):
+                        pool_type = 99
                     # 官方实体字段: isGrabbed (boolean), hasInventory (boolean)
                     is_pool_grabbed = bool(
                         today_grabbed_top
@@ -1080,7 +1088,7 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                             await asyncio.sleep(0.08)
                             continue
 
-                        if e.code in (40003, 40004, 40017, 40021, 40024, 40037, 40038, 40039, 40040):
+                        if e.code in (10001, 40003, 40004, 40017, 40021, 40024, 40037, 40038, 40039, 40040):
                             break
                     except Exception as e:
                         log_output += f"[{ts_fmt}] [抢每日大牌券] 第{try_idx}次请求异常: {e}\n"

@@ -150,7 +150,8 @@ async def send_single_custom_channel(
             title=title,
             content=content,
             custom_path=config.get("clawbot_auth_path"),
-            auth_json_str=config.get("clawbot_auth_json")
+            auth_json_str=config.get("clawbot_auth_json"),
+            count_quota=False
         )
     elif chan == "serverchan":
         key = config.get("serverchan_sendkey") or db.get_setting("serverchan_sendkey", "")

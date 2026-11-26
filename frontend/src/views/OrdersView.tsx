@@ -35,7 +35,7 @@ import { useAppStore } from '../store/useAppStore';
 import { api } from '../api';
 import { getNtpNowSec } from '../utils/ntpTime';
 import { useOnActivated } from '../utils/useOnActivated';
-import type { Order, DelayCardInfo } from '../types';
+import type { Order, DelayCardInfo, AccountDetailData } from '../types';
 
 const { Title, Text } = Typography;
 
@@ -84,11 +84,78 @@ const timeoutSecFromUntil = (value: string): number => {
   return Math.max(60, Math.floor((target.getTime() - now.getTime()) / 1000));
 };
 
+const cleanAssetEmoji = (text?: string): string =>
+  String(text || '').replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}]/gu, '').trim();
+
+const getRedpackAmountFen = (rp: any): number => {
+  if (rp?.value_num !== undefined) return Number(rp.value_num) || 0;
+  if (rp?.reward_num !== undefined) return Number(rp.reward_num) || 0;
+  if (rp?.money !== undefined) return (Number(rp.money) || 0) * 100;
+  return 0;
+};
+
+const getSortedRedpacks = (detail: AccountDetailData | null): any[] =>
+  [...(detail?.order_redpacks?.length ? detail.order_redpacks : (detail?.redpacks || []))]
+    .sort((a, b) => getRedpackAmountFen(b) - getRedpackAmountFen(a));
+
+const getRebateRatio = (text: string): number => {
+  const matched = String(text || '').match(/(\d+(?:\.\d+)?)\s*%/);
+  return matched ? Number(matched[1]) : 0;
+};
+
+interface RebateCouponOption {
+  id: string;
+  name: string;
+  desc: string;
+  source: 'order' | 'owned';
+  ratio: number;
+}
+
+const getRebateCouponOptions = (detail: AccountDetailData | null): RebateCouponOption[] => {
+  const options: RebateCouponOption[] = [];
+  for (const item of detail?.order_redpacks || []) {
+    const name = String(item.name || '');
+    const info = String(item.info || '');
+    if (!/返利券|额外返/.test(`${name}${info}`)) continue;
+    const id = String(item.user_red_pack_id || '');
+    if (!id || options.some(o => o.id === id)) continue;
+    options.push({
+      id,
+      name: cleanAssetEmoji(name || '会员返利券'),
+      desc: cleanAssetEmoji(info || ''),
+      source: 'order',
+      ratio: getRebateRatio(`${name}${info}`),
+    });
+  }
+  for (const item of detail?.cards || []) {
+    const cardItem = item as any;
+    const name = String(cardItem.card?.name || cardItem.name || '');
+    const desc = String(cardItem.card?.desc || cardItem.desc || '');
+    if (!/返利券|额外返|比例返/.test(`${name}${desc}`)) continue;
+    const id = String(cardItem.id || cardItem.user_card_id || '');
+    if (!id || options.some(o => o.id === id)) continue;
+    options.push({
+      id,
+      name: cleanAssetEmoji(name || '返利券'),
+      desc: cleanAssetEmoji(desc),
+      source: 'owned',
+      ratio: getRebateRatio(`${name}${desc}`),
+    });
+  }
+  return options.sort((a, b) => b.ratio - a.ratio);
+};
+
+const formatAssetTime = (ts?: number): string => {
+  if (!ts) return '';
+  const date = new Date(ts * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 export const OrdersView: React.FC = () => {
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
   const accounts = useAppStore((s) => s.accounts);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const requestStoreAction = useAppStore((s) => s.requestStoreAction);
   const containerRef = useRef<HTMLDivElement>(null);
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const [tableScrollY, setTableScrollY] = useState<number>(460);
@@ -101,19 +168,23 @@ export const OrdersView: React.FC = () => {
   const [platformFilter, setPlatformFilter] = useState<string>('all');
   const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [delayingOrderId, setDelayingOrderId] = useState<number | null>(null);
+  const [grabbingOrderId, setGrabbingOrderId] = useState<number | null>(null);
   const [delayCardModalVisible, setDelayCardModalVisible] = useState(false);
   const [currentDelayOrder, setCurrentDelayOrder] = useState<Order | null>(null);
   const [delayCardInfo, setDelayCardInfo] = useState<DelayCardInfo | null>(null);
   const [loadingCardInfo, setLoadingCardInfo] = useState(false);
   const [selectedCardCount, setSelectedCardCount] = useState<number>(1);
+  const [selectedDelayCardType, setSelectedDelayCardType] = useState<number>(2);
   const [submittingDelayCard, setSubmittingDelayCard] = useState(false);
   const [cancellingOrderId, setCancellingOrderId] = useState<number | null>(null);
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
-  const [restoringOrders, setRestoringOrders] = useState(false);
   const [monitorOrder, setMonitorOrder] = useState<Order | null>(null);
   const [monitorUntilTime, setMonitorUntilTime] = useState<string>('23:59');
   const [monitorInterval, setMonitorInterval] = useState<number>(5);
   const [monitorRedpackMode, setMonitorRedpackMode] = useState<number>(0);
+  const [monitorRedpackId, setMonitorRedpackId] = useState<string>('');
+  const [monitorRebateCardId, setMonitorRebateCardId] = useState<string>('');
+  const [monitorAssets, setMonitorAssets] = useState<AccountDetailData | null>(null);
   const [monitorSubmitting, setMonitorSubmitting] = useState(false);
   const [currentNowSec, setCurrentNowSec] = useState<number>(() => getNtpNowSec());
 
@@ -266,6 +337,32 @@ export const OrdersView: React.FC = () => {
     }
   };
 
+  const handleDirectGrab = async (order: Order) => {
+    if (!currentAccountKey && !accounts[0]?.key) {
+      Toast.warning('请先选择账号');
+      return;
+    }
+    setGrabbingOrderId(order.id);
+    try {
+      const res = await api.grabOrderNow(order.id);
+      if (res.ok) {
+        Toast.success(res.message || '抢单成功，名额已锁定');
+        await fetchOrders(undefined, true);
+      } else {
+        Toast.warning(res.message || '抢单未成功');
+      }
+    } catch (e: any) {
+      Toast.error(`抢单请求失败: ${e.response?.data?.detail || e.message || e}`);
+    } finally {
+      setGrabbingOrderId(null);
+    }
+  };
+
+  const getDelayCardMaxCount = (info: DelayCardInfo | null, cardType: number) => {
+    if (!info) return 0;
+    return cardType === 4 ? info.max_half_hour_count : info.max_one_hour_count;
+  };
+
   const handleOpenDelayCardModal = async (order: Order) => {
     if (order.platform_order_id) {
       Toast.warning('已绑定外卖单号的订单无法使用延时券');
@@ -277,8 +374,10 @@ export const OrdersView: React.FC = () => {
     try {
       const res = await api.getDelayCardInfo(order.id);
       setDelayCardInfo(res);
-      const defaultCount = res.max_usable_count > 0 ? 1 : 0;
-      setSelectedCardCount(defaultCount);
+      const defaultType = res.max_one_hour_count > 0 ? 2 : 4;
+      const defaultMax = defaultType === 2 ? res.max_one_hour_count : res.max_half_hour_count;
+      setSelectedDelayCardType(defaultType);
+      setSelectedCardCount(defaultMax > 0 ? 1 : 0);
     } catch (err: any) {
       Toast.error(`获取延时券信息失败: ${err.response?.data?.detail || err.message || err}`);
     } finally {
@@ -292,13 +391,14 @@ export const OrdersView: React.FC = () => {
       Toast.warning('请选择至少 1 张延时券');
       return;
     }
-    if (delayCardInfo && selectedCardCount > delayCardInfo.max_usable_count) {
-      Toast.warning(`使用数量不能超过当前最大允许数量 (${delayCardInfo.max_usable_count} 张)`);
+    const maxCount = getDelayCardMaxCount(delayCardInfo, selectedDelayCardType);
+    if (selectedCardCount > maxCount) {
+      Toast.warning(`使用数量不能超过当前最大允许数量 (${maxCount} 张)`);
       return;
     }
     setSubmittingDelayCard(true);
     try {
-      const res = await api.useDelayCard(currentDelayOrder.id, selectedCardCount);
+      const res = await api.useDelayCard(currentDelayOrder.id, selectedCardCount, selectedDelayCardType);
       if (res.ok) {
         Toast.success(res.message || `成功使用 ${selectedCardCount} 张延时券`);
         setDelayCardModalVisible(false);
@@ -352,26 +452,9 @@ export const OrdersView: React.FC = () => {
     }
   };
 
-  const handleRestoreOrders = async () => {
-    if (!currentAccountKey && !accounts[0]?.key) {
-      Toast.warning('请先选择账号');
-      return;
-    }
-    setRestoringOrders(true);
-    try {
-      const res = await api.restoreOrdersLocal(currentAccountKey || accounts[0]?.key);
-      if (!res.ok) throw new Error(res.message || '恢复官方订单失败');
-      Toast.success(res.message || '删除标记已清理，正在重新同步官方订单');
-      await fetchOrders(undefined, true);
-    } catch (e: any) {
-      Toast.error(`恢复订单异常: ${e.response?.data?.detail || e.message || e}`);
-    } finally {
-      setRestoringOrders(false);
-    }
-  };
-
-  const handleOpenOrderMonitor = (order: Order) => {
-    if (!currentAccountKey && !accounts[0]?.key) {
+  const handleOpenOrderMonitor = async (order: Order) => {
+    const accountKey = currentAccountKey || accounts[0]?.key;
+    if (!accountKey) {
       Toast.warning('请先选择账号');
       return;
     }
@@ -379,6 +462,14 @@ export const OrdersView: React.FC = () => {
     setMonitorUntilTime('23:59');
     setMonitorInterval(5);
     setMonitorRedpackMode(0);
+    setMonitorRedpackId('');
+    setMonitorRebateCardId('');
+    try {
+      const res = await api.getAccountDetail(accountKey);
+      setMonitorAssets(res);
+    } catch {
+      setMonitorAssets(null);
+    }
   };
 
   const handleConfirmOrderMonitor = async () => {
@@ -387,6 +478,20 @@ export const OrdersView: React.FC = () => {
     if (!keyword) {
       Toast.warning('该订单缺少店铺名称，无法创建名额监听');
       return;
+    }
+    let redpackName = '';
+    let rebateCardName = '';
+    if (monitorRedpackMode === 1) {
+      const foundRedpack = getSortedRedpacks(monitorAssets).find(
+        (rp: any) => String(rp.user_red_pack_id || rp.id || '') === monitorRedpackId
+      );
+      if (foundRedpack) redpackName = cleanAssetEmoji(foundRedpack.name || foundRedpack.title || '');
+      const foundCoupon = getRebateCouponOptions(monitorAssets).find((o) => o.id === monitorRebateCardId);
+      if (foundCoupon) rebateCardName = foundCoupon.name;
+      if (!monitorRedpackId && !monitorRebateCardId) {
+        Toast.warning('请选择指定红包或返利券');
+        return;
+      }
     }
     setMonitorSubmitting(true);
     try {
@@ -403,6 +508,10 @@ export const OrdersView: React.FC = () => {
         timeout_sec: timeoutSecFromUntil(monitorUntilTime),
         check_interval: Math.max(3, Number(monitorInterval) || 5),
         redpack_mode: monitorRedpackMode,
+        redpack_id: monitorRedpackId,
+        redpack_name: redpackName,
+        rebate_card_id: monitorRebateCardId,
+        rebate_card_name: rebateCardName,
         auto_use_best_vip_card: monitorRedpackMode === 0,
         auto_stop_on_success: 1,
       });
@@ -534,6 +643,7 @@ export const OrdersView: React.FC = () => {
           Boolean(row?.rebate_ratio && row.rebate_ratio > 0) ||
           Number(row?.order_money || 0) <= 0;
         const hasRealOrderMoney = Number(row?.order_money || 0) > 0;
+        const hasPlatformOrderId = Boolean(String(row?.platform_order_id || '').trim());
         return (
           <div className="space-y-1 py-1">
             <div className="flex items-baseline gap-1.5">
@@ -547,19 +657,21 @@ export const OrdersView: React.FC = () => {
               )}
             </div>
             <div className="text-[11px] text-semi-color-text-2 font-mono space-y-0.5">
-              <span className="block">活动返利红包 ¥{redpackAmount || '0.00'}</span>
+              <span className="block">返利红包 ¥{redpackAmount || '0.00'}</span>
               {vipExtraReward > 0 && (
                 <span className="block">会员返利券 ¥{vipExtraReward.toFixed(2)}</span>
               )}
-              <span className="block">基础返利 ¥{row?.rebate_money}</span>
+              <span className="block">活动返利 ¥{row?.rebate_money}</span>
             </div>
-            <div className="text-sm text-semi-color-text-1 font-mono">
-              {isPercentOrder && !hasRealOrderMoney ? (
-                <span>按比例返: {row?.rebate_ratio ? `${row.rebate_ratio}%` : '比例返'}</span>
-              ) : (
-                <span>实付金额: ¥{(actualPaid || Number(row?.order_money || 0)).toFixed(2)}</span>
-              )}
-            </div>
+            {(isPercentOrder && !hasRealOrderMoney) || hasPlatformOrderId ? (
+              <div className="text-sm text-semi-color-text-1 font-mono">
+                {isPercentOrder && !hasRealOrderMoney ? (
+                  <span>按比例返: {row?.rebate_ratio ? `${row.rebate_ratio}%` : '比例返'}</span>
+                ) : (
+                  <span>实付金额: ¥{(actualPaid || Number(row?.order_money || 0)).toFixed(2)}</span>
+                )}
+              </div>
+            ) : null}
           </div>
         );
       },
@@ -649,7 +761,7 @@ export const OrdersView: React.FC = () => {
           return <span className="text-sm text-semi-color-text-0">已关闭</span>;
         }
         if (status === 'auditing') {
-          return <span className="text-sm text-semi-color-warning">审核中</span>;
+          return <span className="text-sm text-semi-color-text-2">-</span>;
         }
         if (status === 'rejected') {
           return <span className="text-sm text-semi-color-danger">已驳回</span>;
@@ -694,7 +806,7 @@ export const OrdersView: React.FC = () => {
           }
           return (
             <Tag color="blue" size="small" shape="square">
-              待下单
+              已报名，待下单
             </Tag>
           );
         }
@@ -816,13 +928,6 @@ export const OrdersView: React.FC = () => {
         }
 
         if (status === 'completed') {
-          const storeActionPayload = {
-            keyword: String(row?.store_name || '').trim(),
-            storeId: String(row?.store_id || '').trim(),
-            storeIcon: String(row?.store_icon || '').trim(),
-            platform: String(row?.platform || '').trim(),
-            accountKey: currentAccountKey,
-          };
           return (
             <div className="flex flex-wrap items-center gap-1">
               <Button
@@ -830,7 +935,8 @@ export const OrdersView: React.FC = () => {
                 type="primary"
                 size="small"
                 className="!px-2"
-                onClick={() => requestStoreAction({ type: 'grab', ...storeActionPayload })}
+                loading={grabbingOrderId === row.id}
+                onClick={() => handleDirectGrab(row)}
               >
                 立即抢单
               </Button>
@@ -855,7 +961,7 @@ export const OrdersView: React.FC = () => {
                   theme="light"
                   type="tertiary"
                   size="small"
-                  icon={<IconDelete size="small" />}
+                  
                   loading={deletingOrderId === row.id}
                 >
                   删除订单
@@ -879,7 +985,7 @@ export const OrdersView: React.FC = () => {
                 theme="light"
                 type="tertiary"
                 size="small"
-                icon={<IconDelete size="small" />}
+                
                 loading={deletingOrderId === row.id}
               >
                 删除订单
@@ -889,7 +995,25 @@ export const OrdersView: React.FC = () => {
         }
 
         if (status === 'auditing') {
-          return <span className="text-xs text-semi-color-text-2">平台审核中</span>;
+          return (
+            <Popconfirm
+              title="确认取消该报名？"
+              content="将向官方发起取消报名请求，名额释放后该订单会转为已取消。"
+              okText="确认取消"
+              cancelText="返回"
+              okType="danger"
+              onConfirm={() => handleCancelOrder(row)}
+            >
+              <Button
+                theme="light"
+                type="danger"
+                size="small"
+                loading={cancellingOrderId === row.id}
+              >
+                取消报名
+              </Button>
+            </Popconfirm>
+          );
         }
 
         if (status === 'rejected') {
@@ -981,21 +1105,6 @@ export const OrdersView: React.FC = () => {
         </div>
 
         <Space>
-          <Popconfirm
-            title="恢复官方订单？"
-            content="将清除本地删除标记，并从官方重新同步全部订单；已手动删除的记录也会重新出现。"
-            okText="确认恢复"
-            cancelText="取消"
-            onConfirm={handleRestoreOrders}
-          >
-            <Button
-              theme="light"
-              type="primary"
-              loading={restoringOrders}
-            >
-              恢复官方订单
-            </Button>
-          </Popconfirm>
           {['completed', 'cancelled', 'all'].includes(activeStatusTab) && (
             <Popconfirm
               title="确认批量移除订单？"
@@ -1131,7 +1240,7 @@ export const OrdersView: React.FC = () => {
         okType="warning"
         confirmLoading={submittingDelayCard}
         okButtonProps={{
-          disabled: !delayCardInfo || delayCardInfo.max_usable_count <= 0
+          disabled: !delayCardInfo || getDelayCardMaxCount(delayCardInfo, selectedDelayCardType) <= 0
         }}
         width={560}
         centered
@@ -1149,7 +1258,7 @@ export const OrdersView: React.FC = () => {
               description={
                 <div>
                   <div className="font-medium text-semi-color-text-0">
-                    延时券单张可延长 1 小时提交订单时间
+                    延时券按面额区分：半小时券每张延长 0.5 小时，1小时券每张延长 1 小时
                   </div>
                   <div className="text-xs text-semi-color-text-2 mt-0.5">
                     根据平台规则，使用延时券最迟可延长到次日早上 6 点整。
@@ -1175,13 +1284,53 @@ export const OrdersView: React.FC = () => {
                 <Tag color="grey" size="small">{delayCardInfo?.next_6am_str || '-'}</Tag>
               </div>
               <div className="flex justify-between items-center text-sm pt-1 border-t border-semi-color-border">
-                <Text type="secondary">卡包可用延时券</Text>
+                <Text type="secondary">半小时延时券</Text>
                 <div>
                   <Text strong className="text-semi-color-warning text-base font-bold font-mono">
-                    {delayCardInfo?.available_delay_cards ?? 0}
+                    {delayCardInfo?.half_hour_cards ?? 0}
                   </Text>
                   <Text type="secondary" size="small"> 张</Text>
                 </div>
+              </div>
+              <div className="flex justify-between items-center text-sm">
+                <Text type="secondary">1小时延时券</Text>
+                <div>
+                  <Text strong className="text-semi-color-warning text-base font-bold font-mono">
+                    {delayCardInfo?.one_hour_cards ?? 0}
+                  </Text>
+                  <Text type="secondary" size="small"> 张</Text>
+                </div>
+              </div>
+            </div>
+
+            {/* 券类型选择区 */}
+            <div className="border border-semi-color-border rounded-lg p-3.5 space-y-3">
+              <div className="text-sm font-semibold text-semi-color-text-0">选择延时券类型</div>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  theme={selectedDelayCardType === 2 ? 'solid' : 'light'}
+                  type={selectedDelayCardType === 2 ? 'primary' : 'tertiary'}
+                  size="small"
+                  disabled={getDelayCardMaxCount(delayCardInfo, 2) <= 0}
+                  onClick={() => {
+                    setSelectedDelayCardType(2);
+                    setSelectedCardCount(getDelayCardMaxCount(delayCardInfo, 2) > 0 ? 1 : 0);
+                  }}
+                >
+                  1小时延时券
+                </Button>
+                <Button
+                  theme={selectedDelayCardType === 4 ? 'solid' : 'light'}
+                  type={selectedDelayCardType === 4 ? 'warning' : 'tertiary'}
+                  size="small"
+                  disabled={getDelayCardMaxCount(delayCardInfo, 4) <= 0}
+                  onClick={() => {
+                    setSelectedDelayCardType(4);
+                    setSelectedCardCount(getDelayCardMaxCount(delayCardInfo, 4) > 0 ? 1 : 0);
+                  }}
+                >
+                  半小时延时券
+                </Button>
               </div>
             </div>
 
@@ -1191,45 +1340,46 @@ export const OrdersView: React.FC = () => {
                 <div>
                   <div className="text-sm font-semibold text-semi-color-text-0">选择使用延时券数量</div>
                   <div className="text-xs text-semi-color-text-2 mt-0.5">
-                    当前最多允许使用 {delayCardInfo?.max_usable_count ?? 0} 张
+                    当前最多允许使用 {getDelayCardMaxCount(delayCardInfo, selectedDelayCardType)} 张，
+                    每张延长 {selectedDelayCardType === 4 ? '0.5' : '1'} 小时
                   </div>
                 </div>
 
                 <InputNumber
                   min={1}
-                  max={Math.max(1, delayCardInfo?.max_usable_count || 1)}
+                  max={Math.max(1, getDelayCardMaxCount(delayCardInfo, selectedDelayCardType) || 1)}
                   value={selectedCardCount}
                   onChange={(val) => {
-                    const maxVal = delayCardInfo?.max_usable_count || 1;
+                    const maxVal = getDelayCardMaxCount(delayCardInfo, selectedDelayCardType) || 1;
                     const num = typeof val === 'number' ? Math.max(1, Math.min(val, maxVal)) : 1;
                     setSelectedCardCount(num);
                   }}
                   style={{ width: 140 }}
                   size="default"
-                  disabled={!delayCardInfo || delayCardInfo.max_usable_count <= 0}
+                  disabled={getDelayCardMaxCount(delayCardInfo, selectedDelayCardType) <= 0}
                   suffix="张"
                 />
               </div>
 
               {/* 预计延长结果预览 */}
-              {delayCardInfo && delayCardInfo.max_usable_count > 0 && (
+              {delayCardInfo && getDelayCardMaxCount(delayCardInfo, selectedDelayCardType) > 0 && (
                 <div className="text-xs bg-semi-color-fill-1 rounded p-2 flex justify-between items-center">
                   <Text type="secondary">使用后预计截止时间:</Text>
                   <Text strong className="text-semi-color-primary font-mono">
-                    {new Date((delayCardInfo.timeout_time + selectedCardCount * 3600) * 1000).toLocaleString('zh-CN', { hour12: false })}
+                    {new Date((delayCardInfo.timeout_time + selectedCardCount * (selectedDelayCardType === 4 ? 1800 : 3600)) * 1000).toLocaleString('zh-CN', { hour12: false })}
                   </Text>
                 </div>
               )}
             </div>
 
-            {delayCardInfo && delayCardInfo.max_usable_count <= 0 && (
+            {delayCardInfo && getDelayCardMaxCount(delayCardInfo, selectedDelayCardType) <= 0 && (
               <Banner
                 type="warning"
                 fullMode={false}
                 description={
                   delayCardInfo.available_delay_cards <= 0
                     ? '当前卡包内暂无可用延时券，请先在官方 App 领取或兑换延时券。'
-                    : '当前订单超时时间已逼近次日 06:00 阈值，已达到最迟延时上限，无法继续使用延时券。'
+                    : '所选延时券在当前订单下已无可用张数，或已逼近次日 06:00 阈值，无法继续使用。'
                 }
               />
             )}
@@ -1296,11 +1446,67 @@ export const OrdersView: React.FC = () => {
               style={{ width: '100%' }}
             >
               <Select.Option value={0}>自动最优红包/返利券</Select.Option>
-              <Select.Option value={1}>指定红包或返利券</Select.Option>
-              <Select.Option value={2}>不使用红包</Select.Option>
+              <Select.Option value={1}>指定具体可用红包/返利券</Select.Option>
+              <Select.Option value={2}>不使用红包/返利券</Select.Option>
             </Select>
-            <div className="text-xs text-semi-color-text-2 mt-1">抢单命中时自动选用最优红包与返利券</div>
+            <div className="text-xs text-semi-color-text-2 mt-1">指定券失效时自动平滑替换为最优券</div>
           </div>
+          {monitorRedpackMode === 1 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <div className="text-sm font-medium mb-1.5">选择指定红包</div>
+                <Select
+                  value={monitorRedpackId || undefined}
+                  onChange={(value) => setMonitorRedpackId(String(value || ''))}
+                  placeholder="请选择要绑定的红包"
+                  style={{ width: '100%' }}
+                >
+                  {getSortedRedpacks(monitorAssets).map((rp: any) => {
+                    const rId = String(rp.user_red_pack_id || rp.id || '');
+                    const threshold = rp.threshold_num ? `满${(rp.threshold_num / 100).toFixed(0)}元` : '无门槛';
+                    const expire = formatAssetTime(rp.end_time || rp.expire_time);
+                    return (
+                      <Select.Option key={rId} value={rId}>
+                        <div className="flex items-center justify-between w-full gap-2 text-xs py-0.5">
+                          <div className="min-w-0">
+                            <span className="font-medium text-semi-color-text-0 truncate">{cleanAssetEmoji(rp.name || rp.title || '外卖满返红包')}</span>
+                            <span className="text-[11px] text-semi-color-text-2 ml-1">({threshold})</span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="font-bold text-semi-color-danger">¥{(getRedpackAmountFen(rp) / 100).toFixed(2)}</span>
+                            {expire && <span className="text-[11px] text-semi-color-text-2">至 {expire}</span>}
+                          </div>
+                        </div>
+                      </Select.Option>
+                    );
+                  })}
+                </Select>
+                <div className="text-xs text-semi-color-text-2 mt-1">按红包金额从大到小排序；可为空</div>
+              </div>
+              <div>
+                <div className="text-sm font-medium mb-1.5">选择指定返利券</div>
+                <Select
+                  value={monitorRebateCardId || undefined}
+                  onChange={(value) => setMonitorRebateCardId(String(value || ''))}
+                  placeholder="请选择要绑定的返利券"
+                  style={{ width: '100%' }}
+                >
+                  {getRebateCouponOptions(monitorAssets).map((option) => (
+                    <Select.Option key={option.id} value={option.id}>
+                      <div className="flex items-center justify-between w-full gap-2 text-xs py-0.5">
+                        <span className="font-medium text-semi-color-text-0 truncate">{option.name}</span>
+                        <span className="shrink-0">
+                          {option.ratio > 0 && <span className="font-bold text-semi-color-danger mr-1">{option.ratio}%</span>}
+                          <span className="text-[11px] text-semi-color-text-2">{option.source === 'order' ? '订单可用' : '已持有'}</span>
+                        </span>
+                      </div>
+                    </Select.Option>
+                  ))}
+                </Select>
+                <div className="text-xs text-semi-color-text-2 mt-1">按返利券百分比从大到小排序；可为空</div>
+              </div>
+            </div>
+          )}
         </div>
       </Modal>
     </div>

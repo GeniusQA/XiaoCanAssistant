@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List, Set
 
 from ..models import database as db
-from ..protocol.client import XiaoCanClient, XiaoCanRPCError, is_waf_blocked, get_waf_cooldown_seconds, format_waf_block_message, waf_account_key
+from ..protocol.client import XiaoCanClient, XiaoCanRPCError, is_waf_blocked, get_waf_cooldown_seconds, format_waf_block_message, waf_account_key, normalize_meal_ticket_error
 from .scheduler import mark_task_started, mark_task_finished
 from .notifier import send_system_notification
 from .notification import NotificationEvent, NotificationLevel
@@ -248,6 +248,34 @@ def _parse_time_today(time_str: str) -> Optional[float]:
     return None
 
 
+async def _notify_grab_failure(
+    apt: Dict[str, Any],
+    account: Dict[str, Any],
+    err_msg: str,
+    action_source: str,
+) -> None:
+    """抢单失败统一推送任务消息（Token 失效单独走 TOKEN_WARN）"""
+    if "凭据" in err_msg and "失效" in err_msg:
+        return
+    store_name = apt.get("store_name") or "目标商户"
+    nickname = account.get("nick_name") or ""
+    source_label = {
+        "store_appoint": "预约抢单",
+        "store_monitor": "抢单监听",
+        "store_grab": "即时抢单",
+    }.get(action_source, "抢单")
+    try:
+        await send_system_notification(
+            title="小蚕霸王餐抢单失败",
+            content=f"账号【{nickname}】的{source_label}任务失败：{store_name} - {err_msg}",
+            account_key=apt.get("account_key") or account.get("key", ""),
+            event=NotificationEvent.TASK_FAIL,
+            level=NotificationLevel.WARNING
+        )
+    except Exception as ne:
+        logger.warning(f"抢单失败消息推送异常: {ne}")
+
+
 async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, Any], advance: bool = False, action_source: str = "store_grab") -> Dict[str, Any]:
     """执行小蚕官方抢单接口，并全程记录高精步骤日志入系统运行流水"""
     aid = apt.get("id") or 0
@@ -258,6 +286,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
         if aid:
             db.update_appointment(aid, {"status": "failed", "outcome": err_msg})
             invalidate_worker_cache()
+        await _notify_grab_failure(apt, account, err_msg, action_source)
         return {"ok": False, "code": -400, "message": err_msg}
 
     token = account.get("token")
@@ -445,7 +474,10 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
             linked_log_id = int(apt.get("log_id") or 0)
 
             if order_id <= 0:
-                err_msg = (res.get("status") or {}).get("msg") or res.get("msg") or "未返回有效订单号，官方抢单未生效"
+                err_msg = normalize_meal_ticket_error(
+                    (res.get("status") or {}).get("code") or res.get("code"),
+                    (res.get("status") or {}).get("msg") or res.get("msg") or "未返回有效订单号，官方抢单未生效",
+                )
                 t_step4 = time_service.format_now_ms()
                 log_steps.append(f"[{t_step4}] 步骤 4/4: 官方接口返回未成功 - 提示: {err_msg}")
                 log_steps.append(f"[{time_service.format_now_ms()}] 流程结束 - 抢单未锁定名额")
@@ -458,6 +490,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                         db.add_job_log(job_id, account_key, task_id, "error", grab_text)
                     except Exception:
                         pass
+                await _notify_grab_failure(apt, account, err_msg, action_source)
                 return {"ok": False, "code": -1, "message": err_msg}
 
             t_step4 = time_service.format_now_ms()
@@ -593,7 +626,9 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                     )
                 except Exception:
                     pass
-            return {"ok": False, "code": e.code, "message": e.msg}
+            normalized_msg = normalize_meal_ticket_error(e.code, e.msg)
+            await _notify_grab_failure(apt, account, normalized_msg, action_source)
+            return {"ok": False, "code": e.code, "message": normalized_msg}
         except Exception as e:
             t_err = time_service.format_now_ms()
             log_steps.append(f"[{t_err}] 抢单接口网络异常: {str(e)}")
@@ -607,6 +642,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                     db.add_job_log(job_id, account_key, task_id, "error", grab_text)
                 except Exception:
                     pass
+            await _notify_grab_failure(apt, account, str(e), action_source)
             return {"ok": False, "code": -1, "message": str(e)}
     finally:
         mark_task_finished(account_key, task_id)
@@ -1083,7 +1119,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         logger.info(f"{monitor_label} #{aid} {succ_msg}")
                         if auto_stop:
                             db.update_appointment(aid, {
-                                "status": "completed",
+                                "status": "success",
                                 "outcome": succ_msg,
                                 "store_name": store_label,
                                 "promotion_id": str(best_item.get("promotion_id", ""))

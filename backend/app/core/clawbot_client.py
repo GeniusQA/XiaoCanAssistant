@@ -589,7 +589,8 @@ async def send_message(
     title: str,
     content: str,
     custom_path: Optional[str] = None,
-    auth_json_str: Optional[str] = None
+    auth_json_str: Optional[str] = None,
+    count_quota: bool = True
 ) -> Dict[str, Any]:
     """
     通过腾讯 iLink 官方接口向已绑定的微信发送通知消息
@@ -647,12 +648,15 @@ async def send_message(
                 uses_local_auth = not auth_json_str and (not custom_path or str(custom_path).strip() == LOCAL_AUTH_FILE)
                 if uses_local_auth:
                     mark_session_success(auth, custom_path if custom_path and str(custom_path).strip() == LOCAL_AUTH_FILE else None)
-                daily_count = record_daily_send()
+                daily_count = get_daily_send_count()
+                if count_quota:
+                    daily_count = record_daily_send()
                 return {
                     "ok": True,
                     "channel": "clawbot",
                     "message": "微信 ClawBot 推送成功",
                     "daily_send_count": daily_count,
+                    "quota_counted": count_quota,
                 }
             elif ret == -14:
                 uses_local_auth = not auth_json_str and (not custom_path or str(custom_path).strip() == LOCAL_AUTH_FILE)
