@@ -165,6 +165,20 @@ export const api = {
       code?: string;
       message?: string;
     }>('/store/dual-rebate-scan', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, timeout: 120000 }).then(r => r.data),
+  getDualRebateCache: (accountKey?: string) =>
+    client.get<{
+      ok: boolean;
+      has_cache?: boolean;
+      total_scanned_promotions?: number;
+      total_scanned_stores?: number;
+      fixed_scanned_stores?: number;
+      percent_scanned_stores?: number;
+      dual_rebate_count?: number;
+      keyword?: string;
+      updated_at?: string;
+      stores: StoreItem[];
+      message?: string;
+    }>('/store/dual-rebate-cache', { params: { account_key: accountKey } }).then(r => r.data),
   grabStoreNow: (data: { account_key: string; store_id?: string; store_name?: string; store_icon?: string; promotion_id: string; platform?: string; order_money?: number; rebate_price?: number; rebate_desc?: string; rebate_type?: string; advance?: boolean; redpack_id?: string; redpack_name?: string; redpack_mode?: number; auto_use_best_vip_card?: boolean; vip_promotion_card_id?: number; vip_extra_silk_card_id?: number }) =>
     client.post<{ ok: boolean; order_id?: number; can_monitor?: boolean; message: string }>('/store/grab-now', data).then(r => r.data),
   grabOrderNow: (orderId: number) =>

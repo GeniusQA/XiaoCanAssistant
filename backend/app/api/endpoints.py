@@ -44,6 +44,7 @@ from ..core.tianditu import tianditu_client
 from ..core import map_service
 from ..protocol.client import (
     XiaoCanClient,
+    DUPLICATE_PARTICIPATION_MESSAGE,
     format_waf_block_message,
     get_active_protocol_profile,
     get_waf_block_detail,
@@ -1872,6 +1873,30 @@ def _normalize_store_match_name(text: Any) -> str:
     return re.sub(r"[\s·・\-—_]+", "", value)
 
 
+def _has_today_store_participation(account_key: str, store_name: str) -> bool:
+    """判断账号今日是否已报名该商家活动 (已报名/审核中/已完成均视为已参与)。"""
+    target_key = _normalize_store_match_name(store_name)
+    if not account_key or not target_key:
+        return False
+    try:
+        rows = db.get_orders(account_key=account_key, limit=300, offset=0)
+    except Exception:
+        return False
+    today = time_service.now_dt().strftime("%Y-%m-%d")
+    for row in rows or []:
+        if _normalize_store_match_name(row.get("store_name")) != target_key:
+            continue
+        status = str(row.get("status") or "").lower()
+        if status in ("cancelled", "rejected", "failed", "error"):
+            continue
+        order_ts = int(row.get("order_time") or 0)
+        order_day = time_service.format_ts(order_ts, "%Y-%m-%d") if order_ts > 0 else str(row.get("created_at") or "")[:10]
+        if order_day and order_day != today:
+            continue
+        return True
+    return False
+
+
 def _is_exact_store_name_query(keyword: Any) -> bool:
     """包含分店括号的完整店名视为精确查询，普通品类/品牌关键词仍走模糊搜索。"""
     value = str(keyword or "").strip()
@@ -2386,6 +2411,17 @@ def _parse_store_promotion_item(
         or store_obj.get("store_category")
         or ""
     ).strip()
+    raw_store_sub_type = (
+        p.get("store_category_sub_type")
+        or p.get("category_sub_type")
+        or store_obj.get("store_category_sub_type")
+        or store_obj.get("category_sub_type")
+        or 0
+    )
+    try:
+        store_category_sub_type = int(raw_store_sub_type)
+    except (TypeError, ValueError):
+        store_category_sub_type = 0
     raw_addr_val = (
         store_obj.get("address") or 
         store_obj.get("address_detail") or 
@@ -2437,6 +2473,7 @@ def _parse_store_promotion_item(
         "same_group_id": same_group_id,
         "if_use_red_pack": if_use_red_pack,
         "store_category": store_category,
+        "store_category_sub_type": store_category_sub_type,
         "address": address
     }
 
@@ -3835,6 +3872,39 @@ def _extract_all_promos_from_raw(
     return items
 
 
+@router.get("/store/dual-rebate-cache")
+async def get_dual_rebate_cache(account_key: Optional[str] = Query(None)):
+    """读取账号最近一次同店双返扫描缓存，供活动抢单列表免扫描复用。"""
+    key = _safe_val(account_key, None)
+    if not key:
+        accounts = db.get_all_accounts()
+        if not accounts:
+            return {"ok": False, "stores": [], "message": "请先绑定或选择小蚕账号"}
+        key = accounts[0].get("key")
+    cached = db.get_dual_rebate_scan_cache(str(key))
+    if not cached:
+        return {
+            "ok": False,
+            "has_cache": False,
+            "stores": [],
+            "message": "暂无同店双返缓存数据，可点击「开始扫描」执行一次扫描",
+        }
+    stores = cached.get("stores") or []
+    return {
+        "ok": True,
+        "has_cache": True,
+        "stores": stores,
+        "total_scanned_promotions": cached.get("total_scanned_promotions", 0),
+        "total_scanned_stores": cached.get("total_scanned_stores", 0),
+        "fixed_scanned_stores": cached.get("fixed_scanned_stores", 0),
+        "percent_scanned_stores": cached.get("percent_scanned_stores", 0),
+        "dual_rebate_count": cached.get("dual_rebate_count", len(stores)),
+        "keyword": cached.get("keyword", ""),
+        "updated_at": cached.get("updated_at", ""),
+        "message": cached.get("message", ""),
+    }
+
+
 @router.get("/store/dual-rebate-scan")
 async def scan_dual_rebate_stores(
     city_code: Optional[int] = Query(None),
@@ -4501,7 +4571,7 @@ async def scan_dual_rebate_stores(
     except Exception as log_err:
         logger.warning(f"写入双返利扫描运行日志失败: {log_err}")
 
-    return {
+    scan_result = {
         "ok": True,
         "total_scanned_promotions": len(seen_promo_keys),
         "total_scanned_stores": len(seen_store_keys),
@@ -4520,6 +4590,28 @@ async def scan_dual_rebate_stores(
         "stores": dual_stores,
         "message": f"扫描完成：满返 {len(feed_store_keys)} 家 / 比例返 {len(sj_store_keys)} 家（合并 {len(seen_store_keys)} 家），筛出 {total_found_count} 家同店双福利/多活动店铺"
     }
+
+    # 缓存本次扫描结果，供「活动抢单-同店双返」列表直接复用，避免重复手动扫描
+    try:
+        db.save_dual_rebate_scan_cache(
+            str(target_acc.get("key") or account_key or "__system__"),
+            {
+                "stores": dual_stores,
+                "total_scanned_promotions": scan_result["total_scanned_promotions"],
+                "total_scanned_stores": scan_result["total_scanned_stores"],
+                "fixed_scanned_stores": scan_result["fixed_scanned_stores"],
+                "percent_scanned_stores": scan_result["percent_scanned_stores"],
+                "max_fixed_stores": fixed_limit,
+                "max_percent_stores": percent_limit,
+                "dual_rebate_count": total_found_count,
+                "keyword": keyword or "",
+                "message": scan_result["message"],
+            },
+        )
+    except Exception as cache_err:
+        logger.warning(f"写入同店双返扫描缓存失败: {cache_err}")
+
+    return scan_result
 
 
 @router.post("/store/grab-now")
@@ -5011,6 +5103,10 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     if listen_mode == "general":
         keyword = ""
 
+    # 同一商家今日内不可重复参与活动：已报名/审核中/已完成的商家不再允许重复开启监听
+    if listen_mode == "store" and keyword and _has_today_store_participation(account_key, keyword):
+        raise HTTPException(status_code=400, detail=DUPLICATE_PARTICIPATION_MESSAGE)
+
     match_mode = data.get("match_mode") or "contains"
     activity_requirement = str(data.get("activity_requirement") or "all")
     if activity_requirement not in ("all", "specified_dish", "repurchase"):
@@ -5039,6 +5135,13 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         for item in raw_store_categories
         if str(item).strip()
     ))
+    from ..core.appointment_worker import _STORE_CATEGORY_IDS
+    invalid_categories = [item for item in store_categories if item not in _STORE_CATEGORY_IDS]
+    if invalid_categories:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的商家分类: {', '.join(invalid_categories)}，请重新选择官方分类",
+        )
     store_category = ",".join(store_categories)
     max_order_money = float(data.get("max_order_money") or 0.0)
     auto_stop_on_success = int(data.get("auto_stop_on_success") if data.get("auto_stop_on_success") is not None else 1)
@@ -5140,6 +5243,9 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     except Exception:
         pass
 
+    from ..core.appointment_worker import _parse_time_today
+    start_ts = _parse_time_today(start_at)
+    initial_status = "scheduled" if (is_saved_only or (start_ts and start_ts > time_service.now_ts())) else "monitoring"
     apt_data = {
         "account_key": account_key,
         "store_id": "0",
@@ -5174,7 +5280,7 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
         "auto_use_best_vip_card": bool(data.get("auto_use_best_vip_card", True)),
         "rebate_desc": f"{listen_desc} ({plat_desc})",
         "is_saved": 1 if is_saved_only else 0,
-        "status": "pending" if is_saved_only else "monitoring",
+        "status": initial_status,
         "outcome": "配置已保存，尚未启动" if is_saved_only else "",
         "log_id": log_id
     }
@@ -5291,7 +5397,8 @@ async def stop_appointment(aid: int):
             db.add_job_log(job_id, acc_key, "store_monitor", "error", s_log)
         except Exception:
             pass
-    from ..core.appointment_worker import invalidate_worker_cache
+    from ..core.appointment_worker import invalidate_worker_cache, mark_appointment_stopped
+    mark_appointment_stopped(aid)
     invalidate_worker_cache()
     return {"ok": True, "message": "已主动停止该名额监听任务"}
 
@@ -5312,16 +5419,36 @@ async def update_appointment_endpoint(aid: int, data: Dict[str, Any] = Body(...)
         "rebate_card_id", "rebate_card_name", "auto_use_best_vip_card", "use_advance_card",
     }
     fields = {k: v for k, v in data.items() if k in allowed_keys}
+    if "store_category" in fields:
+        raw_categories = fields.get("store_category") or []
+        if isinstance(raw_categories, str):
+            raw_categories = re.split(r"[,，;；]", raw_categories)
+        elif not isinstance(raw_categories, (list, tuple)):
+            raw_categories = [raw_categories]
+        categories = list(dict.fromkeys(
+            str(item).strip()
+            for item in raw_categories
+            if str(item).strip()
+        ))
+        from ..core.appointment_worker import _STORE_CATEGORY_IDS
+        invalid_categories = [item for item in categories if item not in _STORE_CATEGORY_IDS]
+        if invalid_categories:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的商家分类: {', '.join(invalid_categories)}，请重新选择官方分类",
+            )
+        fields["store_category"] = ",".join(categories)
     fields.update({
         "is_saved": 1,
-        "status": "pending",
+        "status": "scheduled",
         "outcome": "配置已保存，尚未启动",
         "last_checked_at": "",
         "notified_31m": 0,
         "notified_1m": 0,
     })
     db.update_appointment(aid, fields)
-    from ..core.appointment_worker import invalidate_worker_cache
+    from ..core.appointment_worker import invalidate_worker_cache, mark_appointment_stopped
+    mark_appointment_stopped(aid)
     invalidate_worker_cache()
     return {"ok": True, "appointment_id": aid, "message": "抢单监听配置已保存"}
 
@@ -5332,23 +5459,65 @@ async def start_appointment(aid: int):
     apt = db.get_appointment_by_id(aid)
     if not apt:
         raise HTTPException(status_code=404, detail="未找到对应的监听任务")
+    current_status = str(apt.get("status") or "").lower()
+    if int(apt.get("is_saved") or 0) != 1 and current_status not in ("cancelled", "expired", "failed", "error"):
+        raise HTTPException(status_code=400, detail="当前任务状态不支持启动")
     account_key = apt.get("account_key") or ""
     account = db.get_account_by_key(account_key) if account_key else None
     if not account or not account.get("token"):
         raise HTTPException(status_code=400, detail="该任务绑定的账号凭据已失效，无法启动")
     _require_account_location(account, account_key)
 
+    from ..core.appointment_worker import _parse_time_today
+    start_ts = _parse_time_today(str(apt.get("start_time") or ""))
+    target_status = "scheduled" if (start_ts and start_ts > time_service.now_ts()) else "monitoring"
+    status_desc = "等待设定开抢时间" if target_status == "scheduled" else "即刻进入监听"
+
+    # 启动已保存任务时必须生成本轮运行日志，否则运行日志页看不到该任务的执行记录。
+    now_ms = time_service.format_now_ms()
+    job_id = f"job_namemon_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
+    listen_mode = str(apt.get("listen_mode") or "store")
+    keyword = str(apt.get("keyword") or apt.get("store_name") or "").strip()
+    listen_desc = "常规监听 (不区分店名)" if listen_mode == "general" else f"抢单监听「{keyword or '未命名'}」"
+    platform_desc = {
+        "all": "全平台 (美团/饿了么/京东)",
+        "meituan": "美团外卖",
+        "eleme": "饿了么",
+        "jingdong": "京东外卖",
+    }.get(str(apt.get("platform") or "all"), "全平台")
+    rp_mode = _normalize_redpack_mode(apt.get("redpack_mode", 0))
+    rp_desc = (
+        f"指定红包/返利券 (红包: {apt.get('redpack_name') or apt.get('redpack_id') or '无'}, "
+        f"返利券: {apt.get('rebate_card_name') or apt.get('rebate_card_id') or '无'})"
+        if rp_mode == 1 else ("不使用红包/返利券" if rp_mode == 2 else "自动最优红包/返利券")
+    )
+    s_log = (
+        f"[{now_ms}] 用户手动启动抢单监听任务 #{aid} (启动前状态: {current_status or 'saved'}, {status_desc})\n"
+        f"[{now_ms}] 监听模式: {listen_desc} | 平台: {platform_desc}\n"
+        f"[{now_ms}] 轮询策略: 每 {int(apt.get('check_interval') or 10)} 秒嗅探，整分 00 秒准点对齐\n"
+        f"[{now_ms}] 监听时段: {apt.get('start_time') or '即刻'} 至 {apt.get('until_time') or '23:59'}\n"
+        f"[{now_ms}] 卡券与红包: {rp_desc} | 超前抢单券: {'开启' if apt.get('use_advance_card') else '关闭'}\n"
+        f"[{now_ms}] 执行账号: 【{account.get('nick_name') or account_key}】，任务已重新装载入调度队列"
+    )
+    log_id = 0
+    try:
+        log_id = db.add_job_log(job_id, account_key, "store_monitor", "running", s_log)
+    except Exception as e:
+        logger.warning(f"启动监听任务写入运行日志失败: {e}")
+
     db.update_appointment(aid, {
         "is_saved": 0,
-        "status": "monitoring",
+        "status": target_status,
         "outcome": "",
         "last_checked_at": "",
         "notified_31m": 0,
         "notified_1m": 0,
+        "log_id": log_id or int(apt.get("log_id") or 0),
     })
-    from ..core.appointment_worker import invalidate_worker_cache
+    from ..core.appointment_worker import invalidate_worker_cache, clear_appointment_stopped
+    clear_appointment_stopped(aid)
     invalidate_worker_cache()
-    return {"ok": True, "message": "抢单监听任务已启动"}
+    return {"ok": True, "message": "抢单监听任务已启动", "log_id": log_id}
 
 
 @router.delete("/store/appointments/{aid}")

@@ -16,7 +16,17 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List, Set
 
 from ..models import database as db
-from ..protocol.client import XiaoCanClient, XiaoCanRPCError, is_waf_blocked, get_waf_cooldown_seconds, format_waf_block_message, waf_account_key, normalize_meal_ticket_error
+from ..protocol.client import (
+    XiaoCanClient,
+    XiaoCanRPCError,
+    DUPLICATE_PARTICIPATION_MESSAGE,
+    is_duplicate_participation_error,
+    is_waf_blocked,
+    get_waf_cooldown_seconds,
+    format_waf_block_message,
+    waf_account_key,
+    normalize_meal_ticket_error,
+)
 from .scheduler import mark_task_started, mark_task_finished
 from .notifier import send_system_notification
 from .notification import NotificationEvent, NotificationLevel
@@ -36,23 +46,8 @@ _STORE_CATEGORY_IDS: Dict[str, int] = {
     "饮品": 10,
     "鲜花绿植": 11,
     "地方菜系": 12,
+    "面包甜点": 3,
 }
-
-_STORE_CATEGORY_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "火锅烧烤": ("火锅烧烤", "火锅烤肉"),
-    "包子粥铺": ("包子粥铺", "包子", "粥铺"),
-    "快餐简餐": ("快餐简餐", "快餐", "简餐"),
-    "饮品": ("饮品",),
-    "地方菜系": ("地方菜系",),
-    "小吃": ("小吃",),
-    "全球美食": ("全球美食",),
-    "面包甜点": ("面包甜点",),
-    "生鲜果蔬": ("生鲜果蔬",),
-    "医药健康": ("医药健康",),
-    "零售百货": ("零售百货",),
-    "鲜花绿植": ("鲜花绿植",),
-}
-
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
@@ -149,9 +144,35 @@ _cached_accounts: Dict[str, Any] = {}
 # 任务运行时内存日志追踪 (避免高频写库，同时保留完整执行流水)
 _apt_poll_counters: Dict[int, int] = {}
 _apt_runtime_logs: Dict[int, list] = {}
+_stopped_appointment_ids: Set[int] = set()
+
+
+def mark_appointment_stopped(aid: int) -> None:
+    """用户主动停止时立即打标，拦截已进入 await 的当前嗅探轮次。"""
+    if not aid:
+        return
+    _stopped_appointment_ids.add(int(aid))
+    _apt_runtime_logs.pop(int(aid), None)
+    _apt_poll_counters.pop(int(aid), None)
+
+
+def clear_appointment_stopped(aid: int) -> None:
+    """重新启动同一任务时清除停止标记。"""
+    if aid:
+        _stopped_appointment_ids.discard(int(aid))
+
+
+def _is_appointment_stopped(aid: Any) -> bool:
+    try:
+        return int(aid or 0) in _stopped_appointment_ids
+    except (TypeError, ValueError):
+        return False
+
 
 def _append_apt_log(aid: int, log_id: int, text: str, sync_db: bool = False, status: Optional[str] = None):
     """追加任务步骤日志并有策略地同步回 SQLite 数据库"""
+    if _is_appointment_stopped(aid):
+        return
     if aid not in _apt_runtime_logs:
         _apt_runtime_logs[aid] = []
     _apt_runtime_logs[aid].append(text)
@@ -281,6 +302,8 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
     aid = apt.get("id") or 0
     account_key = apt.get("account_key") or account.get("key", "")
     nickname = account.get("nick_name") or ""
+    if _is_appointment_stopped(aid):
+        return {"ok": False, "code": -9, "message": "任务已停止，取消抢单"}
     if not db.has_valid_location(account):
         err_msg = f"账号【{nickname}】尚未绑定有效定位地址，请先在账号设置中绑定地址后再试"
         if aid:
@@ -627,6 +650,8 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
                 except Exception:
                     pass
             normalized_msg = normalize_meal_ticket_error(e.code, e.msg)
+            if is_duplicate_participation_error(e.code, e.msg):
+                normalized_msg = DUPLICATE_PARTICIPATION_MESSAGE
             await _notify_grab_failure(apt, account, normalized_msg, action_source)
             return {"ok": False, "code": e.code, "message": normalized_msg}
         except Exception as e:
@@ -676,6 +701,8 @@ async def process_active_appointments() -> Tuple[bool, bool]:
 
     for apt in active_list:
         aid = apt["id"]
+        if _is_appointment_stopped(aid):
+            continue
         status = apt.get("status")
         task_type = apt.get("task_type") or "countdown"
         acc_key = apt["account_key"]
@@ -714,10 +741,22 @@ async def process_active_appointments() -> Tuple[bool, bool]:
         # ---------------- 分支一：店名抢单监听与智能嗅探 (name_monitor / keyword) ---------------- #
         if task_type in ("name_monitor", "keyword", "keyword_monitor"):
             linked_log_id = int(apt.get("log_id") or 0)
-            # 1. 检查是否达到开始时间
+            # 1. 检查是否达到开始时间；scheduled 到点后自动转为 monitoring
             start_ts = _parse_time_today(apt.get("start_time"))
             if start_ts and now_ts < start_ts:
                 continue
+            if str(apt.get("status") or "") != "monitoring":
+                db.update_appointment(aid, {"status": "monitoring", "outcome": ""})
+                apt["status"] = "monitoring"
+                invalidate_worker_cache()
+                if linked_log_id > 0:
+                    _append_apt_log(
+                        aid,
+                        linked_log_id,
+                        f"[{time_service.format_now_ms()}] 已到达设定抢单时间，任务状态由 scheduled 转为 monitoring，开始高频嗅探",
+                        sync_db=True,
+                        status="running",
+                    )
 
             # 2. 检查是否超过截止时间
             until_ts = _parse_time_today(apt.get("until_time"))
@@ -732,6 +771,23 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     t_now = time_service.format_now_ms()
                     _append_apt_log(aid, linked_log_id, f"[{t_now}] 抢单监听截止时间到达 ({apt.get('until_time')})，监听任务自动结束", sync_db=True, status="error")
                 continue
+
+            # 2.5 同一商家今日内不可重复参与活动：已报名/审核中/已完成的商家直接判失败并停止监听
+            listen_mode = apt.get("listen_mode") or "store"
+            kw = (apt.get("keyword") or "").strip() if listen_mode == "store" else ""
+            if listen_mode == "store" and kw:
+                try:
+                    from ..api.endpoints import _has_today_store_participation
+                    if _has_today_store_participation(account_key, kw):
+                        dup_msg = DUPLICATE_PARTICIPATION_MESSAGE
+                        db.update_appointment(aid, {"status": "failed", "outcome": dup_msg})
+                        invalidate_worker_cache()
+                        if linked_log_id > 0:
+                            _append_apt_log(aid, linked_log_id, f"[{time_service.format_now_ms()}] {dup_msg}，监听任务已终止", sync_db=True, status="error")
+                        await _notify_grab_failure(apt, account, dup_msg, "store_monitor")
+                        continue
+                except Exception as dup_err:
+                    logger.debug(f"重复参与校验异常: {dup_err}")
 
             # 3. 检查频率与每分钟 00 秒准点放单对齐机制
             # 算法核心：无论设置的轮询频率为何值，从 00:00 开始的每 1 分钟整点 (00秒) 均保证进行一次嗅探
@@ -764,10 +820,10 @@ async def process_active_appointments() -> Tuple[bool, bool]:
             # 防风控随机微抖动：准点对齐嗅探零延迟直射开火，常规轮询时微抖动 0.05~0.15s
             if not is_on_minute_probe:
                 await asyncio.sleep(random.uniform(0.05, 0.15))
+            if _is_appointment_stopped(aid):
+                continue
 
-            listen_mode = apt.get("listen_mode") or "store"
             monitor_label = "常规监听" if listen_mode == "general" else "抢单监听"
-            kw = (apt.get("keyword") or "").strip() if listen_mode == "store" else ""
             match_mode = apt.get("match_mode") or "contains"
             activity_requirement = apt.get("activity_requirement") or "all"
             target_plat = apt.get("platform") or "all"
@@ -871,11 +927,11 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     ]
                     feed_bodies: List[Dict[str, Any]] = []
                     if category_ids:
-                        # 高返利与满返差额任一命中即可：两类候选都要进入本地筛选
-                        for cid in category_ids:
-                            feed_bodies.append({"promotion_category": cid, "quick_filters": []})
-                            if high_rebate_only:
-                                feed_bodies.append({"promotion_category": cid, "quick_filters": [4]})
+                        # 官方商家分类是 store_sub_categories，不是 promotion_category。
+                        # 多个分类一次性作为数组传入，避免把子分类ID错误投递到活动分类字段。
+                        feed_bodies.append({"store_sub_categories": category_ids, "quick_filters": []})
+                        if high_rebate_only:
+                            feed_bodies.append({"store_sub_categories": category_ids, "quick_filters": [4]})
                     else:
                         feed_bodies.append({"quick_filters": []})
                         if high_rebate_only:
@@ -902,8 +958,12 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         ]
                     except Exception as feed_err:
                         logger.debug(f"官方Feed筛选调用跳过: {feed_err}")
+                    if _is_appointment_stopped(aid):
+                        continue
 
                 results = await asyncio.gather(*search_tasks, return_exceptions=True)
+                if _is_appointment_stopped(aid):
+                    continue
                 search_res = results[0] if len(results) > 0 and not isinstance(results[0], Exception) else {}
                 sj_res = results[1] if has_sj and len(results) > 1 and not isinstance(results[1], Exception) else {}
 
@@ -930,7 +990,7 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                 matched_store_names = set()
                 kw_lower = kw.lower()
                 strict_store_key = _normalize_store_match_name(kw) if _is_exact_store_name_query(kw) else ""
-                seen_candidates = set()
+                seen_candidates: Dict[tuple, Dict[str, Any]] = {}
                 deduped_candidates = []
                 for c in candidates:
                     if not isinstance(c, dict):
@@ -941,8 +1001,16 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         str(c.get("promotion_id") or "")
                     )
                     if dedup_key in seen_candidates:
+                        # 搜索结果可能缺少官方子分类ID，Feed结果通常带有该字段；
+                        # 同一活动去重时优先保留信息更完整的候选，避免分类过滤误判。
+                        existing = seen_candidates[dedup_key]
+                        existing_has_subtype = _as_int(existing.get("store_category_sub_type") or 0) > 0
+                        current_has_subtype = _as_int(c.get("store_category_sub_type") or 0) > 0
+                        if not existing_has_subtype and current_has_subtype:
+                            deduped_candidates[deduped_candidates.index(existing)] = c
+                            seen_candidates[dedup_key] = c
                         continue
-                    seen_candidates.add(dedup_key)
+                    seen_candidates[dedup_key] = c
                     deduped_candidates.append(c)
                 candidates = deduped_candidates
 
@@ -1006,21 +1074,21 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     if min_rebate_rate > 0 and c_rebate_rate < min_rebate_rate:
                         continue
 
-                    # 官方Feed分类：支持多选，任一分类命中即可
+                    # 商家分类只认官方 store_category_sub_type；xc_category 文案不参与过滤。
+                    # 官方搜索/赏金结果若没有子分类ID，则跳过该候选，避免误抢跨分类商家。
                     if store_category:
                         selected_categories = [
                             item.strip()
                             for item in re.split(r'[,，;；]', str(store_category))
                             if item.strip()
                         ]
-                        c_store_category = str(c.get("store_category") or "")
-                        category_hit = False
-                        for item in selected_categories:
-                            aliases = _STORE_CATEGORY_ALIASES.get(item, (item,))
-                            if any(alias in c_store_category for alias in aliases):
-                                category_hit = True
-                                break
-                        if not category_hit:
+                        selected_ids = {
+                            _STORE_CATEGORY_IDS[item]
+                            for item in selected_categories
+                            if item in _STORE_CATEGORY_IDS
+                        }
+                        c_sub_type = _as_int(c.get("store_category_sub_type") or 0)
+                        if c_sub_type <= 0 or c_sub_type not in selected_ids:
                             continue
 
                     # 6. 最高起送/门槛金额
@@ -1112,7 +1180,11 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     grab_apt["rebate_desc"] = rebate_label
                     grab_apt["rebate_type"] = best_item.get("rebate_type", "fixed")
 
+                    if _is_appointment_stopped(aid):
+                        continue
                     res = await execute_grab_for_appointment(grab_apt, account, advance=is_adv, action_source="store_monitor")
+                    if _is_appointment_stopped(aid):
+                        continue
                     t_grab = time_service.format_now_ms()
                     if res.get("ok"):
                         succ_msg = f"抢单成功: 【{store_label}】{rebate_label}"
@@ -1136,8 +1208,17 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         if res.get("code") in (403, 429) or "STGW" in str(fail_msg) or "WAF" in str(fail_msg):
                             _stop_appointment_on_waf(aid, apt, linked_log_id, _waf_key, phase="抢单监听抢单")
                             continue
+                        if is_duplicate_participation_error(res.get("code"), fail_msg):
+                            # 同一商家今日内无法重复参与活动：任务直接判失败，不再继续监听
+                            dup_msg = DUPLICATE_PARTICIPATION_MESSAGE
+                            db.update_appointment(aid, {"status": "failed", "outcome": dup_msg})
+                            invalidate_worker_cache()
+                            if linked_log_id > 0:
+                                _append_apt_log(aid, linked_log_id, f"[{t_grab}] {dup_msg}", sync_db=True, status="error")
+                            await _notify_grab_failure(apt, account, dup_msg, "store_monitor")
+                            continue
                         if res.get("code") == 401 or "401" in str(fail_msg):
-                            db.update_appointment(aid, {"status": "error", "outcome": fail_msg})
+                            db.update_appointment(aid, {"status": "failed", "outcome": fail_msg})
                             invalidate_worker_cache()
                             if linked_log_id > 0:
                                 _append_apt_log(aid, linked_log_id, f"[{t_grab}] 账号鉴权失效: {fail_msg}，任务已自动终止，请在「账号管理」中更新Token", sync_db=True, status="error")
@@ -1167,11 +1248,13 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         _append_apt_log(aid, linked_log_id, step_str, sync_db=(poll_cnt == 1 or poll_cnt % 3 == 0 or is_on_minute_probe), status="running")
 
             except Exception as se:
+                if _is_appointment_stopped(aid):
+                    continue
                 logger.warning(f"抢单监听 #{aid} 执行异常: {se}")
                 is_401 = (getattr(se, "code", None) == 401) or ("401" in str(se) and "Unauthorized" in str(se))
                 if is_401:
                     err_msg = getattr(se, "msg", None) or "登录凭据已过期或鉴权失效 (HTTP 401 Unauthorized)"
-                    db.update_appointment(aid, {"status": "error", "outcome": err_msg})
+                    db.update_appointment(aid, {"status": "failed", "outcome": err_msg})
                     invalidate_worker_cache()
                     if linked_log_id > 0:
                         t_err = time_service.format_now_ms()
@@ -1247,18 +1330,29 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     latitude=float(account["latitude"]),
                     longitude=float(account["longitude"])
                 )
+                if _is_appointment_stopped(aid):
+                    continue
                 pdetail = detail.get("promotion_detail") or {}
-                category_text = str(pdetail.get("xc_category") or "")
+                detail_store = pdetail.get("store") or {}
+                category_text = str(pdetail.get("xc_category") or detail_store.get("xc_category") or "")
                 selected_categories = [
                     item.strip()
                     for item in re.split(r'[,，;；]', store_category)
                     if item.strip()
                 ]
-                category_hit = not selected_categories or any(
-                    alias in category_text
+                selected_ids = {
+                    _STORE_CATEGORY_IDS[item]
                     for item in selected_categories
-                    for alias in _STORE_CATEGORY_ALIASES.get(item, (item,))
+                    if item in _STORE_CATEGORY_IDS
+                }
+                c_sub_type = _as_int(
+                    pdetail.get("store_category_sub_type")
+                    or pdetail.get("category_sub_type")
+                    or detail_store.get("store_category_sub_type")
+                    or detail_store.get("category_sub_type")
+                    or 0
                 )
+                category_hit = not selected_categories or (c_sub_type > 0 and c_sub_type in selected_ids)
                 if not category_hit:
                     continue
                 if high_rebate_only or min_rebate_price > 0 or min_rebate_gap > 0:
@@ -1288,6 +1382,8 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                     latitude=float(account["latitude"]),
                     longitude=float(account["longitude"])
                 )
+                if _is_appointment_stopped(aid):
+                    continue
                 pdetail = detail.get("promotion_detail") or {}
                 mt_left = pdetail.get("meituan_left_number", 0)
                 ele_left = pdetail.get("eleme_left_number", 0)
@@ -1336,7 +1432,11 @@ async def process_active_appointments() -> Tuple[bool, bool]:
                         logger.info(f"监听任务 #{aid} 捕获到名额放单 (剩余: {target_left})！{adv_tag}立即触发闪电抢单...")
                         if linked_log_id > 0:
                             _append_apt_log(aid, linked_log_id, fire_str, sync_db=True, status="running")
+                        if _is_appointment_stopped(aid):
+                            continue
                         res = await execute_grab_for_appointment(apt, account, advance=is_adv, action_source="store_monitor")
+                        if _is_appointment_stopped(aid):
+                            continue
                         if not res["ok"]:
                             fail_msg = res.get("message") or "抢单失败"
                             logger.warning(f"监听捕获后抢单失败: {fail_msg}")

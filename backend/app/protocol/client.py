@@ -414,6 +414,20 @@ def register_shangjin_poi_dict(poi: Dict[str, Any], meituan_pv_id: str = "") -> 
             register_shangjin_event_meta(plan.get("poi_event_id"), wid, pvid, sname)
 
 
+DUPLICATE_PARTICIPATION_MESSAGE = "同一个商家今日内无法重复参与活动"
+
+
+def is_duplicate_participation_error(code: Optional[int], msg: Any) -> bool:
+    """识别官方「同一商家今日内不可重复参与活动」类错误。"""
+    text = str(msg or "")
+    if any(k in text for k in (
+        "重复参与", "已参与过", "已报名", "不可重复", "无法重复",
+        "同一商家", "同一活动", "重复报名", "今日已参与",
+    )):
+        return True
+    return code in (40017, 40052, 40063)
+
+
 def normalize_meal_ticket_error(code: Optional[int], msg: Any) -> str:
     """将官方「卡券/饭票不足」类错误统一成业务可识别文案。"""
     text = str(msg or "")
@@ -1187,7 +1201,8 @@ class XiaoCanClient:
         scene: int = 2,
         meal_period: int = 3,
         quick_filters: Optional[List[int]] = None,
-        promotion_category: int = 0
+        promotion_category: int = 0,
+        store_sub_categories: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """获取外卖霸王餐附近店铺清单 (优先调用官方核心推荐 SilkwormFusion.FusionService.GetFeedPromotions，回落 RecService.GetStorePromotionList)"""
         # 1. 优先调用官方主页核心推荐 (GetFeedPromotions)
@@ -1207,6 +1222,8 @@ class XiaoCanClient:
             "rebate_type": 0,
             "quick_filters": list(quick_filters or []),
         }
+        if store_sub_categories:
+            fusion_body["store_sub_categories"] = [int(x) for x in store_sub_categories]
         try:
             res = await self.invoke_rpc(
                 server_name="SilkwormFusion",
@@ -1225,7 +1242,17 @@ class XiaoCanClient:
                         register_shangjin_poi_dict(item, meituan_pv_id=pv)
                 return res
         except Exception as e:
+            if store_sub_categories:
+                # 官方分类筛选失败时不能降级到不支持 store_sub_categories 的 RecService，
+                # 否则会返回全分类候选，造成误抢。
+                logger.warning(f"GetFeedPromotions 分类筛选调用异常: {e}")
+                raise
             logger.warning(f"GetFeedPromotions 调用异常，尝试切换至 RecService: {e}")
+
+        if store_sub_categories:
+            if not isinstance(res, dict) or "feed_items" not in res:
+                logger.warning("GetFeedPromotions 分类筛选返回无效数据，停止执行")
+                raise XiaoCanRPCError(code=-1, msg="官方分类筛选接口返回无效数据")
 
         # 2. 备选调用官方多平台聚合推荐 (GetStorePromotionList)
         rec_body = {

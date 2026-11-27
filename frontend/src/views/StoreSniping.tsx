@@ -697,6 +697,7 @@ export const StoreSniping: React.FC = () => {
   const [dualFixedScanned, setDualFixedScanned] = useState(0);
   const [dualPercentScanned, setDualPercentScanned] = useState(0);
   const [dualSearchKeyword, setDualSearchKeyword] = useState('');
+  const [dualCacheUpdatedAt, setDualCacheUpdatedAt] = useState('');
   const [dualMaxFixed, setDualMaxFixed] = useState<number>(() => {
     try {
       const cached = localStorage.getItem('xiaocan_dual_max_fixed');
@@ -959,6 +960,42 @@ export const StoreSniping: React.FC = () => {
     }
   }, { scope: mainContainerRef, dependencies: [platformFilter, rebateTypeFilter, conditionFilter, sortBy] });
 
+  const applyDualResult = useCallback((res: any, fromCache: boolean) => {
+    const sorted = (res.stores || []).slice().sort((a: StoreItem, b: StoreItem) => {
+      const da = a.distance && a.distance > 0 ? a.distance : 9999999;
+      const db = b.distance && b.distance > 0 ? b.distance : 9999999;
+      return da - db;
+    });
+    setDualStores(sorted);
+    setDualTotalPromos(res.total_scanned_promotions || 0);
+    setDualTotalStores(res.total_scanned_stores || 0);
+    setDualFixedScanned(res.fixed_scanned_stores || 0);
+    setDualPercentScanned(res.percent_scanned_stores || 0);
+    setDualScanDone(true);
+    if (fromCache) {
+      setDualCacheUpdatedAt(res.updated_at || '');
+    } else {
+      setDualCacheUpdatedAt(res.updated_at || '');
+    }
+    return sorted;
+  }, []);
+
+  // 进入同店双返列表时优先复用自动监控任务的扫描缓存，避免重复手动扫描触发接口风控
+  const loadDualCache = useCallback(async (silent = false) => {
+    if (!currentAccountKey) return;
+    try {
+      const res = await api.getDualRebateCache(currentAccountKey);
+      if (res.ok && res.has_cache && (res.stores || []).length > 0) {
+        const sorted = applyDualResult(res, true);
+        if (!silent) {
+          Toast.success(`已复用同店双返监控缓存：${sorted.length} 家（更新于 ${res.updated_at || '未知时间'}），点击「重新扫描」可刷新`);
+        }
+      }
+    } catch {
+      // 缓存读取失败静默忽略，用户仍可手动扫描
+    }
+  }, [currentAccountKey, applyDualResult]);
+
   const handleTriggerDualScan = async (customFixed?: number, customPercent?: number, customKw?: string) => {
     if (accounts.length === 0) {
       Toast.warning('请先绑定或选择账号');
@@ -987,17 +1024,7 @@ export const StoreSniping: React.FC = () => {
         delay_max: Math.max(dualDelayMin, dualDelayMax)
       });
       if (res.ok) {
-        const sorted = (res.stores || []).slice().sort((a: StoreItem, b: StoreItem) => {
-          const da = a.distance && a.distance > 0 ? a.distance : 9999999;
-          const db = b.distance && b.distance > 0 ? b.distance : 9999999;
-          return da - db;
-        });
-        setDualStores(sorted);
-        setDualTotalPromos(res.total_scanned_promotions || 0);
-        setDualTotalStores(res.total_scanned_stores || 0);
-        setDualFixedScanned(res.fixed_scanned_stores || 0);
-        setDualPercentScanned(res.percent_scanned_stores || 0);
-        setDualScanDone(true);
+        const sorted = applyDualResult(res, false);
         Toast.success(res.message || `扫描完成：已筛选出 ${sorted.length} 家同店多活动/双福利商户`);
       } else {
         Toast.error(res.message || '商户扫描失败');
@@ -1483,6 +1510,20 @@ export const StoreSniping: React.FC = () => {
       fetchStores();
     }
   }, { throttleMs: 3000 });
+
+  // 切入「同店双返」分栏时，若尚无数据则优先复用监控任务扫描缓存（避免重复手动扫描）
+  useEffect(() => {
+    if (activeTabKey !== 'dual_rebate') return;
+    if (dualScanDone || dualStores.length > 0) return;
+    void loadDualCache(true);
+  }, [activeTabKey, dualScanDone, dualStores.length, loadDualCache]);
+
+  // 切换账号时清空旧缓存数据，等待新账号的缓存或重新扫描
+  useEffect(() => {
+    setDualStores([]);
+    setDualScanDone(false);
+    setDualCacheUpdatedAt('');
+  }, [currentAccountKey]);
 
   // 当处于「预约监听」Tab 且存在进行中的任务时，启动轻量 4 秒静默自动轮询更新任务状态
   useEffect(() => {
@@ -2026,7 +2067,7 @@ export const StoreSniping: React.FC = () => {
       setNameMonitorSaveMode(false);
       await fetchAppointments(true);
     } catch (err: any) {
-      Toast.error(err?.message || '保存抢单监听配置失败');
+      Toast.error(err?.response?.data?.detail || err?.message || '保存抢单监听配置失败');
     } finally {
       setNameMonitorSubmitting(false);
     }
@@ -3102,6 +3143,35 @@ export const StoreSniping: React.FC = () => {
           );
         }
         const isActive = ['monitoring', 'scheduled', 'primed', 'pending'].includes(row.status);
+        const canRestart = ['cancelled', 'expired', 'failed', 'error'].includes(row.status);
+        if (canRestart) {
+          return (
+            <div className="flex items-center gap-1 flex-wrap">
+              <Button
+                theme="solid"
+                type="primary"
+                size="small"
+                loading={startingMonitorId === row.id}
+                onClick={() => handleStartMonitor(row)}
+              >
+                启动
+              </Button>
+              {row.task_type === 'name_monitor' && (
+                <Button
+                  theme="light"
+                  type="primary"
+                  size="small"
+                  onClick={() => handleEditMonitor(row)}
+                >
+                  编辑
+                </Button>
+              )}
+              <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
+                <Button theme="borderless" type="tertiary" size="small">删除</Button>
+              </Popconfirm>
+            </div>
+          );
+        }
         if (isActive) {
           if (row.status === 'monitoring') {
             return (
@@ -3872,9 +3942,14 @@ export const StoreSniping: React.FC = () => {
               ) : (
                 <>
                   <div className="store-table-subheader flex-shrink-0 px-4 py-2.5 border-b border-semi-color-border bg-semi-color-fill-0 flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-xs">
+                    <div className="flex items-center gap-2 text-xs flex-wrap">
                       <Tag color="amber" size="small">美团外卖专享</Tag>
                       <Tag color="blue" size="small">距离最近</Tag>
+                      {dualCacheUpdatedAt && (
+                        <Tag color="green" size="small" type="light">
+                          监控缓存 {dualCacheUpdatedAt.slice(5, 16)}
+                        </Tag>
+                      )}
                       <span className="text-semi-color-text-1">
                         共检索 {dualTotalStores} 家商户（满返 {dualFixedScanned} / 比例 {dualPercentScanned}）、{dualTotalPromos} 个活动，筛选出 {dualStores.length} 家双返利店铺
                         {dualStores.length !== displayedDualStores.length && ` · 匹配 ${displayedDualStores.length} 家`}

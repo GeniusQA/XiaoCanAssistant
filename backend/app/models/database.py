@@ -193,6 +193,21 @@ def init_db():
     if "account_type" not in job_cols:
         c.execute("ALTER TABLE job_logs ADD COLUMN account_type TEXT DEFAULT ''")
 
+    # 历史修复：凭证彻底失效类日志的结果摘要曾被“冷却/自愈重试”过程日志抢占。
+    try:
+        stale_rows = c.execute("""
+            SELECT id, output, status
+            FROM job_logs
+            WHERE task_id = 'meituan_coupon'
+              AND (output LIKE '%凭证彻底失效%' OR output LIKE '%无法通过美团安全验证%')
+        """).fetchall()
+        for row in stale_rows:
+            fixed = summarize_job_result(row["output"] or "", row["status"] or "")
+            if fixed:
+                c.execute("UPDATE job_logs SET result = ? WHERE id = ?", (fixed, row["id"]))
+    except Exception:
+        pass
+
     # 历史日志账号快照回填：不依赖 output 文本猜测，只按真实账号表映射。
     try:
         c.execute("""
@@ -269,6 +284,16 @@ def init_db():
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
+    )
+    """)
+
+    # 5.1 同店双返扫描结果缓存表：供「活动抢单-同店双返」列表复用自动监控任务结果，避免重复手动扫描
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS dual_rebate_scan_cache (
+        account_key TEXT PRIMARY KEY,
+        payload TEXT,
+        updated_at TEXT,
+        updated_ts INTEGER DEFAULT 0
     )
     """)
 
@@ -1173,6 +1198,14 @@ def summarize_job_result(output: str, status: str = "") -> str:
         "今日已提现", "继续余额核验", "领取上限", "状态码 1014",
     )
     generic_keys = ("处理完毕", "执行完成 (无异常)", "开始执行")
+    # 终态失败优先：避免被前面的“冷却/自愈重试/候选池检测”等过程日志抢占结果摘要。
+    terminal_error_keys = (
+        "凭证彻底失效", "主凭据及历史候选池", "无法通过美团安全验证",
+        "状态码: 401", "状态码：401",
+    )
+    for line in reversed(lines):
+        if any(k in line for k in terminal_error_keys):
+            return clean(line)
 
     for line in reversed(lines):
         if any(k in line for k in error_keys):
@@ -1551,6 +1584,51 @@ def set_setting(key: str, value: Any):
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (key, json.dumps(value)))
         conn.commit()
+
+
+# ---------------- 同店双返扫描结果缓存 ---------------- #
+
+def save_dual_rebate_scan_cache(account_key: str, payload: Dict[str, Any]) -> None:
+    """保存账号最近一次同店双返扫描结果，供活动抢单列表直接复用。"""
+    if not account_key:
+        return
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO dual_rebate_scan_cache (account_key, payload, updated_at, updated_ts)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(account_key) DO UPDATE SET
+            payload = excluded.payload,
+            updated_at = excluded.updated_at,
+            updated_ts = excluded.updated_ts
+        """, (
+            account_key,
+            json.dumps(payload, ensure_ascii=False),
+            time_service.format_now_dt(),
+            time_service.now_int(),
+        ))
+        conn.commit()
+
+
+def get_dual_rebate_scan_cache(account_key: str) -> Optional[Dict[str, Any]]:
+    """读取账号最近一次同店双返扫描缓存；无缓存或已过期一天则返回 None。"""
+    if not account_key:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT payload, updated_at, updated_ts FROM dual_rebate_scan_cache WHERE account_key = ? LIMIT 1",
+            (account_key,)
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload["updated_at"] = row["updated_at"]
+    payload["updated_ts"] = int(row["updated_ts"] or 0)
+    return payload
 
 
 # ---------------- 设备协同接口 ---------------- #

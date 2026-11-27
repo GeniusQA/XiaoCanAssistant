@@ -519,7 +519,8 @@ export const OrdersView: React.FC = () => {
       Toast.success(res.message || '已开启名额监听');
       setMonitorOrder(null);
     } catch (e: any) {
-      Toast.error(`名额监听创建异常: ${e.response?.data?.detail || e.message || e}`);
+      const detail = e.response?.data?.detail || e.message || String(e);
+      Toast.error(detail);
     } finally {
       setMonitorSubmitting(false);
     }

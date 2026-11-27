@@ -205,7 +205,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
                 >
                   <Text
                     size="small"
-                    className={/403|429|WAF|STGW|STGM|风控|拦截|失败|异常|错误码|被拒绝|冷却|跳过|低于门槛|余额不足|元宝不足|资格拦截|未中签|未命中|售罄|已领完|名额已发完|名额已用完|无资格|不满足|未开通|未绑定/.test(String(activeLog?.result || '')) ? 'text-red-500' : ''}
+                    className={/401|403|429|WAF|STGW|STGM|风控|拦截|失败|失效|异常|错误码|被拒绝|冷却|跳过|低于门槛|余额不足|元宝不足|资格拦截|未中签|未命中|售罄|已领完|名额已发完|名额已用完|无资格|不满足|未开通|未绑定/.test(String(activeLog?.result || '')) ? 'text-red-500' : ''}
                   >
                     {String(activeLog?.result || '').trim() || '—'}
                   </Text>

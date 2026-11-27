@@ -1137,7 +1137,7 @@ export const Dashboard: React.FC = () => {
               />
             </div>
             <Text type="tertiary" size="small" className="text-xs block truncate">
-              待上传 <NumberAnimation to={orderStats.pending_orders} precision={0} refreshKey={dashboardRefreshKey} className="text-semi-color-text-1 font-medium" /> 单 · 预计2~24h
+              待上传/审核中 <NumberAnimation to={orderStats.pending_orders} precision={0} refreshKey={dashboardRefreshKey} className="text-semi-color-text-1 font-medium" /> 单 · 预计2~24h
             </Text>
           </Card>
         </div>
