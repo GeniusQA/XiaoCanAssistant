@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Account, UserInfo, LocationHistoryItem } from '../types';
-import { api } from '../api';
+import { api, coord6 } from '../api';
 
 export interface ActiveLocation {
   cityCode: number;
@@ -85,7 +85,7 @@ const persistLocationHistory = (items: LocationHistoryItem[]) => {
 };
 
 const locationHistoryKey = (loc: { longitude: string; latitude: string }) =>
-  `${Number(loc.longitude).toFixed(5)},${Number(loc.latitude).toFixed(5)}`;
+  `${coord6(loc.longitude) || ''},${coord6(loc.latitude) || ''}`;
 
 const getStoredCurrentAccountKey = (): string => {
   try {
@@ -281,7 +281,12 @@ export const useAppStore = create<AppState>((set, get) => {
     const key = locationHistoryKey(loc);
     const rest = get().locationHistory.filter((item) => locationHistoryKey(item) !== key);
     const next: LocationHistoryItem[] = [
-      { ...loc, usedAt: Date.now() },
+      {
+        ...loc,
+        longitude: coord6(loc.longitude) || loc.longitude,
+        latitude: coord6(loc.latitude) || loc.latitude,
+        usedAt: Date.now(),
+      },
       ...rest,
     ].slice(0, LOCATION_HISTORY_LIMIT);
     persistLocationHistory(next);

@@ -562,6 +562,9 @@ export const OrdersView: React.FC = () => {
     return { label: '美团外卖', color: 'orange' as const, avatarColor: 'orange' as const };
   };
 
+  // 官方 order_type=14 为通用大牌券报名生成的推广订单
+  const isBrandCouponOrder = (row?: Order) => Number(row?.order_type) === 14;
+
   const columns: ColumnProps<Order>[] = [
     {
       title: '店铺与小蚕单号',
@@ -582,7 +585,16 @@ export const OrdersView: React.FC = () => {
               {name?.[0] || '外'}
             </Avatar>
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 flex-wrap">
+              <Typography.Text
+                ellipsis={{ showTooltip: true }}
+                strong
+                className="block text-sm font-semibold text-semi-color-text-0 hover:text-semi-color-primary transition-colors cursor-pointer"
+                title="点击复制店铺名"
+                onClick={() => handleCopyText(name, '店铺名称')}
+              >
+                {name}
+              </Typography.Text>
+              <div className="flex items-center gap-1.5 flex-wrap mt-1">
                 <Tag color={platInfo.color} size="small" shape="square" className="flex-shrink-0">
                   {platInfo.label}
                 </Tag>
@@ -601,15 +613,11 @@ export const OrdersView: React.FC = () => {
                     {row.condition}
                   </Tag>
                 )}
-                <Typography.Text
-                  ellipsis={{ showTooltip: true }}
-                  strong
-                  className="text-sm font-semibold text-semi-color-text-0 hover:text-semi-color-primary transition-colors cursor-pointer"
-                  title="点击复制店铺名"
-                  onClick={() => handleCopyText(name, '店铺名称')}
-                >
-                  {name}
-                </Typography.Text>
+                {isBrandCouponOrder(row) && (
+                  <Tag color="amber" size="small" shape="square" className="text-[11px] !px-1.5">
+                    大牌券专享
+                  </Tag>
+                )}
               </div>
               <div className="flex items-center gap-1.5 mt-1 text-xs text-semi-color-text-2 font-mono">
                 <span className="truncate max-w-[190px]">单号: {row?.order_sn}</span>

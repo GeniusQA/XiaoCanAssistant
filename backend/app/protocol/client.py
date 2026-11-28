@@ -941,7 +941,9 @@ class XiaoCanClient:
         silk_id: Optional[str] = None,
         platform: Optional[str] = "app",
         is_burst: bool = False,
-        priority: int = 50
+        priority: int = 50,
+        app_id: Optional[int] = None,
+        app_sr: Optional[str] = None
     ) -> Dict[str, Any]:
         # 任务优先级天梯架构与熔断隔离策略：
         # Tier 1 (秒杀抢单 / 显式高优核心操作, is_burst=True 或 priority >= 70): 豁免本地熔断，直射直连；
@@ -970,7 +972,9 @@ class XiaoCanClient:
 
         payload = dict(body) if body else {}
         plat = (platform or "app").lower()
-        if plat == "mini":
+        if app_id is not None:
+            payload["app_id"] = int(app_id)
+        elif plat == "mini":
             payload["app_id"] = 20
         else:
             payload["app_id"] = 10
@@ -990,6 +994,8 @@ class XiaoCanClient:
                 platform=plat,
                 user_agent=(None if env_ua else profile_dict["user_agent"]),
                 profile_id=profile_dict["id"],
+                app_id=app_id,
+                app_sr=app_sr,
             )
             req_ua = headers.get("User-Agent", "")
             eng, sess = self._get_transport(profile_dict.get("transport_mode"))
@@ -1198,11 +1204,12 @@ class XiaoCanClient:
         user_id: Optional[str] = None,
         sort: int = 0,
         store_platform: int = 0,
-        scene: int = 2,
-        meal_period: int = 3,
+        scene: int = 1,
+        meal_period: int = 0,
         quick_filters: Optional[List[int]] = None,
         promotion_category: int = 0,
-        store_sub_categories: Optional[List[int]] = None
+        store_sub_categories: Optional[List[int]] = None,
+        distance_filter: Optional[int] = None
     ) -> Dict[str, Any]:
         """获取外卖霸王餐附近店铺清单 (优先调用官方核心推荐 SilkwormFusion.FusionService.GetFeedPromotions，回落 RecService.GetStorePromotionList)"""
         # 1. 优先调用官方主页核心推荐 (GetFeedPromotions)
@@ -1213,7 +1220,7 @@ class XiaoCanClient:
             "number": int(limit),
             "offset": int(offset),
             "sort": int(sort) if sort else 0,
-            "scene": 1,
+            "scene": int(scene or 1),
             "is_show_mt": True,
             "page_pv_id": str(uuid.uuid4()),
             "app_id": 10,
@@ -1224,6 +1231,8 @@ class XiaoCanClient:
         }
         if store_sub_categories:
             fusion_body["store_sub_categories"] = [int(x) for x in store_sub_categories]
+        if distance_filter:
+            fusion_body["distance_filter"] = int(distance_filter)
         try:
             res = await self.invoke_rpc(
                 server_name="SilkwormFusion",
@@ -1242,17 +1251,17 @@ class XiaoCanClient:
                         register_shangjin_poi_dict(item, meituan_pv_id=pv)
                 return res
         except Exception as e:
-            if store_sub_categories:
-                # 官方分类筛选失败时不能降级到不支持 store_sub_categories 的 RecService，
-                # 否则会返回全分类候选，造成误抢。
-                logger.warning(f"GetFeedPromotions 分类筛选调用异常: {e}")
+            if store_sub_categories or distance_filter:
+                # 官方分类/距离筛选失败时不能降级到不支持这些参数的 RecService，
+                # 否则会返回全量候选，造成筛选失效。
+                logger.warning(f"GetFeedPromotions 官方筛选调用异常: {e}")
                 raise
             logger.warning(f"GetFeedPromotions 调用异常，尝试切换至 RecService: {e}")
 
-        if store_sub_categories:
+        if store_sub_categories or distance_filter:
             if not isinstance(res, dict) or "feed_items" not in res:
-                logger.warning("GetFeedPromotions 分类筛选返回无效数据，停止执行")
-                raise XiaoCanRPCError(code=-1, msg="官方分类筛选接口返回无效数据")
+                logger.warning("GetFeedPromotions 官方筛选返回无效数据，停止执行")
+                raise XiaoCanRPCError(code=-1, msg="官方筛选接口返回无效数据")
 
         # 2. 备选调用官方多平台聚合推荐 (GetStorePromotionList)
         rec_body = {
@@ -1889,6 +1898,75 @@ class XiaoCanClient:
             user_id=user_id
         )
 
+    async def get_vip_gift_benefits(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0
+    ) -> Dict[str, Any]:
+        """获取会员「可领取权益」列表 (SilkwormMarketing.SilkwormMobileMarketingService.GetVipGiftBenefits)
+
+        响应 benefits[].claim_state=2 且 claimable_count>0 表示当前可领取。
+        """
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0
+        }
+        return await self.invoke_rpc(
+            server_name="SilkwormMarketing",
+            method_name="SilkwormMobileMarketingService.GetVipGiftBenefits",
+            body=body,
+            city_code=city_code,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id
+        )
+
+    # HAR 仅捕获了可领取权益列表，未捕获点击「领取」后的请求。
+    # 领取动作按同服务命名规则推断；仅在官方返回“方法不存在/未知方法”时切换候选，业务拒绝不重试。
+    VIP_GIFT_BENEFIT_CLAIM_METHODS = (
+        "SilkwormMobileMarketingService.ReceiveVipGiftBenefits",
+        "SilkwormMobileMarketingService.ClaimVipGiftBenefits",
+        "SilkwormMobileMarketingService.GrabVipGiftBenefits",
+    )
+
+    async def claim_vip_gift_benefit(
+        self,
+        token: str,
+        reward_key: str,
+        template_id: int = 0,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0
+    ) -> Dict[str, Any]:
+        """领取单项会员权益（延时券/单号修改券/超前抢单券/订单免审券等）"""
+        body = {
+            "silk_id": int(silk_id) if silk_id else 0,
+            "reward_key": reward_key,
+        }
+        if template_id:
+            body["template_id"] = int(template_id)
+
+        last_error: Optional[XiaoCanRPCError] = None
+        for method_name in self.VIP_GIFT_BENEFIT_CLAIM_METHODS:
+            try:
+                return await self.invoke_rpc(
+                    server_name="SilkwormMarketing",
+                    method_name=method_name,
+                    body=body,
+                    city_code=city_code,
+                    token=token,
+                    silk_id=silk_id,
+                    user_id=user_id
+                )
+            except XiaoCanRPCError as e:
+                last_error = e
+                msg = str(e.msg or "").lower()
+                unknown_method = any(k in msg for k in ("method", "not found", "unknown", "不存在", "未找到"))
+                if not unknown_method:
+                    raise
+        raise last_error or XiaoCanRPCError(code=500, msg="会员权益领取接口不可用")
+
     async def get_vip_task(
         self,
         token: str,
@@ -2227,19 +2305,21 @@ class XiaoCanClient:
 
     # ---------------- 官方独立 App 原生 VIP 特权与秒杀微服务 (VipRightsService) ---------------- #
 
-    # 1. 每月保底大牌券通道 (每月固定保底张数，如 SVIP6 每月 8 张保底，严禁在每日日常抢券定时任务中调用)
+    # 1. 每月保底大牌券通道 (用户确认属于会员可领取权益，已纳入 vip_rights_claim；服务端按等级/月额度自行限制)
     async def get_brand_card_info(
         self,
         token: str,
         silk_id: Optional[str] = None,
         user_id: Optional[str] = None,
         city_code: int = 0,
-        card_type: int = 1
+        limited_type: int = 0,
+        include_card_summary: bool = True
     ) -> Dict[str, Any]:
-        """查询每月保底 SVIP 大牌神券总额度与剩余保底配额 (SilkwormVip.VipRightsService.BrandCardInfo)"""
+        """查询每月保底大牌券额度与剩余配额 (SilkwormVip.VipRightsService.BrandCardInfo)"""
         body = {
             "silk_id": int(silk_id) if silk_id else 0,
-            "type": int(card_type)
+            "limited_type": int(limited_type),
+            "include_card_summary": bool(include_card_summary),
         }
         return await self.invoke_rpc(
             server_name="SilkwormVip",
@@ -2249,7 +2329,9 @@ class XiaoCanClient:
             token=token,
             silk_id=silk_id,
             user_id=user_id,
-            platform="app"
+            platform="app",
+            app_id=16,
+            app_sr="16"
         )
 
     async def grab_brand_card(
@@ -2260,7 +2342,7 @@ class XiaoCanClient:
         city_code: int = 0,
         card_type: int = 1
     ) -> Dict[str, Any]:
-        """手动领取每月保底 SVIP 大牌神券 (SilkwormVip.VipRightsService.GrabBrandCard - 注意：此接口直接扣减当月保底张数，日常定时任务绝不可调用！)"""
+        """领取每月保底大牌券 (SilkwormVip.VipRightsService.GrabBrandCard)"""
         body = {
             "silk_id": int(silk_id) if silk_id else 0,
             "type": int(card_type)
@@ -2273,7 +2355,9 @@ class XiaoCanClient:
             token=token,
             silk_id=silk_id,
             user_id=user_id,
-            platform="app"
+            platform="app",
+            app_id=16,
+            app_sr="16"
         )
 
     # 2. 每日 09:30 抢大牌券专属通道 (官方额外放量大牌券，独立库存，不扣减每月保底张数)
@@ -3359,7 +3443,9 @@ class XiaoCanClient:
         city_code: int = 0,
         status: int = 0,
         offset: int = 0,
-        number: int = 30
+        number: int = 30,
+        card_types: Optional[List[int]] = None,
+        card_ids: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """获取用户专属卡券与特权券列表 (SilkwormCardService.GetUserCardList, status: 0未使用, 1已使用, 2已过期)"""
         body = {
@@ -3369,6 +3455,10 @@ class XiaoCanClient:
             "number": int(number),
             "app_id": 10
         }
+        if card_types:
+            body["card_types"] = [int(x) for x in card_types]
+        if card_ids:
+            body["card_ids"] = [int(x) for x in card_ids]
         try:
             return await self.invoke_rpc(
                 server_name="SilkwormCard",
@@ -3382,6 +3472,111 @@ class XiaoCanClient:
         except Exception as e:
             logger.warning(f"GetUserCardList failed: {e}")
             return {"status": {"code": 0}, "list": []}
+
+    async def get_coupon_activities(
+        self,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0,
+        latitude: Optional[str] = None,
+        longitude: Optional[str] = None,
+        keyword: str = "",
+        page: int = 1,
+        page_size: int = 20,
+        f_id: int = 0,
+        activity_ids: Optional[List[int]] = None,
+        brands: Optional[List[Any]] = None,
+        categories: Optional[List[Any]] = None,
+        is_filter_top_brand: bool = False
+    ) -> Dict[str, Any]:
+        """获取通用大牌券可用的品牌活动列表 (TopBrandService.CouponActivities)。"""
+        # 官方该接口按城市级代码查询HAR 510108 -> 5101，保持与 App 请求一致。
+        activity_city_code = int(city_code or 0)
+        if activity_city_code > 9999:
+            activity_city_code = int(str(activity_city_code)[:4])
+        body = {
+            "page": int(page),
+            "page_size": int(page_size),
+            "city_code": activity_city_code,
+            "latitude": float(latitude) if latitude else 0.0,
+            "longitude": float(longitude) if longitude else 0.0,
+            "keywords": str(keyword or ""),
+            "f_id": int(f_id or 0),
+            "activity_ids": list(activity_ids or []),
+            "brands": list(brands or []),
+            "categories": list(categories or []),
+            "is_filter_top_brand": bool(is_filter_top_brand),
+            "silk_id": int(silk_id) if silk_id else 0,
+            "app_id": 10,
+        }
+        return await self.invoke_rpc(
+            server_name="TopBrand",
+            method_name="TopBrandService.CouponActivities",
+            body=body,
+            city_code=int(city_code or 0),
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id,
+        )
+
+    async def get_coupon_activity_detail(
+        self,
+        activity_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0,
+        latitude: Optional[str] = None,
+        longitude: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """获取单个大牌券活动详情，含品牌别名、门槛与已有报名订单。"""
+        body = {
+            "activity_id": int(activity_id),
+            "silk_id": int(silk_id) if silk_id else 0,
+            "lng": float(longitude) if longitude else 0.0,
+            "lat": float(latitude) if latitude else 0.0,
+        }
+        return await self.invoke_rpc(
+            server_name="TopBrand",
+            method_name="TopBrandService.ActivityDetail",
+            body=body,
+            city_code=int(city_code or 0),
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id,
+        )
+
+    async def sign_coupon_activity(
+        self,
+        activity_id: int,
+        brand_coupon_id: int,
+        token: str,
+        silk_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        city_code: int = 0,
+        latitude: Optional[str] = None,
+        longitude: Optional[str] = None,
+        card_type: int = 13
+    ) -> Dict[str, Any]:
+        """消耗通用大牌券报名活动并生成推广订单 (TopBrandService.ActivitySign)。"""
+        body = {
+            "activity_id": int(activity_id),
+            "brand_coupon_id": int(brand_coupon_id),
+            "card_type": int(card_type),
+            "lat": float(latitude) if latitude else 0.0,
+            "lng": float(longitude) if longitude else 0.0,
+            "silk_id": int(silk_id) if silk_id else 0,
+        }
+        return await self.invoke_rpc(
+            server_name="TopBrand",
+            method_name="TopBrandService.ActivitySign",
+            body=body,
+            city_code=int(city_code or 0),
+            token=token,
+            user_id=user_id,
+            silk_id=silk_id,
+        )
 
     async def use_user_card(
         self,

@@ -24,6 +24,7 @@ export const TASK_LABELS: Record<string, string> = {
   redpack_rain: '整点红包雨',
   flash_sale: '元宝秒杀抢券',
   vip_expand: '会员每日签到',
+  vip_rights_claim: '会员权益自动领取',
   brand_flash: '大牌畅享秒杀',
   svip_rebate: 'SVIP高额返利券',
   media_vip: '影音会员周卡',

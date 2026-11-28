@@ -36,6 +36,7 @@ _TASK_LABELS = {
     "daily": "元宝乐园综合打卡",
     "group_lottery": "免费开红包与抽奖",
     "vip_expand": "会员成长膨胀礼包",
+    "vip_rights_claim": "会员权益自动领取",
     "expire_remind": "登录凭据到期巡检",
     "coupon_remind": "卡券到期提醒",
     "auto_withdraw": "钱包余额自动提现",
@@ -172,6 +173,7 @@ TASK_PRIORITY = {
     "yb_task": 30,            # 轻松赚元宝
     "daily": 30,              # 打卡综合任务
     "vip_expand": 30,         # 会员成长膨胀礼包
+    "vip_rights_claim": 30,   # 会员权益自动领取
     "collect_points": 30,     # 收取未收元宝
     "group_lottery": 30,      # 免费开红包与抽奖
     "meituan_coupon": 30,     # 美团神券每日领取
@@ -196,6 +198,7 @@ TASK_DEFAULT_TIME = {
     "flash_sale": "09:00",      # 元宝秒杀 (每日三场: 09:00/14:00/18:00, 09:00遇返利券主动避让400ms)
     "group_lottery": "07:40",   # 免费开红包与抽奖
     "vip_expand": "08:30",      # 会员成长膨胀礼包
+    "vip_rights_claim": "08:40", # 会员权益自动领取 (错开 vip_expand 08:30 / coupon_remind 08:35)
     "expire_remind": "08:00",   # 登录凭据到期巡检
     "coupon_remind": "08:35",   # 卡券到期提醒 (错开 vip_expand 08:30)
     "auto_withdraw": "10:30",   # 自动提现 (错开 10:00 影音VIP / 10:05 红包雨)
@@ -548,6 +551,129 @@ async def execute_task_job(account_key: str, task_id: str, trigger_type: str = "
                 log_output += f"[{time_service.format_now()}] 会员成长任务: 状态正常\n"
             except Exception:
                 pass
+
+        elif task_id == "vip_rights_claim":
+            # 自动领取小蚕自营权益：订单免审/超前抢单/订单延时/修改订单号 (GetVipGiftBenefits) + 大牌券；影音会员走 media_vip；第三方跳转不处理
+            try:
+                benefits_res = await client.get_vip_gift_benefits(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                benefits = benefits_res.get("benefits") or []
+                claim_mode = benefits_res.get("claim_mode", "-")
+                log_output += f"[{time_service.format_now()}] 会员可领取权益: 共 {len(benefits)} 项 (官方领取模式 {claim_mode})\n"
+
+                claimable = [
+                    b for b in benefits
+                    if int(b.get("claim_state") or 0) == 2 and int(b.get("claimable_count") or 0) > 0
+                ]
+                if not claimable:
+                    log_output += f"[{time_service.format_now()}] 会员权益领取: 当前无可领取权益，已跳过\n"
+                else:
+                    claimed_parts = []
+                    for benefit in claimable:
+                        reward_key = str(benefit.get("reward_key") or "").strip()
+                        benefit_name = str(benefit.get("name") or reward_key or "未命名权益")
+                        template_id = int(benefit.get("template_id") or 0)
+                        if not reward_key:
+                            continue
+
+                        remaining = int(benefit.get("claimable_count") or 0)
+                        got_count = 0
+                        for _ in range(min(remaining, 8)):
+                            try:
+                                await client.claim_vip_gift_benefit(
+                                    token=token,
+                                    reward_key=reward_key,
+                                    template_id=template_id,
+                                    silk_id=silk_id,
+                                    user_id=user_id,
+                                    city_code=city_code,
+                                )
+                            except XiaoCanRPCError as ce:
+                                log_output += f"[{time_service.format_now()}] 会员权益领取【{benefit_name}】提示: {ce.msg} (代码: {ce.code})\n"
+                                if ce.code in (403, 429) or is_waf_blocked(_waf_key):
+                                    break
+                                break
+                            except Exception as e:
+                                log_output += f"[{time_service.format_now()}] 会员权益领取【{benefit_name}】异常: {e}\n"
+                                break
+
+                            # 领取后重新拉取列表，以官方剩余次数变化作为成功依据，避免重复领取
+                            try:
+                                fresh_res = await client.get_vip_gift_benefits(token=token, silk_id=silk_id, user_id=user_id, city_code=city_code)
+                                fresh_benefit = next(
+                                    (x for x in (fresh_res.get("benefits") or []) if str(x.get("reward_key") or "") == reward_key),
+                                    None,
+                                )
+                                fresh_remaining = int((fresh_benefit or {}).get("claimable_count") or 0)
+                                if fresh_remaining >= remaining:
+                                    log_output += f"[{time_service.format_now()}] 会员权益领取【{benefit_name}】请求成功但官方次数未变化，停止重复领取\n"
+                                    break
+                                got_count += remaining - fresh_remaining
+                                remaining = fresh_remaining
+                                if remaining <= 0:
+                                    break
+                            except Exception as e:
+                                log_output += f"[{time_service.format_now()}] 会员权益领取【{benefit_name}】复核异常: {e}\n"
+                                break
+                            await asyncio.sleep(0.12)
+
+                        if got_count > 0:
+                            claimed_parts.append(f"{benefit_name} x{got_count}")
+                            log_output += f"[{time_service.format_now()}] 会员权益领取成功: 【{benefit_name}】已领取 {got_count} 份\n"
+
+                    # 大牌券属于会员可领取权益，按官方 BrandCardInfo / GrabBrandCard 通道领取
+                    try:
+                        brand_res = await client.get_brand_card_info(
+                            token=token, silk_id=silk_id, user_id=user_id, city_code=city_code
+                        )
+                        brand_info = brand_res.get("info") or {}
+                        pools = [
+                            p for p in (brand_info.get("pools") or [])
+                            if int(p.get("type") or 0) == 1 and p.get("has_inventory")
+                        ]
+                        level = int(benefits_res.get("new_level") or 0)
+                        is_plus = bool(benefits_res.get("is_plus"))
+                        quota = next(
+                            (int(n.get("num") or 0) for n in (brand_info.get("nums") or [])
+                             if int(n.get("vip_level") or 0) == level and bool(n.get("is_plus")) == is_plus),
+                            0,
+                        )
+                        used = int(brand_info.get("user_month_num") or 0)
+                        level_desc = f"{'SVIP' if is_plus else 'VIP'}{level}"
+                        log_output += (
+                            f"[{time_service.format_now()}] 大牌券额度: {level_desc} 本月 {used}/{quota} 张，"
+                            f"可售库存池 {len(pools)} 个\n"
+                        )
+                        if not pools:
+                            log_output += f"[{time_service.format_now()}] 大牌券领取: 当前无可售库存，已跳过\n"
+                        else:
+                            grab_res = await client.grab_brand_card(
+                                token=token, silk_id=silk_id, user_id=user_id, city_code=city_code
+                            )
+                            grab_info = grab_res.get("info") or {}
+                            grab_code = int((grab_res.get("status") or {}).get("code") or 0)
+                            if grab_code == 0 and grab_info.get("card_id"):
+                                claimed_parts.append("大牌券 x1")
+                                log_output += (
+                                    f"[{time_service.format_now()}] 大牌券领取成功: card_id={grab_info.get('card_id')}\n"
+                                )
+                            else:
+                                log_output += (
+                                    f"[{time_service.format_now()}] 大牌券领取未成功: 代码 {grab_code}，"
+                                    f"信息 {grab_res.get('status') or {}}\n"
+                                )
+                    except XiaoCanRPCError as e:
+                        log_output += f"[{time_service.format_now()}] 大牌券领取失败: {e.msg} (代码: {e.code})\n"
+                    except Exception as e:
+                        log_output += f"[{time_service.format_now()}] 大牌券领取异常: {e}\n"
+
+                    if claimed_parts:
+                        log_output += f"[{time_service.format_now()}] 会员权益领取汇总: {'; '.join(claimed_parts)}\n"
+                    else:
+                        log_output += f"[{time_service.format_now()}] 会员权益领取: 本轮未产生实际领取\n"
+            except XiaoCanRPCError as e:
+                log_output += f"[{time_service.format_now()}] 会员权益列表获取失败: {e.msg} (代码: {e.code})\n"
+            except Exception as e:
+                log_output += f"[{time_service.format_now()}] 会员权益领取异常: {e}\n"
 
         elif task_id == "group_lottery":
             # 1. 查询转盘配置与当前状态

@@ -223,6 +223,30 @@ export interface StorePromotion {
   end_date_timestamp?: number;
 }
 
+export interface BrandCouponActivity {
+  activity_id: number;
+  activity_type?: number;
+  brand_id?: number;
+  brand_name?: string;
+  brand_names?: string | string[];
+  brand_logo?: string;
+  goods_name?: string;
+  goods_pic?: string;
+  min?: number;
+  benefit?: number;
+  platform?: number;
+  grab_start_time?: number;
+  grab_end_time?: number;
+  opening_hours?: string;
+  category_id?: number;
+  coupon_brand_match?: string;
+  brand_order?: {
+    promotion_order_id?: number;
+    order_status?: number;
+    order_time?: number;
+  };
+}
+
 export interface StoreItem {
   store_id: string;
   name: string;

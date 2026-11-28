@@ -43,6 +43,7 @@ export const TaskIcon: React.FC<TaskIconProps> = ({ taskId, className = 'w-9 h-9
         <svg viewBox="0 0 48 48" aria-hidden="true" className={className} style={style}><circle cx="24" cy="24" r="17" fill="#ff8a1a"/><circle cx="24" cy="24" r="12" fill="#fff"/><path d="M24 12v12l8 4" fill="none" stroke="#ff8a1a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/><circle cx="24" cy="24" r="2.5" fill="#ff8a1a"/><path d="M24 8l2 4h-4l2-4zm12 16l-4 2v-4l4 2zM24 40l-2-4h4l-2 4zM8 24l4-2v4l-4-2z" fill="#ffd6a8"/></svg>
       );
     case 'vip_expand':
+    case 'vip_rights_claim':
       return (
         <svg viewBox="0 0 48 48" aria-hidden="true" className={className} style={style}><rect x="8" y="10" width="32" height="30" rx="5" fill="#fff"/><rect x="8" y="10" width="32" height="10" rx="5" fill="#ff5a6a"/><rect x="8" y="16" width="32" height="4" fill="#ff5a6a"/><circle cx="16" cy="12" r="2.2" fill="#fff"/><circle cx="32" cy="12" r="2.2" fill="#fff"/><path d="M18 28.5l4.2 4.2 8.3-8.8" fill="none" stroke="#ff3b5c" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
       );

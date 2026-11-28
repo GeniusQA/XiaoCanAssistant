@@ -156,6 +156,27 @@ const getConditionTagColor = (condition?: string): 'green' | 'cyan' | 'blue' | '
   return 'cyan';
 };
 
+// 与「我的订单」保持同一套状态文案，避免首页待办工单状态对不上
+const getOrderStatusTag = (order: Order): { text: string; color: 'green' | 'orange' | 'blue' | 'cyan' | 'red' | 'grey' } => {
+  const hasExtId = Boolean(String(order.platform_order_id || '').trim());
+  switch (order.status) {
+    case 'completed':
+      return hasExtId ? { text: '已到账', color: 'green' } : { text: '已取消', color: 'grey' };
+    case 'auditing':
+      return { text: '审核中', color: 'orange' };
+    case 'pending':
+      return hasExtId
+        ? { text: '已下单·待反馈', color: 'cyan' }
+        : { text: '已报名，待下单', color: 'blue' };
+    case 'rejected':
+      return { text: '已驳回', color: 'red' };
+    case 'cancelled':
+      return { text: '已取消', color: 'grey' };
+    default:
+      return { text: order.status || '待处理', color: 'grey' };
+  }
+};
+
 export const Dashboard: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
   const currentAccountKey = useAppStore((s) => s.currentAccountKey);
@@ -1349,11 +1370,7 @@ export const Dashboard: React.FC = () => {
                                 <Tag size="small" color={order.platform === 'meituan' ? 'amber' : 'blue'} className="shrink-0">
                                   {order.platform === 'meituan' ? '美团' : '饿了么'}
                                 </Tag>
-                                {isBound ? (
-                                  <Tag size="small" color="cyan" className="shrink-0">
-                                    已下单待反馈
-                                  </Tag>
-                                ) : (
+                                {!isBound && (
                                   <Tag size="small" color="amber" className="shrink-0">
                                     待提交外卖单号
                                   </Tag>
@@ -1397,25 +1414,19 @@ export const Dashboard: React.FC = () => {
                               </div>
                             </div>
                           </div>
-                          {isBound ? (
-                            <Tag
-                              size="small"
-                              color="cyan"
-                              type="light"
-                              className="shrink-0 text-xs font-medium !py-0.5"
-                            >
-                              审核中
-                            </Tag>
-                          ) : (
-                            <Tag
-                              size="small"
-                              color="amber"
-                              type="light"
-                              className="shrink-0 text-xs font-medium !py-0.5"
-                            >
-                              待上传
-                            </Tag>
-                          )}
+                          {(() => {
+                            const statusTag = getOrderStatusTag(order);
+                            return (
+                              <Tag
+                                size="small"
+                                color={statusTag.color}
+                                type="light"
+                                className="shrink-0 text-xs font-medium !py-0.5"
+                              >
+                                {statusTag.text}
+                              </Tag>
+                            );
+                          })()}
                         </div>
                       );
                     })}

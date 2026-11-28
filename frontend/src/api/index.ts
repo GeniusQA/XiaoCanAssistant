@@ -1,11 +1,11 @@
 import axios from 'axios';
 import { Toast } from '@douyinfe/semi-ui';
-import type { Account, AccountDetailData, UserCardItem, TaskItem, FlashSaleShelfResponse, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, DelayCardInfo, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, DevicePairStartResult, DevicePairStatusResult, DeviceSyncHandoffResult, PairedDevice, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse, MeituanPromotionItem } from '../types';
+import type { Account, AccountDetailData, UserCardItem, TaskItem, FlashSaleShelfResponse, BrandCouponActivity, StoreItem, StoreAppointment, NameMonitorPayload, JobLog, UserInfo, Order, DelayCardInfo, OrderStats, DashboardChartData, BatchDailyResult, SystemSettings, NotifyTestResult, DevicePairStartResult, DevicePairStatusResult, DeviceSyncHandoffResult, PairedDevice, LocationSearchResult, ClawBotStatus, ClawBotQrResponse, ClawBotPollResponse, ClawBotActivationResponse, AccountNotifyConfig, AccountNotifyResponse, XiaoCanMessagesResponse, MeituanAccount, MeituanAuthStartResponse, MeituanAuthPollResponse, MeituanPromotionItem } from '../types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
 // 统一所有接口坐标参数为 6 位小数，避免因浮点精度差异导致定位/检索结果不一致
-const coord6 = (value: number | string | undefined | null): string | undefined => {
+export const coord6 = (value: number | string | undefined | null): string | undefined => {
   if (value === undefined || value === null || value === '') return undefined;
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(6) : undefined;
@@ -131,10 +131,10 @@ export const api = {
   getMeituanPromotions: () => client.get<{ ok: boolean; promotions: MeituanPromotionItem[] }>('/meituan/promotions').then(r => r.data),
 
   // 店铺与附近霸王餐 (支持经纬度、平台、搜索过滤、触底流式分页)
-  getStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; activity_requirement?: string; rebate_type?: string; sort_by?: string; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) =>
+  getStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; keyword?: string; platform?: string; condition?: string; activity_requirement?: string; rebate_type?: string; sort_by?: string; store_sub_categories?: string; distance_filter?: number; high_rebate_only?: boolean; brand_merchant_only?: boolean; limit?: number; offset?: number; page_pv_id?: string }, signal?: AbortSignal) =>
     client.get<{ ok: boolean; stores: StoreItem[]; total: number; raw_total?: number; source?: string; has_more?: boolean; next_offset?: number; page_pv_id?: string; keyword?: string; location_required?: boolean; code?: string; message?: string; error?: string }>('/store/list', { params: params ? { ...params, longitude: coord6(params.longitude), latitude: coord6(params.latitude) } : params, signal }).then(r => r.data),
   getStoreCategories: (accountKey?: string) =>
-    client.get<{ ok: boolean; categories: string[]; message?: string }>('/store/categories', {
+    client.get<{ ok: boolean; categories: string[]; category_options?: Array<{ id: number; value: string; field: number; sort: number }>; message?: string }>('/store/categories', {
       params: accountKey ? { account_key: accountKey } : undefined,
     }).then(r => r.data),
   getStoreDistanceRanges: (accountKey?: string) =>
@@ -145,6 +145,26 @@ export const api = {
     }>('/store/distance-ranges', {
       params: accountKey ? { account_key: accountKey } : undefined,
     }).then(r => r.data),
+
+  // 通用大牌券：会员权益领取的品牌活动列表与报名消耗
+  getBrandCouponActivities: (params: { account_key?: string; keyword?: string; page?: number; page_size?: number }) =>
+    client.get<{
+      ok: boolean;
+      activities: BrandCouponActivity[];
+      page?: number;
+      page_size?: number;
+      has_more?: boolean;
+      keyword?: string;
+      message?: string;
+    }>('/brand-coupon/activities', { params }).then(r => r.data),
+  signBrandCouponActivity: (data: { account_key: string; activity_id: number }) =>
+    client.post<{
+      ok: boolean;
+      already_signed?: boolean;
+      promotion_order_id?: number;
+      message: string;
+    }>('/brand-coupon/sign', data).then(r => r.data),
+
   scanDualRebateStores: (params?: { city_code?: number; longitude?: string; latitude?: string; account_key?: string; platform?: string; keyword?: string; max_stores?: number; max_fixed_stores?: number; max_percent_stores?: number; delay_min?: number; delay_max?: number; page_delay?: number }) =>
     client.get<{
       ok: boolean;
@@ -152,6 +172,7 @@ export const api = {
       total_scanned_stores: number;
       fixed_scanned_stores?: number;
       percent_scanned_stores?: number;
+      overlap_count?: number;
       max_fixed_stores?: number;
       max_percent_stores?: number;
       max_feed_distance?: number;
@@ -173,6 +194,7 @@ export const api = {
       total_scanned_stores?: number;
       fixed_scanned_stores?: number;
       percent_scanned_stores?: number;
+      overlap_count?: number;
       dual_rebate_count?: number;
       keyword?: string;
       updated_at?: string;

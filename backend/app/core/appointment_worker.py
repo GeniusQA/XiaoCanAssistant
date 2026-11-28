@@ -350,7 +350,7 @@ async def execute_grab_for_appointment(apt: Dict[str, Any], account: Dict[str, A
             lon = 0.0
 
         t_step1 = time_service.format_now_ms()
-        log_steps.append(f"[{t_step1}] 步骤 1/4: 账号鉴权及定位核验 - 账号【{nickname}】，定位经纬度 ({lat:.5f}, {lon:.5f})，城市代码 {city_code}")
+        log_steps.append(f"[{t_step1}] 步骤 1/4: 账号鉴权及定位核验 - 账号【{nickname}】，定位经纬度 ({lat:.6f}, {lon:.6f})，城市代码 {city_code}")
         # 红包使用策略解析与防失效自愈降级 (优先使用提前 25 秒预加载并锁定的红包，消除开抢时的网络延时)
         redpack_mode = int(apt.get("redpack_mode") or 0)
         redpack_id = None if redpack_mode == 2 else apt.get("cached_redpack_id")

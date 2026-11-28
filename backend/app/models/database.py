@@ -670,8 +670,21 @@ init_db()
 
 # ---------------- 数据库便捷操作接口 ---------------- #
 
+def format_coord6(value: Any) -> str:
+    """统一经纬度为小数后 6 位；空值保持空字符串，非法值原样保留"""
+    raw = str(value).strip() if value is not None else ""
+    if not raw:
+        return ""
+    try:
+        return f"{float(raw):.6f}"
+    except (TypeError, ValueError):
+        return raw
+
+
 def _format_account_row(d: Dict[str, Any]) -> Dict[str, Any]:
     """统一解析账号字段中的 JSON 数据与默认平台标识"""
+    d["longitude"] = format_coord6(d.get("longitude"))
+    d["latitude"] = format_coord6(d.get("latitude"))
     if isinstance(d.get("last_claimed_details"), str):
         try:
             d["last_claimed_details"] = json.loads(d["last_claimed_details"])
@@ -890,8 +903,8 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
     if has_valid_location(data):
         city_code = int(data["city_code"])
         city_name = str(data["city_name"]).strip()
-        longitude = str(data["longitude"]).strip()
-        latitude = str(data["latitude"]).strip()
+        longitude = format_coord6(data["longitude"])
+        latitude = format_coord6(data["latitude"])
         address_name = str(data.get("address_name") or "").strip()
         short_name = str(data.get("short_name") or "").strip() or address_name
         full_address = str(data.get("full_address") or "").strip() or address_name
@@ -900,8 +913,8 @@ def save_account(data: Dict[str, Any]) -> Dict[str, Any]:
     elif has_existing_loc and existing is not None:
         city_code = int(existing["city_code"])
         city_name = str(existing["city_name"]).strip()
-        longitude = str(existing["longitude"]).strip()
-        latitude = str(existing["latitude"]).strip()
+        longitude = format_coord6(existing["longitude"])
+        latitude = format_coord6(existing["latitude"])
         address_name = str(existing.get("address_name") or "").strip()
         short_name = str(existing.get("short_name") or "").strip() or address_name
         full_address = str(existing.get("full_address") or "").strip() or address_name
@@ -1038,7 +1051,7 @@ def update_account_profile(key: str, profile: Dict[str, Any]) -> Optional[Dict[s
     for field in allowed_fields:
         if field in profile:
             updates.append(f"{field} = :{field}")
-            params[field] = profile[field]
+            params[field] = format_coord6(profile[field]) if field in ("longitude", "latitude") else profile[field]
     if not updates:
         return get_account_by_key(key)
 

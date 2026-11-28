@@ -17,6 +17,7 @@ import {
   Input,
   RadioGroup,
   Radio,
+  Checkbox,
   Empty,
   Spin,
   Tooltip,
@@ -52,7 +53,7 @@ import { getNtpNowMs } from '../utils/ntpTime';
 import { useOnActivated } from '../utils/useOnActivated';
 import { useMobileLayout, useListPagination } from '../utils/useListPagination';
 import { ListFooter } from '../components/ListFooter';
-import type { StoreItem, StorePromotion, StoreAppointment, AccountDetailData, NameMonitorPayload } from '../types';
+import type { BrandCouponActivity, StoreItem, StorePromotion, StoreAppointment, AccountDetailData, NameMonitorPayload } from '../types';
 
 
 gsap.registerPlugin(useGSAP);
@@ -273,6 +274,7 @@ const getPlatformBadge = (plat?: string) => {
 interface StoreSearchBarProps {
   loading: boolean;
   value: string;
+  placeholder?: string;
   onSearch: (kw: string) => void;
   onClear: () => void;
 }
@@ -280,6 +282,7 @@ interface StoreSearchBarProps {
 const StoreSearchBar: React.FC<StoreSearchBarProps> = React.memo(({
   loading,
   value,
+  placeholder = '搜索店铺名称或美食...',
   onSearch,
   onClear,
 }) => {
@@ -303,7 +306,7 @@ const StoreSearchBar: React.FC<StoreSearchBarProps> = React.memo(({
       <Input
         size="default"
         prefix={<IconSearch />}
-        placeholder="搜索店铺名称或美食..."
+        placeholder={placeholder}
         value={localVal}
         onChange={(val) => setLocalVal(val)}
         onEnterPress={handleTrigger}
@@ -414,6 +417,33 @@ export const StoreSniping: React.FC = () => {
     const h = String(d.getHours()).padStart(2, '0');
     const m = String(d.getMinutes()).padStart(2, '0');
     return `${Y}-${M}-${D} ${h}:${m}`;
+  }, []);
+
+  // 通用大牌券 CouponActivities 的领取时段是当天秒数（0 表示不限），不是 Unix 时间戳。
+  // 直接按时间戳格式化会把 23:57:59（86279 秒）显示成 1970-01-02 07:57:59。
+  const formatCouponClock = useCallback((ts?: number | string) => {
+    const num = Number(ts || 0);
+    if (!Number.isFinite(num) || num <= 0) return '长期有效';
+    if (num < 24 * 3600) {
+      const h = Math.floor(num / 3600);
+      const m = Math.floor((num % 3600) / 60);
+      const s = Math.floor(num % 60);
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    return formatTimestamp(num);
+  }, [formatTimestamp]);
+
+  const isBrandCouponExpired = useCallback((row: BrandCouponActivity) => {
+    const end = Number(row.grab_end_time || 0);
+    if (!Number.isFinite(end) || end <= 0) return false;
+    if (end < 24 * 3600) {
+      const start = Number(row.grab_start_time || 0);
+      if (start <= 0) return false;
+      const now = new Date();
+      const nowSeconds = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+      return end < nowSeconds;
+    }
+    return end < Date.now() / 1000;
   }, []);
 
   // 卡券叠加聚合：同类型卡券若过期时间一致则自动叠加展示
@@ -556,9 +586,26 @@ export const StoreSniping: React.FC = () => {
   const [rebateTypeFilter, setRebateTypeFilter] = useState<'all' | 'fixed' | 'percent'>('all');
   const [conditionFilter, setConditionFilter] = useState<'all' | 'no_review' | 'good_review'>('all');
   const [activityRequirementFilter, setActivityRequirementFilter] = useState<'all' | 'specified_dish' | 'repurchase'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<string>('');
+  const [distanceFilter, setDistanceFilter] = useState<number>(0);
+  const [highRebateOnly, setHighRebateOnly] = useState(false);
+  const [brandMerchantOnly, setBrandMerchantOnly] = useState(false);
   const [sortBy, setSortBy] = useState<'default' | 'distance' | 'rebate' | 'rate' | 'left'>('default');
   const [searchKeyword, setSearchKeyword] = useState<string>('');
   const [activeSearchKeyword, setActiveSearchKeyword] = useState<string>('');
+
+  // 大牌专享：通用大牌券活动列表（TopBrandService.CouponActivities / ActivitySign）
+  const [brandCouponActivities, setBrandCouponActivities] = useState<BrandCouponActivity[]>([]);
+  const [brandCouponKeyword, setBrandCouponKeyword] = useState<string>('');
+  const [brandCouponActiveKeyword, setBrandCouponActiveKeyword] = useState<string>('');
+  const [brandCouponLoading, setBrandCouponLoading] = useState(false);
+  const [brandCouponLoadingMore, setBrandCouponLoadingMore] = useState(false);
+  const [brandCouponError, setBrandCouponError] = useState('');
+  const [brandCouponPage, setBrandCouponPage] = useState(1);
+  const [brandCouponHasMore, setBrandCouponHasMore] = useState(false);
+  const [brandCouponSigningId, setBrandCouponSigningId] = useState<number | null>(null);
+  const brandCouponRequestRef = useRef(0);
+
   const pendingStoreActionRef = useRef<ReturnType<typeof useAppStore.getState>['pendingStoreAction']>(null);
   const pendingStoreActionDoneRef = useRef<number>(0);
   
@@ -596,10 +643,17 @@ export const StoreSniping: React.FC = () => {
   const activeSearchKeywordRef = useRef<string>('');
   const pagePvIdRef = useRef<string>('');
 
-  // 大牌专享：按官方「大牌商家」标识归类，不再把「周边门店通用」误判为大牌。
-  const isBrandCouponStore = useCallback((s: StoreItem) => {
-    return Boolean(s.is_brand_store);
-  }, []);
+  useEffect(() => {
+    if (!currentAccountKey) return;
+    let cancelled = false;
+    void api.getStoreCategories(currentAccountKey).then((res) => {
+      if (!cancelled && res.ok) setOfficialCategoryOptions(res.category_options || []);
+    }).catch(() => {});
+    void api.getStoreDistanceRanges(currentAccountKey).then((res) => {
+      if (!cancelled && res.ok) setOfficialDistanceRanges(res.distance_ranges || []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [currentAccountKey]);
 
   // 提取店铺在平台内的同店分店唯一聚合标识（准确保留主品牌与核心分店，杜绝跨分店混淆）
   const getStoreBranchIdentityKey = useCallback((s: { name?: string; platform?: string; store_id?: string; store_platform?: number }) => {
@@ -657,16 +711,6 @@ export const StoreSniping: React.FC = () => {
     return dualKeys;
   }, [stores, getStoreBranchIdentityKey]);
 
-  const regularStores = useMemo(() => {
-    return stores.filter(s => !isBrandCouponStore(s));
-  }, [stores, isBrandCouponStore]);
-
-  const brandCouponStores = useMemo(() => {
-    return stores.filter(s => isBrandCouponStore(s));
-  }, [stores, isBrandCouponStore]);
-
-
-
   const appointmentPages = useListPagination(appointments, currentAccountKey || '', 10);
 
   // 预约配置弹窗
@@ -686,6 +730,7 @@ export const StoreSniping: React.FC = () => {
   const [editingMonitorId, setEditingMonitorId] = useState<number | null>(null);
   const [nameMonitorInitialValues, setNameMonitorInitialValues] = useState<Record<string, any> | null>(null);
   const [officialCategories, setOfficialCategories] = useState<string[]>([]);
+  const [officialCategoryOptions, setOfficialCategoryOptions] = useState<Array<{ id: number; value: string; field: number; sort: number }>>([]);
   const [officialDistanceRanges, setOfficialDistanceRanges] = useState<Array<{ id: number; value: string; label: string; km: number }>>([]);
 
   // 同店双返利状态
@@ -696,6 +741,7 @@ export const StoreSniping: React.FC = () => {
   const [dualTotalStores, setDualTotalStores] = useState(0);
   const [dualFixedScanned, setDualFixedScanned] = useState(0);
   const [dualPercentScanned, setDualPercentScanned] = useState(0);
+  const [dualOverlapCount, setDualOverlapCount] = useState(0);
   const [dualSearchKeyword, setDualSearchKeyword] = useState('');
   const [dualCacheUpdatedAt, setDualCacheUpdatedAt] = useState('');
   const [dualMaxFixed, setDualMaxFixed] = useState<number>(() => {
@@ -859,12 +905,7 @@ export const StoreSniping: React.FC = () => {
     });
   }, [activeTabKey]);
 
-  // 距离最近排序下无法检索大牌专享商户，自动回退到常规附近店铺分栏
-  useEffect(() => {
-    if (sortBy === 'distance' && activeTabKey === 'brand_coupon') {
-      setActiveTabKey('stores');
-    }
-  }, [sortBy, activeTabKey]);
+  // 大牌专享使用通用大牌券活动列表，不再受附近店铺排序方式影响。
 
   // 桌面视口计算与移动端自然展开隔离，避免高度反馈。
   useEffect(() => {
@@ -873,21 +914,20 @@ export const StoreSniping: React.FC = () => {
       if (!tabWrapperRef.current) return;
       const ch = tabWrapperRef.current.clientHeight;
       if (ch > 100) {
-        const isWithFilter = activeTabKey === 'stores' || activeTabKey === 'brand_coupon';
-
         setTabScrollHeights(prev => {
-          if (isWithFilter) {
-            const baseH = Math.max(260, ch - 86);
+          if (activeTabKey === 'stores' || activeTabKey === 'brand_coupon') {
+            const storesH = Math.max(260, ch - 86);
+            const brandCouponH = Math.max(260, ch - 24);
             if (
-              Math.abs((prev.stores || 0) - baseH) <= 4 &&
-              Math.abs((prev.brand_coupon || 0) - baseH) <= 4
+              Math.abs((prev.stores || 0) - storesH) <= 4 &&
+              Math.abs((prev.brand_coupon || 0) - brandCouponH) <= 4
             ) {
               return prev;
             }
             return {
               ...prev,
-              stores: baseH,
-              brand_coupon: baseH,
+              stores: storesH,
+              brand_coupon: brandCouponH,
             };
           } else {
             const dualH = Math.max(240, ch - 126);
@@ -958,7 +998,7 @@ export const StoreSniping: React.FC = () => {
         }
       );
     }
-  }, { scope: mainContainerRef, dependencies: [platformFilter, rebateTypeFilter, conditionFilter, sortBy] });
+  }, { scope: mainContainerRef, dependencies: [platformFilter, rebateTypeFilter, conditionFilter, categoryFilter, distanceFilter, highRebateOnly, brandMerchantOnly, sortBy] });
 
   const applyDualResult = useCallback((res: any, fromCache: boolean) => {
     const sorted = (res.stores || []).slice().sort((a: StoreItem, b: StoreItem) => {
@@ -966,11 +1006,18 @@ export const StoreSniping: React.FC = () => {
       const db = b.distance && b.distance > 0 ? b.distance : 9999999;
       return da - db;
     });
+    const fixedCount = res.fixed_scanned_stores || 0;
+    const percentCount = res.percent_scanned_stores || 0;
+    const totalCount = res.total_scanned_stores || 0;
+    const overlapCount = typeof res.overlap_count === 'number'
+      ? res.overlap_count
+      : Math.max(0, fixedCount + percentCount - totalCount);
     setDualStores(sorted);
     setDualTotalPromos(res.total_scanned_promotions || 0);
-    setDualTotalStores(res.total_scanned_stores || 0);
-    setDualFixedScanned(res.fixed_scanned_stores || 0);
-    setDualPercentScanned(res.percent_scanned_stores || 0);
+    setDualTotalStores(totalCount);
+    setDualFixedScanned(fixedCount);
+    setDualPercentScanned(percentCount);
+    setDualOverlapCount(overlapCount);
     setDualScanDone(true);
     if (fromCache) {
       setDualCacheUpdatedAt(res.updated_at || '');
@@ -1145,7 +1192,7 @@ export const StoreSniping: React.FC = () => {
       return;
     }
     const keywordToSearch = kw !== undefined ? kw : activeSearchKeywordRef.current;
-    const querySignature = `${activeLocation?.cityCode}_${activeLocation?.longitude}_${activeLocation?.latitude}_${currentAccountKey}_${platformFilter}_${conditionFilter}_${activityRequirementFilter}_${rebateTypeFilter}_${sortBy}_${keywordToSearch}`;
+    const querySignature = `${activeLocation?.cityCode}_${activeLocation?.longitude}_${activeLocation?.latitude}_${currentAccountKey}_${platformFilter}_${conditionFilter}_${activityRequirementFilter}_${rebateTypeFilter}_${categoryFilter}_${distanceFilter}_${highRebateOnly}_${brandMerchantOnly}_${sortBy}_${keywordToSearch}`;
 
     if (!force && lastStoresQuerySignatureRef.current === querySignature) {
       return;
@@ -1182,6 +1229,10 @@ export const StoreSniping: React.FC = () => {
         activity_requirement: activityRequirementFilter,
         rebate_type: rebateTypeFilter,
         sort_by: sortBy,
+        store_sub_categories: categoryFilter || undefined,
+        distance_filter: distanceFilter || undefined,
+        high_rebate_only: highRebateOnly,
+        brand_merchant_only: brandMerchantOnly,
         keyword: keywordToSearch,
         offset: 0
       }, controller.signal);
@@ -1225,7 +1276,7 @@ export const StoreSniping: React.FC = () => {
         loadingRef.current = false;
       }
     }
-  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy]);
+  }, [accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, categoryFilter, distanceFilter, highRebateOnly, brandMerchantOnly, sortBy]);
 
   const loadMoreStores = useCallback(async () => {
     if (loadingRef.current || loadingMoreRef.current || !hasMoreRef.current || accounts.length === 0) {
@@ -1253,6 +1304,10 @@ export const StoreSniping: React.FC = () => {
         activity_requirement: activityRequirementFilter,
         rebate_type: rebateTypeFilter,
         sort_by: sortBy,
+        store_sub_categories: categoryFilter || undefined,
+        distance_filter: distanceFilter || undefined,
+        high_rebate_only: highRebateOnly,
+        brand_merchant_only: brandMerchantOnly,
         keyword: activeSearchKeywordRef.current,
         offset: nextOffsetRef.current,
         page_pv_id: pagePvIdRef.current || undefined
@@ -1418,7 +1473,90 @@ export const StoreSniping: React.FC = () => {
         loadingMoreRef.current = false;
       }
     }
-  }, [loadMoreError, accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, sortBy, getStoreBranchIdentityKey]);
+  }, [loadMoreError, accounts.length, activeLocation?.cityCode, activeLocation?.latitude, activeLocation?.longitude, activityRequirementFilter, conditionFilter, currentAccountKey, platformFilter, rebateTypeFilter, categoryFilter, distanceFilter, highRebateOnly, brandMerchantOnly, sortBy, getStoreBranchIdentityKey]);
+
+  // 大牌专享：独立拉取通用大牌券活动列表，与附近店铺列表完全解耦
+  const fetchBrandCouponActivities = useCallback(async (keyword: string, page = 1, append = false) => {
+    if (!currentAccountKey) {
+      setBrandCouponActivities([]);
+      setBrandCouponHasMore(false);
+      setBrandCouponLoading(false);
+      setBrandCouponLoadingMore(false);
+      return;
+    }
+    const requestId = ++brandCouponRequestRef.current;
+    if (page === 1 && !append) setBrandCouponLoading(true);
+    else setBrandCouponLoadingMore(true);
+    setBrandCouponError('');
+    try {
+      const res = await api.getBrandCouponActivities({
+        account_key: currentAccountKey,
+        keyword: keyword.trim(),
+        page,
+        page_size: 20,
+      });
+      if (requestId !== brandCouponRequestRef.current) return;
+      if (!res.ok) throw new Error(res.message || '获取通用大牌券活动失败');
+      const list = res.activities || [];
+      setBrandCouponActivities(prev => append ? [...prev, ...list] : list);
+      setBrandCouponPage(res.page || page);
+      setBrandCouponHasMore(Boolean(res.has_more));
+    } catch (e: any) {
+      if (requestId !== brandCouponRequestRef.current) return;
+      setBrandCouponError(e?.message || '获取通用大牌券活动失败');
+      if (!append) {
+        setBrandCouponActivities([]);
+        setBrandCouponHasMore(false);
+      }
+    } finally {
+      if (requestId === brandCouponRequestRef.current) {
+        setBrandCouponLoading(false);
+        setBrandCouponLoadingMore(false);
+      }
+    }
+  }, [currentAccountKey]);
+
+  useEffect(() => {
+    if (activeTabKey !== 'brand_coupon') return;
+    void fetchBrandCouponActivities(brandCouponActiveKeyword, 1, false);
+  }, [activeTabKey, currentAccountKey, brandCouponActiveKeyword, fetchBrandCouponActivities]);
+
+  const handleBrandCouponSearch = useCallback((kw?: string) => {
+    const next = (typeof kw === 'string' ? kw : brandCouponKeyword).trim();
+    setBrandCouponKeyword(next);
+    setBrandCouponActiveKeyword(next);
+  }, [brandCouponKeyword]);
+
+  const handleSignBrandCoupon = useCallback(async (activity: BrandCouponActivity) => {
+    if (!currentAccountKey) {
+      Toast.warning('请先选择或绑定账号');
+      return;
+    }
+    setBrandCouponSigningId(activity.activity_id);
+    try {
+      const res = await api.signBrandCouponActivity({
+        account_key: currentAccountKey,
+        activity_id: activity.activity_id,
+      });
+      if (res.ok) {
+        Toast.success(res.message || (res.already_signed ? '该活动已报名' : '大牌券报名成功'));
+        if (res.promotion_order_id) {
+          setBrandCouponActivities(prev => prev.map(item => (
+            item.activity_id === activity.activity_id
+              ? { ...item, brand_order: { ...(item.brand_order || {}), promotion_order_id: res.promotion_order_id } }
+              : item
+          )));
+        }
+        fetchAccountAssets(currentAccountKey, true);
+      } else {
+        Toast.warning(res.message || '大牌券报名失败');
+      }
+    } catch (e: any) {
+      Toast.error('报名请求失败: ' + (e?.message || '网络异常'));
+    } finally {
+      setBrandCouponSigningId(null);
+    }
+  }, [currentAccountKey, fetchAccountAssets]);
 
   const activeStoreContainer = activeTabKey === 'brand_coupon' ? brandContainerRef : tableContainerRef;
   const getStoreScrollRoot = () => {
@@ -2098,7 +2236,7 @@ export const StoreSniping: React.FC = () => {
     try {
       const res = await api.stopAppointment(aid);
       if (res.ok) {
-        Toast.success('已停止名额监听任务');
+        Toast.success('已停止预约监听任务');
       } else {
         Toast.error(res.message || '停止监听失败');
       }
@@ -2431,6 +2569,123 @@ export const StoreSniping: React.FC = () => {
       },
     },
   ], [grabbingId, handleGrabNow, handleOpenAppoint, handleOpenNameMonitor, getStoreTimeStatus, handleSelectPromo, dualRebateStoreKeys, assetStats]);
+
+  const brandCouponColumns: ColumnProps<BrandCouponActivity>[] = useMemo(() => [
+    {
+      title: '品牌活动',
+      dataIndex: 'brand_name',
+      width: 320,
+      render: (_: any, row?: BrandCouponActivity) => {
+        if (!row) return null;
+        const brandNames = (row as any).brand_names || row.brand_name || '';
+        return (
+          <div className="flex items-start gap-3 py-1">
+            <Avatar size="medium" shape="square" src={row.brand_logo || undefined} color="orange">
+              {cleanEmoji(row.brand_name || '大牌')[0] || '牌'}
+            </Avatar>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <StoreNameCell name={row.brand_name || '未知品牌'} maxWidth={240} />
+                <Tag color="amber" size="small" shape="square">通用大牌券</Tag>
+              </div>
+              {brandNames && brandNames !== row.brand_name && (
+                <div className="text-[11px] text-semi-color-text-3 mt-1 truncate max-w-[280px]" title={String(brandNames)}>
+                  适用品牌：{String(brandNames)}
+                </div>
+              )}
+              <div className="text-[11px] text-semi-color-text-3 mt-1">活动 ID：{row.activity_id}</div>
+              {row.goods_name && (
+                <div className="text-xs text-semi-color-text-2 mt-1 truncate max-w-[280px]" title={cleanEmoji(row.goods_name)}>
+                  {cleanEmoji(row.goods_name)}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      title: '券面权益',
+      dataIndex: 'benefit',
+      width: 180,
+      render: (_: any, row?: BrandCouponActivity) => {
+        if (!row) return null;
+        const benefit = Number(row.benefit || 0) / 100;
+        const min = Number(row.min || 0) / 100;
+        const fmt = (v: number) => `¥${Number.isInteger(v) ? v : v.toFixed(2)}`;
+        return (
+          <div className="space-y-1 py-1">
+            <div className="text-base text-red-500 font-bold font-mono">
+              {benefit > 0 ? fmt(benefit) : '通用大牌券'}
+            </div>
+            <div className="text-[11px] text-semi-color-text-3">
+              {min > 0 ? `使用门槛：满 ${fmt(min)}` : '无使用门槛'}
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      title: '商家活动时间',
+      dataIndex: 'opening_hours',
+      width: 220,
+      render: (_: any, row?: BrandCouponActivity) => {
+        if (!row) return null;
+        const openingHours = String(row.opening_hours || '').trim();
+        return (
+          <div className="text-xs text-semi-color-text-2 py-1">
+            {openingHours ? (
+              <div className="font-mono">{openingHours}</div>
+            ) : (
+              <div className="space-y-0.5">
+                <div>开始：{formatCouponClock(row.grab_start_time)}</div>
+                <div>结束：{formatCouponClock(row.grab_end_time)}</div>
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      title: '报名状态',
+      dataIndex: 'brand_order',
+      width: 150,
+      render: (_: any, row?: BrandCouponActivity) => {
+        if (!row) return null;
+        const orderId = Number(row.brand_order?.promotion_order_id || 0);
+        return (
+          <Tag color={orderId > 0 ? 'green' : 'grey'} size="small" shape="square">
+            {orderId > 0 ? `已报名 ${orderId}` : '未报名'}
+          </Tag>
+        );
+      },
+    },
+    {
+      title: '操作',
+      dataIndex: 'actions',
+      width: 150,
+      fixed: 'right',
+      render: (_: any, row?: BrandCouponActivity) => {
+        if (!row) return null;
+        const orderId = Number(row.brand_order?.promotion_order_id || 0);
+        const expired = isBrandCouponExpired(row);
+        if (expired) return <Button disabled size="small" className="!px-2">活动已结束</Button>;
+        return (
+          <Button
+            theme={orderId > 0 ? 'light' : 'solid'}
+            type="primary"
+            size="small"
+            className="!px-2"
+            loading={brandCouponSigningId === row.activity_id}
+            disabled={orderId > 0}
+            onClick={() => handleSignBrandCoupon(row)}
+          >
+            {orderId > 0 ? '已报名' : '消耗大牌券报名'}
+          </Button>
+        );
+      },
+    },
+  ], [brandCouponSigningId, handleSignBrandCoupon, formatCouponClock, isBrandCouponExpired]);
 
   const dualColumns: ColumnProps<StoreItem>[] = useMemo(() => [
     {
@@ -3156,16 +3411,14 @@ export const StoreSniping: React.FC = () => {
               >
                 启动
               </Button>
-              {row.task_type === 'name_monitor' && (
-                <Button
-                  theme="light"
-                  type="primary"
-                  size="small"
-                  onClick={() => handleEditMonitor(row)}
-                >
-                  编辑
-                </Button>
-              )}
+              <Button
+                theme="light"
+                type="primary"
+                size="small"
+                onClick={() => handleEditMonitor(row)}
+              >
+                编辑
+              </Button>
               <Popconfirm title="确定删除此记录？" onConfirm={() => handleCancelAppoint(row.id)}>
                 <Button theme="borderless" type="tertiary" size="small">删除</Button>
               </Popconfirm>
@@ -3186,7 +3439,7 @@ export const StoreSniping: React.FC = () => {
             );
           }
           return (
-            <Popconfirm title="确定取消此预约？" onConfirm={() => handleCancelAppoint(row.id)}>
+            <Popconfirm title="确定取消此任务？取消后状态将变为已停止" onConfirm={() => handleStopAppoint(row.id)}>
               <Button theme="light" type="danger" size="small">
                 取消
               </Button>
@@ -3489,10 +3742,8 @@ export const StoreSniping: React.FC = () => {
                 }
               }}
             >
-              <TabPane tab={`附近店铺 (${regularStores.length})`} itemKey="stores" />
-              {sortBy !== 'distance' && (
-                <TabPane tab={`大牌专享 (${brandCouponStores.length})`} itemKey="brand_coupon" />
-              )}
+              <TabPane tab={`附近店铺 (${stores.length})`} itemKey="stores" />
+              <TabPane tab={`大牌专享 (${brandCouponActivities.length})`} itemKey="brand_coupon" />
               <TabPane
                 tab={
                   <div className="flex items-center gap-1.5">
@@ -3507,8 +3758,8 @@ export const StoreSniping: React.FC = () => {
               <TabPane tab={`预约监听 (${appointments.length})`} itemKey="appointments" />
             </Tabs>
 
-            {/* 店铺主 Tab / 大牌券 Tab 搜索框与抢单监听按钮 */}
-            {(activeTabKey === 'stores' || activeTabKey === 'brand_coupon') && (
+            {/* 附近店铺搜索框与抢单监听按钮 */}
+            {activeTabKey === 'stores' && (
               <div className="flex items-center gap-2.5 w-full sm:w-auto flex-wrap">
                 <StoreSearchBar
                   loading={loading}
@@ -3523,6 +3774,28 @@ export const StoreSniping: React.FC = () => {
                   onClick={() => handleOpenNameMonitor(searchKeyword)}
                 >
                   抢单监听
+                </Button>
+              </div>
+            )}
+
+            {/* 大牌专享：通用大牌券活动专属搜索与刷新 */}
+            {activeTabKey === 'brand_coupon' && (
+              <div className="flex items-center gap-2.5 w-full sm:w-auto flex-wrap">
+                <StoreSearchBar
+                  loading={brandCouponLoading}
+                  value={brandCouponKeyword}
+                  placeholder="搜索大牌名称或活动..."
+                  onSearch={handleBrandCouponSearch}
+                  onClear={() => handleBrandCouponSearch('')}
+                />
+                <Button
+                  theme="light"
+                  type="primary"
+                  icon={<IconRefresh />}
+                  loading={brandCouponLoading}
+                  onClick={() => fetchBrandCouponActivities(brandCouponActiveKeyword, 1, false)}
+                >
+                  刷新活动
                 </Button>
               </div>
             )}
@@ -3602,8 +3875,8 @@ export const StoreSniping: React.FC = () => {
             )}
           </div>
 
-          {/* 店铺筛选工具条（优化尺寸为 default，字号和点击热区更舒展大气） */}
-          {(activeTabKey === 'stores' || activeTabKey === 'brand_coupon') && (
+          {/* 附近店铺筛选工具条（大牌专享使用独立活动列表，不再共用此工具条） */}
+          {activeTabKey === 'stores' && (
             <div className="pt-4 mt-3 border-t border-semi-color-border-subtle flex flex-wrap items-center justify-between gap-4">
               <div className="flex flex-wrap items-center gap-6">
                 <div className="flex items-center gap-2.5">
@@ -3664,17 +3937,55 @@ export const StoreSniping: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2.5">
+                  <Text type="secondary" className="text-sm font-medium">商家分类:</Text>
+                  <Select
+                    multiple
+                    showClear
+                    size="default"
+                    placeholder="全部分类"
+                    value={categoryFilter ? categoryFilter.split(',').map(Number) : []}
+                    onChange={(v) => setCategoryFilter((v as unknown[]).map((item) => String(item)).join(','))}
+                    style={{ width: 220 }}
+                  >
+                    {officialCategoryOptions.map((category) => (
+                      <Select.Option key={category.id} value={category.id}>{category.value}</Select.Option>
+                    ))}
+                  </Select>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <Text type="secondary" className="text-sm font-medium">距离范围:</Text>
+                  <Select
+                    size="default"
+                    value={distanceFilter}
+                    onChange={(v) => setDistanceFilter(Number(v) || 0)}
+                    style={{ width: 130 }}
+                  >
+                    <Select.Option value={0}>全部距离</Select.Option>
+                    {officialDistanceRanges.map((range) => (
+                      <Select.Option key={`${range.id}-${range.value}`} value={range.id}>{range.value}</Select.Option>
+                    ))}
+                  </Select>
+                </div>
+
+                <div className="flex items-center gap-4">
+                  <Checkbox
+                    checked={highRebateOnly}
+                    onChange={(e) => setHighRebateOnly(Boolean(e.target.checked))}
+                  >高返利</Checkbox>
+                  <Checkbox
+                    checked={brandMerchantOnly}
+                    onChange={(e) => setBrandMerchantOnly(Boolean(e.target.checked))}
+                  >大牌商家</Checkbox>
+                  <Text type="secondary" className="text-xs text-semi-color-text-3">默认仅展示可抢商家</Text>
+                </div>
+
+                <div className="flex items-center gap-2.5">
                   <Text type="secondary" className="text-sm font-medium">排序方式:</Text>
                   <Select
                     size="default"
                     value={sortBy}
-                    onChange={(v) => {
-                      const nextSort = v as any;
-                      setSortBy(nextSort);
-                      if (nextSort === 'distance') {
-                        setActiveTabKey(prev => prev === 'brand_coupon' ? 'stores' : prev);
-                      }
-                    }}
+                    onChange={(v) => setSortBy(v as any)}
                     style={{ width: 140 }}
                   >
                     <Select.Option value="default">综合排序</Select.Option>
@@ -3725,7 +4036,7 @@ export const StoreSniping: React.FC = () => {
               <Table
                 rowKey={(row) => `${row?.store_id || row?.name}_${normalizeStorePlatform(row)}`}
                 columns={storeColumns}
-                dataSource={regularStores}
+                dataSource={stores}
                 loading={loading}
                 pagination={false}
                 scroll={isMobile ? { x: 1300 } : { y: tabScrollHeights.stores || 480, x: 1300 }}
@@ -3784,7 +4095,7 @@ export const StoreSniping: React.FC = () => {
               />
 
               <ListFooter
-                count={regularStores.length}
+                count={stores.length}
                 hasMore={hasMore}
                 loading={loading || loadingMore}
                 error={storesError || loadMoreError}
@@ -3806,7 +4117,7 @@ export const StoreSniping: React.FC = () => {
             </div>
           )}
 
-          {/* 大牌专享分栏（周边门店通用专享） */}
+          {/* 大牌专享分栏（会员权益领取的通用大牌券活动列表与报名下单） */}
           {visitedTabs.has('brand_coupon') && (
             <div
               ref={brandContainerRef}
@@ -3820,30 +4131,36 @@ export const StoreSniping: React.FC = () => {
               }}
             >
               <Table
-                rowKey={(row) => `${row?.store_id || row?.name}_${normalizeStorePlatform(row)}`}
-                columns={storeColumns}
-                dataSource={brandCouponStores}
-                loading={loading}
+                rowKey={(row) => `brand_coupon_${row?.activity_id}`}
+                columns={brandCouponColumns}
+                dataSource={brandCouponActivities}
+                loading={brandCouponLoading}
                 pagination={false}
-                scroll={isMobile ? { x: 1300 } : { y: tabScrollHeights.brand_coupon || 480, x: 1300 }}
+                scroll={isMobile ? { x: 980 } : { y: tabScrollHeights.brand_coupon || 480, x: 980 }}
                 empty={
-                  loading ? (
+                  brandCouponLoading ? (
                     <div className="py-24" />
                   ) : (
                     <div className="py-16 text-center text-semi-color-text-3">
-                      <div>{storesError || (hasMore ? '正在继续查找大牌专享商户...' : '暂无符合条件的大牌专享商户，您可以在「附近店铺」中查看常规返利门店')}</div>
+                      <div>{brandCouponError || (brandCouponHasMore ? '正在继续获取通用大牌券活动...' : '暂无通用大牌券活动，可尝试更换关键词或刷新活动')}</div>
                     </div>
                   )
                 }
               />
 
               <ListFooter
-                count={brandCouponStores.length}
-                hasMore={hasMore}
-                loading={loading || loadingMore}
-                error={storesError || loadMoreError}
+                count={brandCouponActivities.length}
+                hasMore={brandCouponHasMore}
+                loading={brandCouponLoading || brandCouponLoadingMore}
+                error={brandCouponError}
                 active={appActiveTab === 'store' && activeTabKey === 'brand_coupon'}
-                onLoadMore={() => { if (storesError) void fetchStores(undefined, true); else void loadMoreStores(); }}
+                onLoadMore={() => {
+                  if (brandCouponError) {
+                    void fetchBrandCouponActivities(brandCouponActiveKeyword, 1, false);
+                  } else {
+                    void fetchBrandCouponActivities(brandCouponActiveKeyword, brandCouponPage + 1, true);
+                  }
+                }}
               />
 
             </div>
@@ -3951,7 +4268,7 @@ export const StoreSniping: React.FC = () => {
                         </Tag>
                       )}
                       <span className="text-semi-color-text-1">
-                        共检索 {dualTotalStores} 家商户（满返 {dualFixedScanned} / 比例 {dualPercentScanned}）、{dualTotalPromos} 个活动，筛选出 {dualStores.length} 家双返利店铺
+                        共检索去重后 {dualTotalStores} 家商户（满返 {dualFixedScanned} / 比例 {dualPercentScanned} / 两池重叠 {dualOverlapCount}）、{dualTotalPromos} 个活动，筛选出 {dualStores.length} 家双返利店铺
                         {dualStores.length !== displayedDualStores.length && ` · 匹配 ${displayedDualStores.length} 家`}
                         {` · 设定范围 满返 ${dualMaxFixed} / 比例 ${dualMaxPercent} 家`}
                       </span>

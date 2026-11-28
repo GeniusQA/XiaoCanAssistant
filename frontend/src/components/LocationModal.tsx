@@ -19,7 +19,7 @@ import {
   IconUser
 } from '@douyinfe/semi-icons';
 import { useAppStore, deriveAccountLocation } from '../store/useAppStore';
-import { api } from '../api';
+import { api, coord6 } from '../api';
 import type { LocationCandidate, LocationHistoryItem } from '../types';
 
 interface LocationModalProps {
@@ -471,8 +471,8 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose, 
       source: resolvedSource,
       sourceName: resolvedSourceName,
       remark: (resolvedRemark || '').trim(),
-      longitude: (editLng || '').trim(),
-      latitude: (editLat || '').trim()
+      longitude: lngVal.toFixed(6),
+      latitude: latVal.toFixed(6)
     };
 
     setSaving(true);
@@ -559,7 +559,9 @@ export const LocationModal: React.FC<LocationModalProps> = ({ visible, onClose, 
               : '未获取位置，请点击右上角「获取本机定位」或在下方搜索地址'}
           </Typography.Title>
           <Typography.Text code size="small" type="secondary">
-            {editLng && editLat ? `坐标: ${editLng}, ${editLat}` : '经纬度未配置'}
+            {editLng && editLat
+              ? `坐标: ${coord6(editLng) || editLng}, ${coord6(editLat) || editLat}`
+              : '经纬度未配置'}
           </Typography.Text>
         </Card>
 

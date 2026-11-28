@@ -303,8 +303,8 @@ class TiandituClient:
                             "poi": area_name,
                             "short_name": area_name,
                             "full_address": f"{area_name}行政区域",
-                            "latitude": lat_val,
-                            "longitude": lon_val,
+                            "latitude": db.format_coord6(lat_val),
+                            "longitude": db.format_coord6(lon_val),
                             "source": "tianditu"
                         })
 
@@ -343,8 +343,8 @@ class TiandituClient:
                                 "poi": name,
                                 "short_name": f"{c_dist} · {name}" if (c_dist and name not in c_dist) else (name or clean_kw),
                                 "full_address": raw_addr or f"{prov}{c_name}{c_dist}{name}",
-                                "latitude": lat,
-                                "longitude": lon,
+                                "latitude": db.format_coord6(lat),
+                                "longitude": db.format_coord6(lon),
                                 "source": "tianditu"
                             }
 
@@ -399,8 +399,8 @@ class TiandituClient:
                                 "poi": name,
                                 "short_name": f"{c_dist} · {name}" if (c_dist and name not in c_dist) else (name or clean_kw),
                                 "full_address": resolved_info.get("full_address", raw_addr),
-                                "latitude": lat,
-                                "longitude": lon,
+                                "latitude": db.format_coord6(lat),
+                                "longitude": db.format_coord6(lon),
                                 "source": "tianditu"
                             }
 
@@ -462,8 +462,8 @@ class TiandituClient:
                             "poi": name,
                             "short_name": short_title,
                             "full_address": raw_addr or f"{prov}{city}{dist}{name}",
-                            "latitude": lat,
-                            "longitude": lon,
+                            "latitude": db.format_coord6(lat),
+                            "longitude": db.format_coord6(lon),
                             "source": "tianditu"
                         }
 

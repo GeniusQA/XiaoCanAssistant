@@ -156,6 +156,8 @@ def generate_headers(
     platform: str = "app",
     user_agent: Optional[str] = None,
     profile_id: Optional[str] = None,
+    app_id: Optional[str] = None,
+    app_sr: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     生成小蚕霸王餐网关调用所需的全部请求头 (英雄联盟特征头规范)
@@ -233,6 +235,10 @@ def generate_headers(
             headers["User-Agent"] = env_ua
         else:
             headers["User-Agent"] = str(prof["user_agent"])
+
+    if app_id is not None:
+        headers["appid"] = str(app_id)
+        headers["X-App-Sr"] = str(app_sr if app_sr is not None else app_id)
 
     if user_id:
         headers["x-Vayne"] = str(user_id)

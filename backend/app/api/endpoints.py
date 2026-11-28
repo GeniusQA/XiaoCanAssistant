@@ -62,6 +62,7 @@ TASK_META = {
     # --- 日常打卡与元宝任务 (daily) ---
     "yb_task": {"id": "yb_task", "label": "轻松赚元宝", "tip": "元宝乐园每日签到、加入社群、领券加赠，一键聚拢成熟元宝", "category": "daily", "default_time": "08:05"},
     "vip_expand": {"id": "vip_expand", "label": "会员每日签到", "tip": "会员每日打卡 + VIP专属签到抽奖 + 里程碑核验 + 专属成长礼包", "category": "daily", "vip": "VIP2+ / SVIP", "default_time": "08:30"},
+    "vip_rights_claim": {"id": "vip_rights_claim", "label": "会员权益自动领取", "tip": "自动领取小蚕自营权益—订单免审、超前抢单、订单延时、修改订单号、通用大牌券", "category": "daily", "vip": "VIP1+ / SVIP", "default_time": "08:40"},
     "collect_points": {"id": "collect_points", "label": "收取未收元宝", "tip": "晚间睡前自动收取成熟气泡元宝与已完成任务奖励，防过期", "category": "daily", "default_time": "23:59"},
     "group_lottery": {"id": "group_lottery", "label": "免费开红包与抽奖", "tip": "自动领取全部7类免费开红包机会并开启，支持阶梯进度与防风控间隔", "category": "daily", "default_time": "07:40"},
     "meituan_coupon": {"id": "meituan_coupon", "label": "美团神券每日一键领", "tip": "全量美团官方账号轮流领取大额神券（外卖/美食/闪购/生活服务），支持401自动自愈与24小时滚动窗口冷却防刷", "category": "daily", "default_time": "08:15"},
@@ -241,7 +242,7 @@ async def create_or_update_account(data: Dict[str, Any] = Body(...)):
     configs = db.get_task_configs(key)
     if not configs:
         for tid, meta in TASK_META.items():
-            default_on = tid in ("yb_sign", "yb_task", "vip_expand", "brand_flash")
+            default_on = tid in ("yb_sign", "yb_task", "vip_expand", "vip_rights_claim", "brand_flash")
             db.save_task_config(key, tid, enabled=default_on, cron_time=meta["default_time"])
 
     scheduler.reload_schedules()
@@ -870,7 +871,7 @@ async def _enrich_and_save_account(cred: Dict[str, Any], rpc_client: Optional[Xi
     configs = db.get_task_configs(key)
     if not configs:
         for tid, meta in TASK_META.items():
-            default_on = tid in ("yb_task", "vip_expand", "brand_flash")
+            default_on = tid in ("yb_task", "vip_expand", "vip_rights_claim", "brand_flash")
             db.save_task_config(key, tid, enabled=default_on, cron_time=meta["default_time"])
     scheduler.reload_schedules()
     return saved
@@ -2653,6 +2654,28 @@ ACTIVITY_QUICK_FILTERS = {
 CONDITION_QUICK_FILTERS = {
     "no_review": 3,
 }
+HIGH_REBATE_QUICK_FILTER = 4
+CAN_GRAB_QUICK_FILTER = 1
+BRAND_MERCHANT_QUICK_FILTER = 5
+DISTANCE_FILTER_KM = {1: 1, 5: 2, 2: 3, 3: 5, 4: 10}
+
+
+def _parse_bool_query(value: Any) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_high_rebate_store(store: Dict[str, Any]) -> bool:
+    """非 Feed 数据源的高返利兜底判定，与抢单监控口径保持一致。"""
+    rebate_rate = float(store.get("rebate_rate") or 0.0)
+    rebate_price = float(store.get("rebate_price") or 0.0)
+    order_money = float(store.get("order_money") or 0.0)
+    if str(store.get("rebate_type") or "") == "fixed":
+        rebate_gap = float(store.get("rebate_gap") or 0.0)
+        if rebate_gap <= 5:
+            return True
+    if rebate_rate >= 75:
+        return True
+    return bool(order_money > 0 and rebate_price / order_money >= 0.75)
 
 
 def _activity_quick_filter(activity_requirement: Optional[str]) -> List[int]:
@@ -2726,12 +2749,12 @@ async def get_store_categories(account_key: Optional[str] = Query(None)):
     account_key = _safe_val(account_key, None)
     accounts = db.get_all_accounts()
     if not accounts and not account_key:
-        return {"ok": True, "categories": [], "message": "当前未登录或未托管小蚕账号"}
+        return {"ok": True, "categories": [], "category_options": [], "message": "当前未登录或未托管小蚕账号"}
     target_acc = db.get_account_by_key(account_key) if account_key else None
     if not target_acc:
         target_acc = accounts[0] if accounts else None
     if not target_acc or not target_acc.get("token"):
-        return {"ok": True, "categories": [], "message": "当前账号凭据已失效或已退出"}
+        return {"ok": True, "categories": [], "category_options": [], "message": "当前账号凭据已失效或已退出"}
 
     try:
         res = await client.invoke_rpc(
@@ -2751,12 +2774,22 @@ async def get_store_categories(account_key: Optional[str] = Query(None)):
             value = str(item.get("value") or "").strip()
             if not value or value == "全部":
                 continue
-            rows.append((int(item.get("sort") or 9999), value))
+            rows.append((int(item.get("sort") or 9999), {
+                "id": int(item.get("id") or 0),
+                "value": value,
+                "field": int(item.get("field") or 0),
+                "sort": int(item.get("sort") or 9999),
+            }))
         rows.sort(key=lambda item: item[0])
-        return {"ok": True, "categories": [value for _, value in rows]}
+        options = [option for _, option in rows]
+        return {
+            "ok": True,
+            "categories": [option["value"] for option in options],
+            "category_options": options,
+        }
     except Exception as e:
         logger.warning(f"获取官方商家分类失败: {e}")
-        return {"ok": False, "categories": [], "message": "获取官方商家分类失败"}
+        return {"ok": False, "categories": [], "category_options": [], "message": "获取官方商家分类失败"}
 
 
 @router.get("/store/distance-ranges")
@@ -2820,6 +2853,11 @@ async def get_stores(
     activity_requirement: Optional[str] = Query("all"),
     rebate_type: Optional[str] = Query("all"),
     sort_by: Optional[str] = Query("default"),
+    store_sub_categories: Optional[str] = Query(None),
+    distance_filter: Optional[int] = Query(None),
+    high_rebate_only: Optional[bool] = Query(False),
+    can_grab_only: Optional[bool] = Query(True),
+    brand_merchant_only: Optional[bool] = Query(False),
     offset: int = Query(0),
     limit: int = Query(50),
     page_pv_id: Optional[str] = Query(None)
@@ -2840,7 +2878,39 @@ async def get_stores(
     activity_requirement = _safe_val(activity_requirement, "all")
     activity_quick_filters = _activity_quick_filter(activity_requirement)
     condition_quick_filters = _condition_quick_filter(condition)
-    feed_quick_filters = list(dict.fromkeys(activity_quick_filters + condition_quick_filters))
+    high_rebate_only = _parse_bool_query(high_rebate_only)
+    can_grab_only = _parse_bool_query(can_grab_only)
+    brand_merchant_only = _parse_bool_query(brand_merchant_only)
+    selected_category_ids = sorted({
+        int(part)
+        for part in re.split(r"[,，;；]", str(_safe_val(store_sub_categories, "") or ""))
+        if part.strip().isdigit()
+    })
+    distance_filter = int(_safe_val(distance_filter, 0) or 0)
+
+    # 对齐官方 App 两套 Feed 口径：
+    # 默认附近列表 scene=2 / meal_period=4 / quick_filters=[1]（可抢）；
+    # 勾选大牌商家、高返利、分类、距离或活动/评价条件后切换 scene=1 / meal_period=0。
+    use_filter_scene = bool(
+        high_rebate_only
+        or brand_merchant_only
+        or selected_category_ids
+        or distance_filter
+        or activity_quick_filters
+        or condition_quick_filters
+    )
+    extra_quick_filters: List[int] = []
+    if high_rebate_only:
+        extra_quick_filters.append(HIGH_REBATE_QUICK_FILTER)
+    if brand_merchant_only:
+        extra_quick_filters.append(BRAND_MERCHANT_QUICK_FILTER)
+    if not use_filter_scene and can_grab_only:
+        extra_quick_filters.append(CAN_GRAB_QUICK_FILTER)
+    feed_quick_filters = list(dict.fromkeys(
+        activity_quick_filters + condition_quick_filters + extra_quick_filters
+    ))
+    feed_scene = 1 if use_filter_scene else 2
+    feed_meal_period = 0 if use_filter_scene else 4
     rebate_type = _safe_val(rebate_type, "all")
     sort_by = _safe_val(sort_by, "default")
     offset = int(_safe_val(offset, 0))
@@ -2981,7 +3051,11 @@ async def get_stores(
                     token=token,
                     silk_id=silk_id,
                     user_id=user_id,
+                    scene=feed_scene,
+                    meal_period=feed_meal_period,
                     quick_filters=feed_quick_filters,
+                    store_sub_categories=selected_category_ids or None,
+                    distance_filter=distance_filter or None,
                 )
                 for foff in feed_offsets
             ]
@@ -3138,8 +3212,11 @@ async def get_stores(
                         silk_id=silk_id,
                         user_id=user_id,
                         sort=official_sort,
-                        meal_period=0,
+                        scene=feed_scene,
+                        meal_period=feed_meal_period,
                         quick_filters=feed_quick_filters,
+                        store_sub_categories=selected_category_ids or None,
+                        distance_filter=distance_filter or None,
                     )
                     for off in offsets
                 ]
@@ -3192,7 +3269,11 @@ async def get_stores(
                     silk_id=silk_id,
                     user_id=user_id,
                     sort=official_sort,
+                    scene=feed_scene,
+                    meal_period=feed_meal_period,
                     quick_filters=feed_quick_filters,
+                    store_sub_categories=selected_category_ids or None,
+                    distance_filter=distance_filter or None,
                 ) if offset == 0 else None
 
                 for b_idx in range(shangjin_batches):
@@ -3270,7 +3351,11 @@ async def get_stores(
                         silk_id=silk_id,
                         user_id=user_id,
                         sort=official_sort,
+                        scene=feed_scene,
+                        meal_period=feed_meal_period,
                         quick_filters=feed_quick_filters,
+                        store_sub_categories=selected_category_ids or None,
+                        distance_filter=distance_filter or None,
                     )
                     for off in offsets
                 ]
@@ -3381,7 +3466,11 @@ async def get_stores(
                         silk_id=silk_id,
                         user_id=user_id,
                         sort=official_sort,
+                        scene=feed_scene,
+                        meal_period=feed_meal_period,
                         quick_filters=feed_quick_filters,
+                        store_sub_categories=selected_category_ids or None,
+                        distance_filter=distance_filter or None,
                     )
                     for off in offsets
                 ]
@@ -3680,6 +3769,31 @@ async def get_stores(
             return list(dict.fromkeys(str(t) for t in tags))
         filtered_stores = [s for s in filtered_stores if activity_requirement in _store_activity_tags(s)]
 
+    # 首页快捷筛选兜底：Feed 已由官方 quick_filters/distance_filter/store_sub_categories 过滤，
+    # 这里保证赏金、搜索等非 Feed 数据源不会绕过用户勾选的条件。
+    if selected_category_ids:
+        filtered_stores = [
+            s for s in filtered_stores
+            if int(s.get("store_category_sub_type") or 0) in selected_category_ids
+        ]
+    if distance_filter in DISTANCE_FILTER_KM:
+        max_distance_m = DISTANCE_FILTER_KM[distance_filter] * 1000
+        filtered_stores = [
+            s for s in filtered_stores
+            if 0 < int(s.get("distance") or 0) <= max_distance_m
+        ]
+    if high_rebate_only:
+        filtered_stores = [s for s in filtered_stores if _is_high_rebate_store(s)]
+    # 默认仅展示可抢商家是列表兜底口径：无论官方是否走筛选场景，
+    # 都要剔除名额已满的商家，避免高返利/大牌等筛选场景下出现“名额已满”。
+    if can_grab_only:
+        filtered_stores = [s for s in filtered_stores if int(s.get("left_number") or 0) > 0]
+    if brand_merchant_only:
+        filtered_stores = [
+            s for s in filtered_stores
+            if s.get("is_brand_store") or s.get("need_brand_coupon")
+        ]
+
     # 排序处理 (注意：未知或全国通用距离按 9999999 排到最后，避免 0m 霸榜置顶)
     if sort_by in ("rebate", "rate", "left"):
         for store in filtered_stores:
@@ -3702,11 +3816,150 @@ async def get_stores(
         "raw_total": len(stores),
         "source": source,
         "quick_filters": feed_quick_filters,
+        "feed_scene": feed_scene,
+        "feed_meal_period": feed_meal_period,
+        "store_sub_categories": selected_category_ids,
+        "distance_filter": distance_filter or None,
+        "high_rebate_only": high_rebate_only,
+        "can_grab_only": can_grab_only,
+        "brand_merchant_only": brand_merchant_only,
         "has_more": has_more,
         "next_offset": next_offset,
         "page_pv_id": current_pv_id,
         "keyword": keyword.strip() if keyword else ""
     }
+
+
+@router.get("/brand-coupon/activities")
+async def get_brand_coupon_activities(
+    account_key: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(""),
+    page: int = Query(1),
+    page_size: int = Query(20)
+):
+    """获取通用大牌券可用的品牌活动列表 (TopBrandService.CouponActivities)。"""
+    account_key = _safe_val(account_key, None)
+    keyword = _safe_val(keyword, "")
+    page = int(_safe_val(page, 1) or 1)
+    page_size = int(_safe_val(page_size, 20) or 20)
+    accounts = db.get_all_accounts()
+    if not accounts and not account_key:
+        return {"ok": True, "activities": [], "message": "当前未登录或未托管小蚕账号"}
+    target_acc = db.get_account_by_key(account_key) if account_key else None
+    if not target_acc:
+        target_acc = accounts[0] if accounts else None
+    if not target_acc or not target_acc.get("token"):
+        return {"ok": True, "activities": [], "message": "当前账号凭据已失效或已退出"}
+
+    try:
+        res = await client.get_coupon_activities(
+            token=target_acc["token"],
+            silk_id=target_acc.get("silk_id"),
+            user_id=target_acc.get("user_id"),
+            city_code=int(target_acc.get("city_code") or 0),
+            latitude=target_acc.get("latitude"),
+            longitude=target_acc.get("longitude"),
+            keyword=keyword,
+            page=page,
+            page_size=page_size,
+        )
+        status = res.get("status") or {} if isinstance(res, dict) else {}
+        code = int(status.get("code") or 0)
+        if code != 0:
+            return {"ok": False, "activities": [], "message": status.get("msg") or status.get("message") or "获取大牌券商家列表失败"}
+        activities = res.get("coupon_activities") or [] if isinstance(res, dict) else []
+        return {
+            "ok": True,
+            "activities": activities,
+            "page": page,
+            "page_size": page_size,
+            "has_more": len(activities) >= page_size,
+            "keyword": keyword,
+        }
+    except Exception as e:
+        logger.warning(f"获取通用大牌券商家列表失败: {e}")
+        return {"ok": False, "activities": [], "message": f"获取大牌券商家列表失败: {e}"}
+
+
+@router.post("/brand-coupon/sign")
+async def sign_brand_coupon_activity(data: Dict[str, Any] = Body(...)):
+    """消耗账号背包里的通用大牌券，报名大牌活动并生成推广订单。"""
+    account_key = _safe_val(data.get("account_key"), None)
+    activity_id = int(_safe_val(data.get("activity_id"), 0) or 0)
+    if not activity_id:
+        return {"ok": False, "message": "缺少活动 ID"}
+
+    accounts = db.get_all_accounts()
+    target_acc = db.get_account_by_key(account_key) if account_key else None
+    if not target_acc:
+        target_acc = accounts[0] if accounts else None
+    if not target_acc or not target_acc.get("token"):
+        return {"ok": False, "message": "当前账号凭据已失效或已退出"}
+
+    token = target_acc["token"]
+    silk_id = target_acc.get("silk_id")
+    user_id = target_acc.get("user_id")
+    city_code = int(target_acc.get("city_code") or 0)
+    latitude = target_acc.get("latitude")
+    longitude = target_acc.get("longitude")
+
+    def _status_message(res: Dict[str, Any], fallback: str) -> str:
+        status = res.get("status") or {} if isinstance(res, dict) else {}
+        return str(status.get("msg") or status.get("message") or fallback)
+
+    try:
+        detail = await client.get_coupon_activity_detail(
+            activity_id=activity_id,
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            city_code=city_code,
+            latitude=latitude,
+            longitude=longitude,
+        )
+        if int(((detail.get("status") or {}).get("code")) or 0) != 0:
+            return {"ok": False, "message": _status_message(detail, "获取大牌券活动详情失败")}
+        info = detail.get("activity_info") or {}
+        brand_order = info.get("brand_order") or {}
+        existing_order_id = int(brand_order.get("promotion_order_id") or 0)
+        if existing_order_id > 0:
+            return {"ok": True, "already_signed": True, "promotion_order_id": existing_order_id, "message": "该品牌活动已报名"}
+
+        cards_res = await client.get_user_card_list(
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            city_code=city_code,
+            status=0,
+            offset=0,
+            number=100,
+            card_types=[13, 3],
+        )
+        cards = cards_res.get("list") or [] if isinstance(cards_res, dict) else []
+        brand_card = next(
+            (c for c in cards if isinstance(c, dict) and int((c.get("card") or {}).get("card_type") or 0) == 13),
+            None,
+        )
+        if not brand_card:
+            return {"ok": False, "message": "账号内暂无可用的通用大牌券，请先在会员权益中领取"}
+
+        sign_res = await client.sign_coupon_activity(
+            activity_id=activity_id,
+            brand_coupon_id=int(brand_card.get("id") or 0),
+            token=token,
+            silk_id=silk_id,
+            user_id=user_id,
+            city_code=city_code,
+            latitude=latitude,
+            longitude=longitude,
+        )
+        if int(((sign_res.get("status") or {}).get("code")) or 0) != 0:
+            return {"ok": False, "message": _status_message(sign_res, "大牌券报名失败")}
+        order_id = int(sign_res.get("promotion_order_id") or 0)
+        return {"ok": True, "promotion_order_id": order_id, "message": "大牌券报名成功"}
+    except Exception as e:
+        logger.warning(f"通用大牌券报名失败: {e}")
+        return {"ok": False, "message": f"大牌券报名失败: {e}"}
 
 
 def _extract_all_promos_from_raw(
@@ -3890,14 +4143,20 @@ async def get_dual_rebate_cache(account_key: Optional[str] = Query(None)):
             "message": "暂无同店双返缓存数据，可点击「开始扫描」执行一次扫描",
         }
     stores = cached.get("stores") or []
+    fixed_count = int(cached.get("fixed_scanned_stores") or 0)
+    percent_count = int(cached.get("percent_scanned_stores") or 0)
+    total_count = int(cached.get("total_scanned_stores") or 0)
+    cached_overlap = cached.get("overlap_count")
+    overlap_count = int(cached_overlap) if cached_overlap is not None else max(0, fixed_count + percent_count - total_count)
     return {
         "ok": True,
         "has_cache": True,
         "stores": stores,
         "total_scanned_promotions": cached.get("total_scanned_promotions", 0),
-        "total_scanned_stores": cached.get("total_scanned_stores", 0),
-        "fixed_scanned_stores": cached.get("fixed_scanned_stores", 0),
-        "percent_scanned_stores": cached.get("percent_scanned_stores", 0),
+        "total_scanned_stores": total_count,
+        "fixed_scanned_stores": fixed_count,
+        "percent_scanned_stores": percent_count,
+        "overlap_count": overlap_count,
         "dual_rebate_count": cached.get("dual_rebate_count", len(stores)),
         "keyword": cached.get("keyword", ""),
         "updated_at": cached.get("updated_at", ""),
@@ -4536,7 +4795,7 @@ async def scan_dual_rebate_stores(
         acc_label = str(target_acc.get("nick_name") or "")
         log_lines = [
             f"[同店双返扫描] {'触发WAF风控提前终止' if waf_aborted else '扫描完成'} (耗时 {elapsed_sec}s)",
-            f"账号: {acc_label} ({resolved_acc_key}) | 城市: {city_code} | 坐标: {lon},{lat}" + (f" | 关键词: {keyword.strip()}" if keyword and keyword.strip() else ""),
+            f"账号: {acc_label} ({resolved_acc_key}) | 城市: {city_code} | 坐标: {lon:.6f},{lat:.6f}" + (f" | 关键词: {keyword.strip()}" if keyword and keyword.strip() else ""),
             f"目标范围: 实付满返 {fixed_limit} 家 / 按比例返 {percent_limit} 家 | 延迟区间: {d_min}~{d_max}s",
             "",
             f"[实付满返 Feed 统计] 请求 {feed_pages_fetched} 页 (原始 {feed_raw_items_count} 条) -> 去重美团商户 {len(feed_store_keys)} 家",
@@ -4577,6 +4836,7 @@ async def scan_dual_rebate_stores(
         "total_scanned_stores": len(seen_store_keys),
         "fixed_scanned_stores": len(feed_store_keys),
         "percent_scanned_stores": len(sj_store_keys),
+        "overlap_count": overlap_count,
         "max_fixed_stores": fixed_limit,
         "max_percent_stores": percent_limit,
         "max_feed_distance": max_feed_dist,
@@ -4588,7 +4848,7 @@ async def scan_dual_rebate_stores(
         "fixed_promo_count": len([p for p in all_raw_promotions if p.get("rebate_type") == "fixed"]),
         "max_stores": max_stores,
         "stores": dual_stores,
-        "message": f"扫描完成：满返 {len(feed_store_keys)} 家 / 比例返 {len(sj_store_keys)} 家（合并 {len(seen_store_keys)} 家），筛出 {total_found_count} 家同店双福利/多活动店铺"
+        "message": f"扫描完成：满返 {len(feed_store_keys)} 家 / 比例返 {len(sj_store_keys)} 家（两池重叠 {overlap_count} 家，去重合并 {len(seen_store_keys)} 家），筛出 {total_found_count} 家同店双福利/多活动店铺"
     }
 
     # 缓存本次扫描结果，供「活动抢单-同店双返」列表直接复用，避免重复手动扫描
@@ -4601,6 +4861,7 @@ async def scan_dual_rebate_stores(
                 "total_scanned_stores": scan_result["total_scanned_stores"],
                 "fixed_scanned_stores": scan_result["fixed_scanned_stores"],
                 "percent_scanned_stores": scan_result["percent_scanned_stores"],
+                "overlap_count": overlap_count,
                 "max_fixed_stores": fixed_limit,
                 "max_percent_stores": percent_limit,
                 "dual_rebate_count": total_found_count,
@@ -5194,7 +5455,7 @@ async def create_name_monitor(data: Dict[str, Any] = Body(...)):
     job_id = f"job_namemon_{time_service.now_int()}_{uuid.uuid4().hex[:6]}"
     nick = account.get("nick_name") or ""
     loc_label = f"{account.get('city_name', '')} {account.get('address_name', '')}".strip()
-    loc_coords = f"({account.get('longitude', '')}, {account.get('latitude', '')})"
+    loc_coords = f"({db.format_coord6(account.get('longitude'))}, {db.format_coord6(account.get('latitude'))})"
 
     plat_desc = {
         "all": "全平台 (美团/饿了么/京东)",
@@ -7529,8 +7790,8 @@ async def search_location(
                 "town_name": top.get("town_name", ""),
                 "short_name": top.get("short_name", clean_kw),
                 "full_address": top.get("full_address", ""),
-                "latitude": top.get("latitude", ""),
-                "longitude": top.get("longitude", ""),
+                "latitude": db.format_coord6(top.get("latitude", "")),
+                "longitude": db.format_coord6(top.get("longitude", "")),
                 "source": top.get("source", "tianditu"),
                 "source_name": top.get("source_name", map_service.SOURCE_NAMES.get(str(top.get("source", "")).lower(), ""))
             }
@@ -7546,8 +7807,8 @@ async def search_location(
                 "poi": clean_kw,
                 "short_name": f"{cname} · {clean_kw}",
                 "full_address": f"{cname}市 {clean_kw}",
-                "latitude": clat,
-                "longitude": clng,
+                "latitude": db.format_coord6(clat),
+                "longitude": db.format_coord6(clng),
                 "source": "preset",
                 "source_name": map_service.SOURCE_NAMES["preset"]
             }
@@ -7560,8 +7821,8 @@ async def search_location(
                 "district_name": "",
                 "short_name": f"{cname} · {clean_kw}",
                 "full_address": f"{cname}市 {clean_kw}",
-                "latitude": clat,
-                "longitude": clng,
+                "latitude": db.format_coord6(clat),
+                "longitude": db.format_coord6(clng),
                 "source": "preset",
                 "source_name": map_service.SOURCE_NAMES["preset"]
             }
@@ -7686,8 +7947,8 @@ async def get_ip_location():
                 "city_code": code_int,
                 "city_name": c_tuple[0],
                 "address_name": addr_text,
-                "latitude": c_tuple[2],
-                "longitude": c_tuple[1],
+                "latitude": db.format_coord6(c_tuple[2]),
+                "longitude": db.format_coord6(c_tuple[1]),
                 "source": "ip",
                 "source_name": map_service.SOURCE_NAMES["ip"],
                 "is_ip": True
